@@ -1,0 +1,203 @@
+# Alpha Talk — Redis 계약 (`:contracts`) v0.1
+
+게이트웨이 · 워커(price/ingest/llm) · 메인서버가 공유하는 Redis 키/채널/스트림 규약. 이 문서가 세 서비스 간 단일 진실의 원천이다.
+ 
+---
+
+## 0. 가장 먼저 — 세 가지 메커니즘 구분 (혼동 방지)
+
+Redis를 세 가지 용도로 쓰며, **이름이 비슷해도 메커니즘이 다르다.** 특히 "Streams"와 채널명 "stream"이 헷갈리므로 여기서 못 박는다.
+
+| 메커니즘 | 무엇 | 키/채널 패턴 | 보장 | 누가 봄 |
+|---|---|---|---|---|
+| **Pub/Sub** | 실시간 1→N 브로드캐스트 | `quote:{code}` · `stream:{code}` · `post:{code}` · `watchlist:updated` | 구독한 **전원이 사본** · 휘발 · ACK 없음 · best-effort | 게이트웨이가 구독 |
+| **Redis Streams** | 신뢰성 **작업 큐** | `queue:ingest` | **경쟁 소비**(한 건=한 워커) · ACK · 재시도(PEL) | 워커끼리만 |
+| **자료구조** | 상태/캐시 | `price:{code}` · `presence:{userId}` · `cursor:*` · `seen:ingest:*` | 영속(메모리) · TTL | 워커/메인/게이트웨이 |
+
+> ⚠️ **`stream:{code}`는 Pub/Sub 채널이다 — Redis Stream(데이터 구조)이 아니다.**
+> 이 시스템에서 진짜 Redis Stream은 **`queue:ingest` 하나뿐**이다.
+> *(이름 충돌이 계속 헷갈리면 `stream:{code}` → `feed:{code}` 리네임을 권장. 이 문서는 일단 `stream`을 유지한다.)*
+
+**핵심 경계**: "**처리되어야 할 일(work)**"은 Streams로 안전 분배하고, "**이미 처리된 결과의 실시간 통보**"는 Pub/Sub으로 브로드캐스트한다.
+ 
+---
+
+## 1. Pub/Sub 채널 — 실시간 (게이트웨이 업스트림)
+
+게이트웨이가 구독해 클라로 fan-out하는 채널. 모두 **best-effort 브로드캐스트**이고, 영속이 필요한 것은 **발행 전에 이미 DB에 저장**되어 있다(persist-then-publish). 놓치면 클라가 재접속 후 REST로 복구한다.
+
+### 1.1 채널 목록
+
+| 채널 | 발행자 | 구독자 | 범위 | 영속화 | 비고 |
+|---|---|---|---|---|---|
+| `quote:{code}` | price-worker | 게이트웨이 | 종목 | ✗ (휘발) | 100~250ms conflation된 최신가 |
+| `stream:{code}` | llm-worker | 게이트웨이 | 종목 | ✓ (발행 전 저장) | 소식(뉴스/리포트/AI) · `eventId` ULID |
+| `post:{code}` | 메인서버 | 게이트웨이 | 종목 | ✓ (발행 전 저장) | 글/댓글 · `eventId` ULID |
+| `watchlist:updated` | 메인서버 | **모든** 게이트웨이 | 전역(단일 채널) | — | 관심목록 변경 통보 → 게이트웨이가 세션 구독 조정 |
+| `trade:{code}` *(선택)* | price-worker | 게이트웨이 | 종목 | ✗ | 체결 · 보는 방만 |
+| `depth:{code}` *(선택)* | price-worker | 게이트웨이 | 종목 | ✗ | 호가 · 보는 방만 |
+
+- `{code}` = 종목코드(예: `005930`). **유저로 키하지 않는다** — 채널 수는 종목 수(~2,600)로 고정되고 유저 수와 무관하다.
+- 같은 종목을 N명이 봐도 게이트웨이는 채널을 **한 번만 구독**하고 N명에게 fan-out한다(중복 제거).
+- `watchlist:updated`만 **단일 전역 채널 + broadcast-and-filter**다(유저별 채널을 만들면 채널이 폭증하므로). 발행 빈도가 낮아 전원 수신·필터로 충분하다.
+### 1.2 메시지 스키마 (Pub/Sub payload)
+
+게이트웨이가 받아서 거의 그대로 클라로 relay하는 공통 봉투. (클라 측 스키마는 WS API 명세 §4와 동일)
+
+```json
+{ "type": "quote|stream|post|trade|depth", "code": "005930", "eventId": "01J...", "ts": 1719600000000, "data": { } }
+```
+
+- `eventId`: ULID. **stream·post은 필수**(순서·중복제거). quote/trade/depth는 선택(스냅샷).
+- 타입별 `data`는 WS API 명세 §4.2~4.5와 동일.
+  `watchlist:updated` payload (예외 — 봉투 아님):
+```json
+{ "userId": 123, "added": ["005930"], "removed": ["000660"], "ts": 1719600000000 }
+```
+ 
+---
+
+## 2. Redis Streams — 작업 큐 `queue:ingest` (워커 간)
+
+**소식(뉴스/리포트) 수집·LLM 가공 파이프라인의 입력 큐.** 처리가 실패할 수 있고(외부 API·LLM 타임아웃), 재시도가 필요하며, 워커를 여러 대로 확장(경쟁 소비)해야 하므로 Pub/Sub이 아니라 Streams를 쓴다.
+
+| 항목 | 값 |
+|---|---|
+| 키 | `queue:ingest` |
+| 적재 | `XADD` (생산자: **ingest-worker**) |
+| 소비 | `XREADGROUP` (소비자 그룹 **`g:llm`**, 멤버: **llm-worker** ×N) |
+| 완료 | `XACK queue:ingest g:llm <id>` |
+| 장애 회수 | `XAUTOCLAIM` (idle 임계 초과한 PEL 엔트리를 다른 워커가 회수) |
+| 트림 | `XADD ... MAXLEN ~ N` 또는 주기적 `XTRIM` (이미 처리된 건은 DB에 있으므로 큐는 유한 보관) |
+
+### 2.1 큐 엔트리 스키마 (ingest-worker가 XADD)
+
+Streams 필드는 문자열이다. 한 엔트리 = "가공해야 할 원본 소식 1건".
+
+| 필드 | 예 | 설명 |
+|---|---|---|
+| `source` | `"naver"` `"hankyung"` `"dart"` | 출처 |
+| `sourceId` | `"a1b2c3"` | 출처 고유 ID — **중복 제거 키** |
+| `type` | `"news"` `"report"` `"disclosure"` | 원본 종류 |
+| `codes` | `"005930,000660"` | 영향 종목(콤마구분, 다중 가능) |
+| `title` | `"..."` | 원문 제목 |
+| `url` | `"https://..."` | 원문 링크 |
+| `body` | `"..."` | 원문 본문/발췌(선택) |
+| `fetchedAt` | `1719500000000` | 수집 시각(epoch ms) |
+
+### 2.2 llm-worker 처리 순서 (★ persist → publish → ack)
+
+소비자가 한 엔트리를 처리하는 순서는 안전성의 핵심이다.
+
+```
+1. XREADGROUP 으로 엔트리 1건 수신 (g:llm — 한 건은 한 워커만)
+2. 멱등 체크: sourceId 기준 (seen:ingest:{sourceId} 또는 upsert로 흡수)
+3. LLM 호출: 요약(summary) + 분류(category) → StreamEvent 생성 (eventId = ULID)
+4. ① Postgres 저장        (persist — 진실의 원천)
+5. ② PUBLISH stream:{code} (영향 종목 each — 실시간 통보, 실패해도 REST 복구)
+6. ③ XACK queue:ingest g:llm <id>   (저장+발행 성공 후에만 완료 확정)
+```
+
+- **순서 불변식**: 저장(4) → 발행(5) → ACK(6). 4~5 사이/5~6 사이에서 워커가 죽으면 **XACK가 안 됐으니 엔트리는 PEL에 남아 재처리**된다 → 유실 없음.
+- 재처리되므로 **멱등 필수**: `sourceId`로 upsert(같은 소식 두 번 처리해도 StreamEvent 중복 생성 안 됨).
+- `codes`가 다중이면 StreamEvent를 종목별로 저장하고 `stream:{code}`를 **각 종목에 발행**(한 엔트리 → 여러 채널 fan-out).
+- **순서 의미**: 큐 처리는 워커 간 동시 진행이라 순서 비결정적이다. 방 안에서의 최종 순서는 **처리 시점에 부여한 `eventId`(ULID) 오름차순**으로 잡는다(큐 순서가 아님).
+> `post`(글/댓글)는 즉시 처리라 작업 큐가 없다 — 메인서버가 저장 후 바로 `post:{code}` 발행. `quote`(틱)도 큐 없이 price-worker가 바로 `quote:{code}` 발행. **Streams를 타는 건 소식(ingest→llm) 경로뿐이다.**
+ 
+---
+
+## 3. 자료구조 — 상태/캐시
+
+게이트웨이의 실시간 계약은 아니지만 서비스가 공유하는 상태.
+
+| 키 | 타입 | 용도 | 쓰기 | 읽기 | TTL |
+|---|---|---|---|---|---|
+| `price:{code}` | Hash/String | 현재가 last-value 캐시(스냅샷) | price-worker | 메인서버(REST 현재가) | 갱신/없음 |
+| `presence:{userId}` | Set(+멤버 TTL) | 접속 세션 집합(멀티디바이스) | 게이트웨이 | 게이트웨이 | 하트비트로 갱신 |
+| `cursor:{userId}:{code}` | String | 마지막 읽은 `eventId`(읽음 위치) | 메인서버(REST) | 메인서버 | 없음 |
+| `seen:ingest:{sourceId}` | String | 수집 중복 제거 마커 | ingest/llm-worker | ingest/llm-worker | 며칠 |
+
+- **현재가 스냅샷**은 REST(메인서버가 `price:{code}` 읽기)로 준다. 게이트웨이는 `quote:{code}` 라이브만 relay하고 캐시를 직접 읽지 않는다(얇은 엣지 유지).
+- 봉(OHLCV)은 KIS에서 받아 캐시하되, 권위 있는 가격 저장소로 쓰지 않는다(틱은 영속화 안 함).
+---
+
+## 4. 생산자 / 소비자 매트릭스
+
+| 키 · 채널 | price-worker | ingest-worker | llm-worker | 메인서버 | 게이트웨이 |
+|---|---|---|---|---|---|
+| `quote:{code}` (P/S) | **PUBLISH** | — | — | — | **SUBSCRIBE** |
+| `stream:{code}` (P/S) | — | — | **PUBLISH** | — | **SUBSCRIBE** |
+| `post:{code}` (P/S) | — | — | — | **PUBLISH** | **SUBSCRIBE** |
+| `watchlist:updated` (P/S) | — | — | — | **PUBLISH** | **SUBSCRIBE** |
+| `trade/depth:{code}` (P/S) | **PUBLISH** | — | — | — | **SUBSCRIBE** |
+| `queue:ingest` (Stream) | — | **XADD** | **XREADGROUP/XACK** (`g:llm`) | — | — |
+| `price:{code}` (자료구조) | **WRITE** | — | — | READ | — |
+| `presence:{userId}` (자료구조) | — | — | — | — | **WRITE/READ** |
+| `cursor:{userId}:{code}` | — | — | — | **WRITE/READ** | — |
+| `seen:ingest:{sourceId}` | — | WRITE | WRITE/READ | — | — |
+
+게이트웨이는 **Pub/Sub SUBSCRIBE만** 한다(+프레즌스). Streams·DB 쓰기는 만지지 않는다.
+ 
+---
+
+## 5. 전체 파이프라인 — 데이터 타입별 (Streams는 어디에?)
+
+```
+틱(quote) ─ 큐 없음:
+  KIS WS → price-worker → [자료구조] price:{code} 캐시 갱신
+                        → PUBLISH [P/S] quote:{code} → 게이트웨이 → /user/queue/quote
+ 
+소식(stream) ─ ★ 유일하게 Streams를 탐:
+  뉴스/리포트 → ingest-worker → XADD [STREAM] queue:ingest
+                                     │ XREADGROUP (g:llm)
+                                     ▼
+                                  llm-worker  ── LLM 요약·분류 → StreamEvent(ULID)
+                                     ├─ ① 저장 [DB]
+                                     ├─ ② PUBLISH [P/S] stream:{code} → 게이트웨이 → /user/queue/stream
+                                     └─ ③ XACK
+글(post) ─ 큐 없음:
+  클라 →(REST)→ 메인서버 ── ① 저장 [DB]
+                          └─ ② PUBLISH [P/S] post:{code} → 게이트웨이 → /topic/rooms/{code}/posts
+```
+
+- `[STREAM]`은 `queue:ingest` 한 곳뿐. `[P/S]`(`quote/stream/post:{code}`)는 전부 Pub/Sub.
+- 소식 경로에서 데이터는 **Streams(입력 큐)를 통과한 뒤 Pub/Sub(`stream:{code}`)으로 빠져나간다.** 앞은 작업 큐, 뒤는 브로드캐스트 채널 — 다른 메커니즘이다.
+---
+
+## 6. 멱등성 · 순서 · 복구 규약
+
+- **순서**: 방 안의 모든 이벤트(stream·post)는 **`eventId`(ULID) 오름차순**. 클라는 `eventId`로 정렬·중복제거. 틱(quote)은 순서 무의미(최신 스냅샷).
+- **멱등성**:
+    - 수집: `sourceId`로 중복 제거(같은 뉴스 재처리 흡수).
+    - 저장: StreamEvent/post는 자연키 upsert(재시도/중복 발행에도 1건).
+- **복구**: 끊긴 동안 놓친 stream·post는 **메인서버 REST로 `cursor`(마지막 eventId) 이후 조회**. WS는 재전송하지 않는다. **틱은 복구 안 함**(다음 틱이 대체).
+- **persist → publish → ack** 순서 불변식(§2.2): 저장이 진실, 발행은 best-effort 통보, ACK는 둘 성공 후. → 워커 장애 시 PEL 재처리로 무유실, 멱등으로 무중복.
+---
+
+## 7. 합의 필요 항목 (서비스 간)
+
+| 항목 | 게이트웨이 | 워커 | 메인서버 |
+|---|---|---|---|
+| 채널명 `quote/stream/post:{code}` | 구독 | quote=price, stream=llm 발행 | post 발행 |
+| `queue:ingest` 엔트리 스키마(§2.1) | — | ingest=생산, llm=소비 | — |
+| 봉투/`eventId`(ULID) 규약 | 파싱 | 생성 | 생성 |
+| `watchlist:updated` payload | 구독·세션조정 | — | 발행 |
+| `cursor` 의미(읽음 위치) | — | — | 쓰기/복구 |
+
+- 이 표의 모든 문자열·DTO는 Gradle `:contracts` 서브프로젝트에 상수/레코드로 박아 세 앱이 공유한다.
+---
+
+## 부록 — LLM 요약 트레이스 (시퀀스)
+
+```
+ingest-worker:  XADD queue:ingest  source=hankyung sourceId=a1b2 codes=005930 type=news title=... url=...
+llm-worker:     XREADGROUP GROUP g:llm c1 COUNT 1 STREAMS queue:ingest >
+                  → entry(a1b2)
+                  → seen:ingest:a1b2 없음 → 진행
+                  → LLM: summary="삼성전자 ... 요약" category="news"
+                  → StreamEvent{ eventId=01J..., code=005930, category=news, summary=..., ... }
+                  → ① INSERT ... ON CONFLICT(sourceId) DO NOTHING   (persist)
+                  → ② PUBLISH stream:005930  {type:stream,code:005930,eventId:01J...,data:{...}}
+                  → ③ XACK queue:ingest g:llm <id>
+게이트웨이:      (stream:005930 구독 중) → /user/queue/stream 으로 relay → 관심목록에 005930 가진 클라들
+```
