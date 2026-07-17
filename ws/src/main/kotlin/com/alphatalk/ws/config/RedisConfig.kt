@@ -19,7 +19,7 @@ class RedisConfig {
 
     @Bean
     fun redisListenerExecutor(): ThreadPoolTaskExecutor = ThreadPoolTaskExecutor().apply {
-        corePoolSize = 2
+        corePoolSize = 4
         maxPoolSize = 4
         setThreadNamePrefix("redis-listener-")
         initialize()
