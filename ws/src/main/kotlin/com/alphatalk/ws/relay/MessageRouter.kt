@@ -18,6 +18,7 @@ class MessageRouter(
     private val unroutable: Counter = meterRegistry.counter("ws.relay.unroutable")
     private val handlerErrors: Counter = meterRegistry.counter("ws.relay.handler.errors")
 
+    // RedisChannelSubscriber에서 container.addMessageListener(router, ChannelTopic(channel))를 통해 Listener을 연결했고
     override fun onMessage(message: Message, pattern: ByteArray?) {
         val channel = String(message.channel, Charsets.UTF_8)
         val parsed = Channels.parse(channel) ?: run {

@@ -1,8 +1,9 @@
-# Alpha Talk — `ws` 모듈 아키텍처 설계 v0.2
+# Alpha Talk — `ws` 모듈 아키텍처 설계 v0.3
 
 > 상위 문서: [구현 계획 v0.2](ws_module_plan.md) · [WS API 명세 v0.4](ws_api_spec.md) · [Redis 계약 v0.1](redis_contract.md)
 > 이 문서는 **코드 레벨 설계 기준**이다. "무엇을/왜"는 계획서가, "어떤 구조로"는 이 문서가 답한다.
 
+> **v0.2 → v0.3**: §11 설계 문답 추가 — 구현 리뷰에서 나온 결정 5건(관심목록 수요의 스위치, UNSUBSCRIBE 비대칭, 락 vs CHM, DemandRegistry 단일 클래스 유지, 제어/데이터 평면)을 근거와 함께 기록.
 > **v0.1 → v0.2**: SOLID를 컴포넌트 경계에 반영. 구체 클래스 직접 의존을 **포트(인터페이스)** 로 뒤집고(DIP), `DemandRegistry`/`MessageRouter`의 과다 책임을 분리(SRP)하고, 채널 종류별 relay를 전략으로 열었다(OCP). 클라 노출 프로토콜·불변 규칙은 그대로. 상세는 §3.
 
 ---
@@ -354,4 +355,48 @@ auth-jwt/src/main/kotlin/com/alphatalk/auth/
 | NFR-07 보안 | JWT는 CONNECT 헤더만, 쿼리파라미터 금지, 토큰 로그 금지, 시크릿 환경변수 |
 | NFR-10 관측성·유지보수 | 포트 경계로 각 컴포넌트를 인프라 없이 단위 테스트(§3.5), 장애 원인 격리 |
 | Redis 계약 §4 "게이트웨이는 SUBSCRIBE만" | DB·Streams·price 캐시 접근 코드 없음 (프레즌스 쓰기만 예외 — 계약 명시) |
-```
+
+---
+
+## 11. 설계 문답 — 구현 리뷰에서 확정한 결정들
+
+리뷰·면접에서 반복해서 나오는 질문과 확정 답. 코드만 봐서는 "왜"가 안 보이는 지점들이다.
+
+### 11.1 관심목록 Redis 구독을 왜 SUBSCRIBE가 아니라 CONNECT 시점에 시작하나
+
+**수요의 스위치는 그 수요의 진실이 있는 곳을 따른다.**
+
+| 수요 | 진실의 위치 | 스위치 |
+|---|---|---|
+| 관심목록 (quote/stream) | 서버 측 영속 상태 (core-api DB, REST로 편집) | **접속/종료 + `watchlist:updated`** |
+| 보는 방 (post/trade/depth) | 클라이언트 화면 상태 (서버는 알 수 없음) | **STOMP SUBSCRIBE/UNSUBSCRIBE** |
+
+- 관심목록은 서버가 스스로 조회할 수 있으므로 접속 시점에 해소한다(명세 §3.1 서버 해소 모델). 클라의 `/user/queue/*` SUBSCRIBE는 **전달 계층의 파이프 연결일 뿐, 수요 신호가 아니다.**
+- SUBSCRIBE 기준으로 바꾸면 큐 종류별 구독 상태를 code→유저 인덱스와 조합해 추적해야 해 refcount 모델이 복잡해지고, 정상 흐름(CONNECTED 직후 즉시 구독)에서 얻는 이득은 수 ms뿐이다.
+- 반대로 방 수요를 CONNECT 시점으로 통일할 수도 없다 — 서버는 유저가 지금 어느 방을 보는지 알 수 없고, trade/depth는 무거워 "보는 방만"이 명세 요구(기획안 §2.5-2)다.
+
+### 11.2 user-queue의 UNSUBSCRIBE는 왜 수요를 해제하지 않나 (비대칭)
+
+§11.1의 귀결이다. `/user/queue/quote` UNSUBSCRIBE는 **브로커 계층에서만 유효**(그 세션으로 전달 중단)하고, Redis 수요는 유지된다. 관심목록 수요를 끄는 정당한 경로는 ① 연결 종료 ② REST로 관심목록 제거(→ `watchlist:updated`)다. 방 토픽은 UNSUBSCRIBE가 두 계층 모두 해제한다. 이 비대칭은 `DemandRegistryTest`("방 구독이 아닌 subId의 UNSUBSCRIBE - 무해")로 고정되어 있다.
+
+- 알려진 한계: 큐를 구독하지 않(거나 해제하)고 접속만 유지하는 비정상 클라는 관심목록 크기만큼 헛 fan-out을 만든다. 유저당 관심목록 크기로 유계 — S7 부하 측정에서 유의미하면 "세션별 큐 구독 여부" 게이트를 추가한다.
+
+### 11.3 DemandRegistry는 왜 ConcurrentHashMap이 아니라 HashMap + 단일 락인가
+
+**동시성 도구는 보장 단위로 고른다 — 연산이면 CHM, 트랜잭션이면 락.**
+
+- CHM은 연산 하나의 원자성만 보장한다. 이 클래스의 변경은 맵 4개 + `ChannelSubscriber` 부수효과에 걸친 **트랜잭션**이다. CHM만 쓰면: ① check-then-act 레이스로 접속 없는 유저의 채널이 영원히 구독되는 **유령 구독**, ② 전이 판정 순서와 Redis 명령 실행 순서가 어긋나는 **구독 유실**(1→0의 unsubscribe가 0→1의 subscribe보다 늦게 실행)이 가능하다. 락은 판정과 부수효과 실행을 한 임계구역에 묶어 이를 차단한다.
+- **뜨거운 읽기만 락 프리로 한다**: `usersWatching`(틱마다 호출)은 CHM + 불변 Set 교체(copy-on-write)로 락 없이 읽는다. 나머지 읽기(`connectedUserIds` 등 — 프레즌스 10s 주기·메트릭 스크랩)는 분당 몇 회 수준이라 락을 잡는다. HashMap을 락 없이 읽으면 데이터 레이스이고, 락 잡은 읽기는 트랜잭션 중간 상태를 보지 않는 일관 스냅샷이라는 덤이 있다.
+- 쓰기 빈도(접속/구독 변경, 초당 수십 건)에서 단일 락 경합은 사실상 0. 락 세분화는 S7에서 병목으로 확인될 때만.
+
+### 11.4 DemandRegistry를 저장/조회/수정 클래스로 쪼개지 않는 이유
+
+- **전이 규칙은 상태의 불변식이다.** 상태(인덱스 4개)와 그 불변식(0↔1 전이 + 부수효과 순서)을 다른 클래스로 나누면, 저장 클래스가 내부 맵을 노출해야 하고 "인메모리 상태 단일 소유"(불변 규칙 6)가 컴파일 타임 보증에서 관례로 격하된다. 캡슐화를 지키는 방향으로 나누면 저장 클래스가 곧 지금의 DemandRegistry이고 나머지는 위임 껍데기다.
+- 역할 분리는 이미 **인터페이스 레벨**(ISP — `DemandQuery`/`DemandMutator`)에서 하고 있다. "인터페이스는 좁게, 구현은 불변식 단위로 응집"은 `JwtTokenProvider`(TokenIssuer+TokenVerifier)와 같은 패턴.
+- **DI 순환의 범인은 클래스 합침이 아니다.** 순환(`DemandRegistry → ChannelSubscriber → MessageRouter → 핸들러 → Demand*`)의 본질은 "수신이 구독을 바꾼다"는 `watchlist:updated`의 피드백 루프다. Query 구현을 분리해도 Mutator 경로(`WatchlistUpdateHandler → DemandMutator → ChannelSubscriber`)의 순환은 남는다. 절단점은 `RedisChannelSubscriber`의 `ObjectProvider<MessageRouter>`(생성 시점이 아닌 첫 사용 시점 해소) — 우회가 아니라 의도된 설계다.
+
+### 11.5 watchlist:updated를 왜 데이터 채널과 같은 라우터로 처리하나
+
+- 성격은 다르다 — quote/stream/post는 **데이터 평면**(클라에게 전달할 콘텐츠, 드랍 무해), `watchlist:updated`는 **제어 평면**(게이트웨이 자신의 수요 인덱스를 바꾸는 명령).
+- 그럼에도 현재는 단일 `MessageRouter` + 핸들러 맵으로 균일하게 처리한다(OCP 균일성, 코드 최소). 제어 리스너를 컨테이너에 직접 등록하는 분리안은 §11.4의 DI 순환도 근본 제거하지만, 채널 하나를 위해 등록 경로가 이원화되는 비용이 있어 보류.
+- **재검토 트리거**: 제어 채널이 하나 더 생기거나, trade/depth 활성화로 라우터 구조를 손댈 때 — 그 시점에는 제어/데이터 평면 분리가 이득이다.

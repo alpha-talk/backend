@@ -9,7 +9,7 @@ import java.util.concurrent.ConcurrentHashMap
 @Component
 class RedisChannelSubscriber(
     private val container: RedisMessageListenerContainer,
-    routerProvider: ObjectProvider<MessageRouter>,
+    routerProvider: ObjectProvider<MessageRouter>, // 순환 참조로 인해 Provider로 주입
 ) : ChannelSubscriber {
     private val router by lazy { routerProvider.getObject() }
     private val channels: MutableSet<String> = ConcurrentHashMap.newKeySet()
