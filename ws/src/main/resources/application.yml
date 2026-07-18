@@ -1,0 +1,36 @@
+spring:
+  application:
+    name: ws
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+  lifecycle:
+    timeout-per-shutdown-phase: 10s
+
+server:
+  port: 8081          # 모노레포 포트 배치 (기획안 §3.1)
+  shutdown: graceful  # 배포 시 진행 중 프레임 처리 후 종료
+
+alphatalk:
+  auth:
+    jwt:
+      # :auth-jwt 자동구성. HS256 32바이트 이상, core-api와 동일 값 주입.
+      # 운영은 반드시 환경변수(ALPHATALK_AUTH_JWT_SECRET) — 아래는 로컬 개발 전용 (NFR-07).
+      secret: ${ALPHATALK_AUTH_JWT_SECRET:insecure-local-dev-only-secret-0123456789abcdef}
+
+ws:
+  transport:
+    send-time-limit-ms: 10000
+    send-buffer-size-limit-bytes: 524288
+  presence:
+    ttl-seconds: 30
+    refresh-interval-seconds: 10
+  features:
+    trade-depth-enabled: false
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, metrics
