@@ -44,7 +44,7 @@ class SessionEventListener(
         val room = Destinations.parseRoomTopic(destination) ?: return
         val sessionId = accessor.sessionId ?: return
         val subscriptionId = accessor.subscriptionId ?: return
-        demand.subscribeRoom(sessionId, subscriptionId, room.kind, room.code)
+        demand.subscribeRoom(sessionId, subscriptionId, room.kind, room.code) // room 구독 말고는 connect 때 처리함
     }
 
     @EventListener
