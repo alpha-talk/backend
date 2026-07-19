@@ -5,6 +5,9 @@ spring:
     redis:
       host: ${REDIS_HOST:localhost}
       port: ${REDIS_PORT:6379}
+      # 커맨드 타임아웃 상한 — WatchlistResolver 계약(블로킹 ≤ 1s, 아키텍처 §4.5)을 설정으로 강제.
+      # Redis 장애 시 Lettuce 기본(60s)대로면 Tomcat 워커가 장시간 물려 풀 고갈로 번진다 (§11.6).
+      timeout: 1s
   lifecycle:
     timeout-per-shutdown-phase: 10s
 

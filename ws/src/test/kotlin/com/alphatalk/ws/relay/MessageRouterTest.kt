@@ -31,6 +31,7 @@ class MessageRouterTest {
     private class FakeDemand(private val watchers: Map<String, Set<Long>>) : DemandQuery {
         override fun usersWatching(code: String) = watchers[code] ?: emptySet()
         override fun isUserConnected(userId: Long) = watchers.values.any { userId in it }
+        override fun isSessionRegistered(sessionId: String) = false
         override fun connectedUserIds() = watchers.values.flatten().toSet()
         override fun connectedSessionCount() = 0
     }

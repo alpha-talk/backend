@@ -5,6 +5,7 @@ import com.alphatalk.contracts.ChannelKind
 interface DemandQuery {
     fun usersWatching(code: String): Set<Long>
     fun isUserConnected(userId: Long): Boolean
+    fun isSessionRegistered(sessionId: String): Boolean
     fun connectedUserIds(): Set<Long>
     fun connectedSessionCount(): Int
 }
