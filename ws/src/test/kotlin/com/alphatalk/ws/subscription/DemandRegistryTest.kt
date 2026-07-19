@@ -80,6 +80,17 @@ class DemandRegistryTest {
             registry.removeSession("ghost")
             assertThat(subscriber.unsubscribeCalls).isEmpty()
         }
+
+        @Test
+        fun `isSessionRegistered - 등록 후 true, 종료 후 false`() {
+            assertThat(registry.isSessionRegistered("s1")).isFalse()
+
+            registry.registerSession("s1", 1L, setOf("005930"))
+            assertThat(registry.isSessionRegistered("s1")).isTrue()
+
+            registry.removeSession("s1")
+            assertThat(registry.isSessionRegistered("s1")).isFalse()
+        }
     }
 
     @Nested

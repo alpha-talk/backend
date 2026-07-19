@@ -1,9 +1,11 @@
-# Alpha Talk — `ws` 모듈 아키텍처 설계 v0.3
+# Alpha Talk — `ws` 모듈 아키텍처 설계 v0.5
 
 > 상위 문서: [구현 계획 v0.2](ws_module_plan.md) · [WS API 명세 v0.4](ws_api_spec.md) · [Redis 계약 v0.1](redis_contract.md)
 > 이 문서는 **코드 레벨 설계 기준**이다. "무엇을/왜"는 계획서가, "어떤 구조로"는 이 문서가 답한다.
 
-> **v0.2 → v0.3**: §11 설계 문답 추가 — 구현 리뷰에서 나온 결정 5건(관심목록 수요의 스위치, UNSUBSCRIBE 비대칭, 락 vs CHM, DemandRegistry 단일 클래스 유지, 제어/데이터 평면)을 근거와 함께 기록.
+> **v0.4 → v0.5**: 관심목록 해소를 **세션의 첫 SUBSCRIBE**로 단순화(§11.6 최종) — 프리페치 인터셉터·스태시 삭제, 같은 스레드 배치를 더 적은 구조로 달성. 미구독 세션의 헛수요도 제거.
+> **v0.3 → v0.4**: §11.6 적용 — 관심목록 해소를 `WatchlistPrefetchInterceptor`(CONNECT preSend, WS 전송 스레드)로 이동해 outbound 풀 블로킹 제거. §5.4·§6.1을 실측 스레드 기준으로 갱신.
+> **v0.2 → v0.3**: §11 설계 문답 추가 — 구현 리뷰에서 나온 결정들(관심목록 수요의 스위치, UNSUBSCRIBE 비대칭, 락 vs CHM, DemandRegistry 단일 클래스 유지, 제어/데이터 평면, onConnected 블로킹[열림])을 근거와 함께 기록. §5.4 스레딩 모델을 실측 기준으로 정정(SessionConnectedEvent는 inbound가 아니라 **outbound 풀**에서 발화).
 > **v0.1 → v0.2**: SOLID를 컴포넌트 경계에 반영. 구체 클래스 직접 의존을 **포트(인터페이스)** 로 뒤집고(DIP), `DemandRegistry`/`MessageRouter`의 과다 책임을 분리(SRP)하고, 채널 종류별 relay를 전략으로 열었다(OCP). 클라 노출 프로토콜·불변 규칙은 그대로. 상세는 §3.
 
 ---
@@ -105,7 +107,7 @@
 
 SOLID는 이음새가 있는 곳의 도구다. 이음새가 없는데 인터페이스를 만들면 간접호출만 늘고 읽기 어려워진다. 다음은 **구체 클래스로 둔다**:
 
-- `SessionEventListener` — Spring 이벤트를 `DemandMutator` 호출로 번역하는 얇은 어댑터. 구현이 하나뿐이고 교체점이 없다.
+- `SessionEventListener` — Spring 이벤트를 포트 호출로 번역 + **세션 수명 정책**(첫 구독 시 해소·등록, 해소 실패 시 빈 목록) 소유. 이 정책을 `DemandRegistry`에 넣지 않는 이유: resolve는 I/O(≤1s)라 레지스트리 락 규율(락 안은 빠른 전이+ChannelSubscriber만)과 양립 불가하고, "어디서 가져오나"는 인덱스 불변식이 아니라 수명 정책이다(§11.4의 상태+불변식 응집 원칙). 구현이 하나뿐이고 교체점이 없어 인터페이스 없음.
 - `DemandRegistry` 자체 — 인덱스 자료구조는 이 클래스에 응집돼 있어야 한다. 저장소를 인터페이스로 빼면 "단일 소유" 불변식이 약해진다.
 - `WsProperties`·`WebSocketConfig`·`MetricsConfig` 등 설정 — 프레임워크 결선 지점.
 - 봉투 DTO(`Envelope` 등) — 순수 데이터. 인터페이스로 감싸지 않는다.
@@ -148,7 +150,7 @@ SOLID는 이음새가 있는 곳의 도구다. 이음새가 없는데 인터페�
 | `DemandQuery` | **포트(읽기)** | `usersWatching(code): Set<userId>`(불변 스냅샷) 등. relay 핸들러가 의존 |
 | `DemandMutator` | **포트(쓰기)** | `registerUser`/`removeSession`/`enterRoom`/`leaveRoom`/`applyWatchlistDiff`. 세션 리스너가 의존 |
 | `DemandRegistry` | 구현(둘 다) | §5 인덱스 단일 소유. 수요 전이(0↔1) 감지 시 `ChannelSubscriber` 호출. **상태 변경은 락 안에서 직렬화** |
-| `SessionEventListener` | 구현 | Spring 이벤트 4종 → `DemandMutator`/`PresenceRegistry` 호출로 번역하는 어댑터 |
+| `SessionEventListener` | 구현 | Spring 이벤트 4종 → 포트 호출 번역 + 세션 수명 정책(첫 SUBSCRIBE에서 resolve→registerSession, §11.6). resolve는 락 밖(I/O), 등록은 멱등 |
 
 ### 4.4 relay 계층 (relay/ · client/)
 
@@ -208,8 +210,9 @@ roomIndex:       Map<code, Set<sessionId>>            // post: refcount (fan-out
 
 | 스레드풀 | 소속 | 하는 일 | 주의 |
 |---|---|---|---|
-| `clientInboundChannel` | Spring | 프레임 해석, 인터셉터, 세션 이벤트 | watchlist 해소(Redis)가 여기서 — 타임아웃 1s, 실패 시 §6 |
-| `clientOutboundChannel` | Spring | 클라 송신 | 큐 깊이 = 과부하 신호, 메트릭 필수 |
+| WS 전송(Tomcat) 워커 | 컨테이너 | 프레임 수신 + 인바운드 인터셉터 preSend(JWT 검증) + **`SessionSubscribeEvent` 리스너 = watchlist 해소·등록**(실측 `o-auto-N-exec-*`) + `SessionDisconnectEvent` 리스너(실측) | 인터셉터·구독 이벤트는 **호출 스레드에서 실행**된다. 프레임 단위로 빌리는 **공유 워커 풀(기본 200)** — outbound(코어×2)보다 10배 커서 접속 폭풍의 블로킹이 틱 전달과 격리된다. Redis 장애 대비 커맨드 타임아웃 1s 상한 (§11.6) |
+| `clientInboundChannel` | Spring | 브로커 앞단 프레임 처리 | 제어 프레임 경로 — 틱 전달과 무관 |
+| `clientOutboundChannel` | Spring | 클라 송신(MESSAGE 포함) + **`SessionConnectedEvent` 리스너**(실측: CONNECTED ack가 이 풀에서 나가며 이벤트도 여기서 발화) | §11.6 적용 후 여기 남은 것은 프레즌스 쓰기(SADD/EXPIRE, 1s 타임아웃)뿐. 큐 깊이 = 과부하 신호, 메트릭 필수 |
 | broker channel | Spring | 브로커 fan-out | — |
 | heartbeat `TaskScheduler` | 우리 등록 | 하트비트 송신/감시 | 브로커 설정 필수 |
 | Redis listener 풀 | RedisConfig | `MessageRouter` → 핸들러 | **무거운 작업 금지.** 파싱+발행만. 파싱 실패는 카운터+드랍 |
@@ -219,16 +222,26 @@ roomIndex:       Map<code, Set<sessionId>>            // post: refcount (fan-out
 
 ## 6. 핵심 시퀀스
 
-### 6.1 접속 (CONNECT → 관심목록 해소)
+### 6.1 접속 (CONNECT → 첫 SUBSCRIBE에서 관심목록 해소)
+
+관심목록 해소+등록은 **세션의 첫 SUBSCRIBE**에서 한다(§11.6) — 그 시점엔 세션이 이미
+성립돼 있고, SessionSubscribeEvent는 전송 스레드에서 발화하므로 outbound 풀을 건드리지 않는다.
 
 ```
-CONNECT(JWT) → 인터셉터: TokenVerifier.verify → Principal → CONNECTED(프레임워크)
-→ SessionConnectedEvent → SessionEventListener
-    → WatchlistResolver.resolve(userId)
-    → DemandMutator.registerUser(...)  // 신규 code마다 ChannelSubscriber.subscribe(quote/stream)
-    → PresenceRegistry.add(userId, sessionId)
-클라 SUBSCRIBE /user/queue/quote·stream  (이때부터 브로커가 전달)
+[WS 전송 스레드]
+CONNECT(JWT) → StompAuthChannelInterceptor: TokenVerifier.verify → Principal
+[outbound 스레드]
+CONNECTED ack → SessionConnectedEvent → PresenceRegistry.add(userId, sessionId)
+[WS 전송 스레드]
+클라 첫 SUBSCRIBE (아무 목적지) → SessionSubscribeEvent → SessionEventListener
+    → isSessionRegistered? 아니면: WatchlistResolver.resolve(userId)
+    → DemandMutator.registerSession(...)   (신규 code마다 ChannelSubscriber.subscribe(quote/stream))
+    → (방 토픽이면 이어서 subscribeRoom)
 ```
+
+- registerSession은 멱등이라 같은 세션의 후속 SUBSCRIBE는 no-op. isSessionRegistered
+  check-then-act의 동시 SUBSCRIBE 레이스도 멱등성으로 무해(중복 resolve 1회뿐).
+- 아무것도 구독하지 않는 세션은 수요를 만들지 않는다 — 접속만 하고 노는 클라의 헛수요 제거.
 
 ### 6.2 틱 relay (가장 뜨거운 경로)
 
@@ -368,8 +381,8 @@ auth-jwt/src/main/kotlin/com/alphatalk/auth/
 
 | 수요 | 진실의 위치 | 스위치 |
 |---|---|---|
-| 관심목록 (quote/stream) | 서버 측 영속 상태 (core-api DB, REST로 편집) | **접속/종료 + `watchlist:updated`** |
-| 보는 방 (post/trade/depth) | 클라이언트 화면 상태 (서버는 알 수 없음) | **STOMP SUBSCRIBE/UNSUBSCRIBE** |
+| 관심목록 (quote/stream) | 서버 측 영속 상태 (core-api DB, REST로 편집) | 켬: **세션의 첫 SUBSCRIBE**(§11.6) · 끔: **종료** · 조정: **`watchlist:updated`** |
+| 보는 방 (post/trade/depth) | 클라이언트 화면 상태 (서버는 알 수 없음) | **해당 토픽의 STOMP SUBSCRIBE/UNSUBSCRIBE** |
 
 - 관심목록은 서버가 스스로 조회할 수 있으므로 접속 시점에 해소한다(명세 §3.1 서버 해소 모델). 클라의 `/user/queue/*` SUBSCRIBE는 **전달 계층의 파이프 연결일 뿐, 수요 신호가 아니다.**
 - SUBSCRIBE 기준으로 바꾸면 큐 종류별 구독 상태를 code→유저 인덱스와 조합해 추적해야 해 refcount 모델이 복잡해지고, 정상 흐름(CONNECTED 직후 즉시 구독)에서 얻는 이득은 수 ms뿐이다.
@@ -379,7 +392,7 @@ auth-jwt/src/main/kotlin/com/alphatalk/auth/
 
 §11.1의 귀결이다. `/user/queue/quote` UNSUBSCRIBE는 **브로커 계층에서만 유효**(그 세션으로 전달 중단)하고, Redis 수요는 유지된다. 관심목록 수요를 끄는 정당한 경로는 ① 연결 종료 ② REST로 관심목록 제거(→ `watchlist:updated`)다. 방 토픽은 UNSUBSCRIBE가 두 계층 모두 해제한다. 이 비대칭은 `DemandRegistryTest`("방 구독이 아닌 subId의 UNSUBSCRIBE - 무해")로 고정되어 있다.
 
-- 알려진 한계: 큐를 구독하지 않(거나 해제하)고 접속만 유지하는 비정상 클라는 관심목록 크기만큼 헛 fan-out을 만든다. 유저당 관심목록 크기로 유계 — S7 부하 측정에서 유의미하면 "세션별 큐 구독 여부" 게이트를 추가한다.
+- 알려진 한계: **구독 후 UNSUBSCRIBE하고 접속만 유지**하는 비정상 클라는 관심목록 크기만큼 헛 fan-out을 만든다(아예 구독하지 않는 클라의 헛수요는 §11.6의 첫-SUBSCRIBE 등록으로 해소됨). 유저당 관심목록 크기로 유계 — S7 부하 측정에서 유의미하면 "세션별 큐 구독 여부" 게이트를 추가한다.
 
 ### 11.3 DemandRegistry는 왜 ConcurrentHashMap이 아니라 HashMap + 단일 락인가
 
@@ -400,3 +413,14 @@ auth-jwt/src/main/kotlin/com/alphatalk/auth/
 - 성격은 다르다 — quote/stream/post는 **데이터 평면**(클라에게 전달할 콘텐츠, 드랍 무해), `watchlist:updated`는 **제어 평면**(게이트웨이 자신의 수요 인덱스를 바꾸는 명령).
 - 그럼에도 현재는 단일 `MessageRouter` + 핸들러 맵으로 균일하게 처리한다(OCP 균일성, 코드 최소). 제어 리스너를 컨테이너에 직접 등록하는 분리안은 §11.4의 DI 순환도 근본 제거하지만, 채널 하나를 위해 등록 경로가 이원화되는 비용이 있어 보류.
 - **재검토 트리거**: 제어 채널이 하나 더 생기거나, trade/depth 활성화로 라우터 구조를 손댈 때 — 그 시점에는 제어/데이터 평면 분리가 이득이다.
+
+### 11.6 [적용됨] watchlist 해소의 블로킹 위치 — 최종: 첫 SUBSCRIBE에서 해소·등록
+
+- **문제(실측)**: `SessionConnectedEvent`는 CONNECTED ack가 클라로 나가는 `clientOutboundChannel` 스레드에서 동기 발화한다. 초기 구현은 onConnected에서 watchlist 해소(SMEMBERS)를 수행해, **틱 MESSAGE 전달과 같은 풀**에서 Redis I/O가 블로킹됐다. 평시(산발 접속)엔 무해하나, **재접속 폭풍**(재배포 → 동접 전원 백오프 재연결) 시 부하가 가장 큰 순간에 틱 지연(p95 스파이크)을 만드는 구조였다.
+- **최종 해법 — 세션의 첫 SUBSCRIBE에서 해소+등록**: `SessionSubscribeEvent`(전송 스레드에서 발화 — 실측 `o-auto-N-exec-*`)에서 `isSessionRegistered` 확인 후 미등록이면 resolve → `registerSession`. 이 시점의 세 가지 이점: ① 세션이 **이미 성립**돼 있어 유령 등록 없음 ② 해소와 등록이 **같은 시점·같은 스레드**라 핸드오프 구조 불필요 ③ 아무것도 구독 않는 세션은 수요를 안 만듦(§11.2의 헛수요 한계 해소). registerSession 멱등 + check-then-act 레이스는 중복 resolve 1회로 무해.
+- **거쳐간 대안들**:
+  - *CONNECT 프리페치 인터셉터 + 스태시* (1차 적용 후 대체): 해소(전송 스레드)와 등록(outbound)의 시점이 갈라져 `PendingWatchlists` 핸드오프 버퍼 + 잔류 정리가 필요했다. 첫 SUBSCRIBE 방식이 같은 스레드 배치를 더 적은 구조로 달성해 대체.
+  - *SessionConnectEvent 청취(한 줄 변경)*: 스레드 목표는 달성하나 event.user가 비어 있고(핸드셰이크 주체), **성립 전 등록**이라 실패 세션의 유령 수요를 disconnect 정리에 의존 — 기각.
+- **블로킹은 제거가 아니라 이전이다**: 블로킹 스택(MVC + 동기 Lettuce)에서 Redis I/O는 반드시 어떤 스레드를 점유한다 — 선택할 수 있는 건 지불하는 풀뿐이다. 전송 워커는 프레임 단위로 빌리는 공유 풀(기본 200)로 outbound(코어×2)의 10배라, 폭풍의 Redis I/O가 워커당 수 ms로 분산되고 틱 전달과 격리된다. Tomcat 워커의 블로킹 I/O는 서블릿 스택의 설계 중심(모든 REST 핸들러가 하는 일)이며, 제로 블로킹이 필요해지면 그건 WebFlux 전환의 문제다(v0.2에서 기각).
+- **Redis 장애 방어**: 진짜 위험은 폭풍이 아니라 Redis 자체가 느려질 때다. 포트 계약(블로킹 ≤ 1s, §4.5)을 `spring.data.redis.timeout: 1s`로 강제 — Lettuce 기본(60s)대로면 장애 시 워커가 장시간 물려 풀 고갈로 번진다.
+- **잔여 사항**: outbound에 남은 Redis I/O는 프레즌스 쓰기(SADD/EXPIRE, 1s 상한)뿐. S7 재접속 폭풍 시나리오에서 최종 검증.
