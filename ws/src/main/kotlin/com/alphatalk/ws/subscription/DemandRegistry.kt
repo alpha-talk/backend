@@ -33,6 +33,8 @@ class DemandRegistry(
 
     override fun isUserConnected(userId: Long): Boolean = lock.withLock { userId in userSessions }
 
+    override fun isSessionRegistered(sessionId: String): Boolean = lock.withLock { sessionId in sessions }
+
     override fun connectedUserIds(): Set<Long> = lock.withLock { userSessions.keys.toSet() }
 
     override fun connectedSessionCount(): Int = lock.withLock { sessions.size }
