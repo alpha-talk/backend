@@ -26,6 +26,7 @@ class SessionEventListener(
     fun onConnected(event: SessionConnectedEvent) {
         val sessionId = StompHeaderAccessor.wrap(event.message).sessionId ?: return
         val userId = (event.user as? StompPrincipal)?.userId ?: return
+        demand.registerSession(sessionId, userId)
         presence.add(userId, sessionId)
         log.info("session connected. userId={} sessionId={}", userId, sessionId)
     }
@@ -35,7 +36,7 @@ class SessionEventListener(
         val accessor = StompHeaderAccessor.wrap(event.message)
         val sessionId = accessor.sessionId ?: return
         val userId = (event.user as? StompPrincipal)?.userId ?: return
-        registerOnFirstSubscribe(sessionId, userId)
+        attachWatchlistOnFirstSubscribe(sessionId, userId)
 
         val destination = accessor.destination ?: return
         val room = Destinations.parseRoomTopic(destination) ?: return
@@ -43,15 +44,15 @@ class SessionEventListener(
         demand.subscribeRoom(sessionId, subscriptionId, room.kind, room.code)
     }
 
-    private fun registerOnFirstSubscribe(sessionId: String, userId: Long) {
-        if (demandQuery.isSessionRegistered(sessionId)) return
+    private fun attachWatchlistOnFirstSubscribe(sessionId: String, userId: Long) {
+        if (!demandQuery.needsWatchlist(sessionId)) return
         val watchlist = try {
             watchlistResolver.resolve(userId)
         } catch (e: Exception) {
             log.warn("watchlist resolve failed, starting empty. userId={} sessionId={}", userId, sessionId, e)
             emptySet()
         }
-        demand.registerSession(sessionId, userId, watchlist)
+        demand.attachWatchlist(sessionId, watchlist)
         log.info("watchlist resolved. userId={} sessionId={} size={}", userId, sessionId, watchlist.size)
     }
 

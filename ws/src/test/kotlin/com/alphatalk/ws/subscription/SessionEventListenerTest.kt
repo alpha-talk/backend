@@ -17,16 +17,27 @@ import org.springframework.web.socket.messaging.SessionSubscribeEvent
 class SessionEventListenerTest {
 
     private class RecordingDemand : DemandQuery, DemandMutator {
-        val registerCalls = mutableListOf<Triple<String, Long, Set<String>>>()
+        val registerCalls = mutableListOf<Pair<String, Long>>()
+        val attachCalls = mutableListOf<Pair<String, Set<String>>>()
         val roomCalls = mutableListOf<Pair<String, ChannelKind>>()
-        private val registered = mutableSetOf<String>()
+        private val sessionUsers = mutableMapOf<String, Long>()
+        private val attachedUsers = mutableSetOf<Long>()
 
-        override fun registerSession(sessionId: String, userId: Long, watchlist: Set<String>) {
-            registerCalls += Triple(sessionId, userId, watchlist)
-            registered += sessionId
+        override fun registerSession(sessionId: String, userId: Long) {
+            registerCalls += sessionId to userId
+            sessionUsers[sessionId] = userId
         }
 
-        override fun isSessionRegistered(sessionId: String) = sessionId in registered
+        override fun attachWatchlist(sessionId: String, watchlist: Set<String>) {
+            attachCalls += sessionId to watchlist
+            sessionUsers[sessionId]?.let { attachedUsers += it }
+        }
+
+        override fun needsWatchlist(sessionId: String): Boolean {
+            val userId = sessionUsers[sessionId] ?: return false
+            return userId !in attachedUsers
+        }
+
         override fun subscribeRoom(sessionId: String, subscriptionId: String, kind: ChannelKind, code: String) {
             roomCalls += sessionId to kind
         }
@@ -83,66 +94,86 @@ class SessionEventListenerTest {
     )
 
     @Test
-    fun `onConnected - registerSession을 호출하지 않는다 (프레즌스만)`() {
+    fun `onConnected - 출석 등록 + 프레즌스, resolve는 안 한다`() {
         val resolver = CountingResolver { setOf("005930") }
 
         listener(resolver).onConnected(connectedEvent("s1", 1L))
 
-        assertThat(demand.registerCalls).isEmpty()
+        assertThat(demand.registerCalls).containsExactly("s1" to 1L)
         assertThat(resolver.invocations).isZero()
+        assertThat(demand.attachCalls).isEmpty()
         assertThat(presence.added).containsExactly(1L to "s1")
     }
 
     @Test
-    fun `첫 SUBSCRIBE - resolve 1회 + registerSession 1회`() {
+    fun `첫 SUBSCRIBE - resolve 1회 + attach 1회`() {
         val resolver = CountingResolver { setOf("005930", "000660") }
+        val target = listener(resolver)
 
-        listener(resolver).onSubscribe(subscribeEvent("s1", 1L, Destinations.USER_QUEUE_QUOTE))
+        target.onConnected(connectedEvent("s1", 1L))
+        target.onSubscribe(subscribeEvent("s1", 1L, Destinations.USER_QUEUE_QUOTE))
 
         assertThat(resolver.invocations).isEqualTo(1)
-        assertThat(demand.registerCalls).containsExactly(Triple("s1", 1L, setOf("005930", "000660")))
+        assertThat(demand.attachCalls).containsExactly("s1" to setOf("005930", "000660"))
     }
 
     @Test
-    fun `같은 세션 두 번째 SUBSCRIBE - resolve와 registerSession 추가 호출 없음`() {
+    fun `같은 세션 두 번째 SUBSCRIBE - resolve와 attach 추가 호출 없음`() {
         val resolver = CountingResolver { setOf("005930") }
         val target = listener(resolver)
 
+        target.onConnected(connectedEvent("s1", 1L))
         target.onSubscribe(subscribeEvent("s1", 1L, Destinations.USER_QUEUE_QUOTE))
         target.onSubscribe(subscribeEvent("s1", 1L, Destinations.USER_QUEUE_STREAM))
 
         assertThat(resolver.invocations).isEqualTo(1)
-        assertThat(demand.registerCalls).hasSize(1)
+        assertThat(demand.attachCalls).hasSize(1)
     }
 
     @Test
-    fun `다른 세션의 SUBSCRIBE - 각자 등록`() {
+    fun `등록 안 된 세션의 SUBSCRIBE - resolve 안 함 (needsWatchlist false)`() {
+        val resolver = CountingResolver { setOf("005930") }
+
+        listener(resolver).onSubscribe(subscribeEvent("ghost", 1L, Destinations.USER_QUEUE_QUOTE))
+
+        assertThat(resolver.invocations).isZero()
+        assertThat(demand.attachCalls).isEmpty()
+    }
+
+    @Test
+    fun `다른 세션 다른 유저 - 각자 resolve`() {
         val resolver = CountingResolver { setOf("005930") }
         val target = listener(resolver)
 
+        target.onConnected(connectedEvent("s1", 1L))
+        target.onConnected(connectedEvent("s2", 2L))
         target.onSubscribe(subscribeEvent("s1", 1L, Destinations.USER_QUEUE_QUOTE))
         target.onSubscribe(subscribeEvent("s2", 2L, Destinations.USER_QUEUE_QUOTE))
 
         assertThat(resolver.invocations).isEqualTo(2)
-        assertThat(demand.registerCalls.map { it.first }).containsExactly("s1", "s2")
+        assertThat(demand.attachCalls.map { it.first }).containsExactly("s1", "s2")
     }
 
     @Test
-    fun `resolve 실패 - 빈 관심목록으로 등록하고 세션은 계속`() {
+    fun `resolve 실패 - 빈 관심목록으로 attach하고 세션은 계속`() {
         val resolver = CountingResolver { throw IllegalStateException("redis down") }
+        val target = listener(resolver)
 
-        listener(resolver).onSubscribe(subscribeEvent("s1", 1L, Destinations.USER_QUEUE_QUOTE))
+        target.onConnected(connectedEvent("s1", 1L))
+        target.onSubscribe(subscribeEvent("s1", 1L, Destinations.USER_QUEUE_QUOTE))
 
-        assertThat(demand.registerCalls).containsExactly(Triple("s1", 1L, emptySet()))
+        assertThat(demand.attachCalls).containsExactly("s1" to emptySet<String>())
     }
 
     @Test
-    fun `방 토픽이 첫 SUBSCRIBE여도 - 등록 후 방 구독까지 이어진다`() {
+    fun `방 토픽이 첫 SUBSCRIBE여도 - attach 후 방 구독까지 이어진다`() {
         val resolver = CountingResolver { setOf("005930") }
+        val target = listener(resolver)
 
-        listener(resolver).onSubscribe(subscribeEvent("s1", 1L, Destinations.roomPosts("000660")))
+        target.onConnected(connectedEvent("s1", 1L))
+        target.onSubscribe(subscribeEvent("s1", 1L, Destinations.roomPosts("000660")))
 
-        assertThat(demand.registerCalls).hasSize(1)
+        assertThat(demand.attachCalls).hasSize(1)
         assertThat(demand.roomCalls).containsExactly("s1" to ChannelKind.POST)
     }
 }
