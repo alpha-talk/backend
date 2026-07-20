@@ -26,11 +26,45 @@ class DemandRegistryTest {
     private val subscriber = FakeSubscriber()
     private val registry = DemandRegistry(subscriber)
 
+    private fun connectAndAttach(sessionId: String, userId: Long, watchlist: Set<String>) {
+        registry.registerSession(sessionId, userId)
+        registry.attachWatchlist(sessionId, watchlist)
+    }
+
     @Nested
-    inner class WatchlistDemand {
+    inner class Attendance {
         @Test
-        fun `유저 첫 세션 접속 - 관심목록 각 code의 quote+stream 구독`() {
-            registry.registerSession("s1", 1L, setOf("005930", "000660"))
+        fun `registerSession - 출석만 기록, Redis 구독 없음`() {
+            registry.registerSession("s1", 1L)
+
+            assertThat(subscriber.subscribeCalls).isEmpty()
+            assertThat(registry.connectedSessionCount()).isEqualTo(1)
+            assertThat(registry.isUserConnected(1L)).isTrue()
+            assertThat(registry.needsWatchlist("s1")).isTrue()
+        }
+
+        @Test
+        fun `needsWatchlist - 미등록 세션은 false, 부착 후 false`() {
+            assertThat(registry.needsWatchlist("ghost")).isFalse()
+
+            connectAndAttach("s1", 1L, setOf("005930"))
+            assertThat(registry.needsWatchlist("s1")).isFalse()
+        }
+
+        @Test
+        fun `같은 유저 두 번째 세션 - 유저 watchlist가 이미 있으면 needsWatchlist false`() {
+            connectAndAttach("s1", 1L, setOf("005930"))
+            registry.registerSession("s2", 1L)
+
+            assertThat(registry.needsWatchlist("s2")).isFalse()
+        }
+    }
+
+    @Nested
+    inner class WatchlistAttach {
+        @Test
+        fun `부착 - 관심목록 각 code의 quote+stream 구독`() {
+            connectAndAttach("s1", 1L, setOf("005930", "000660"))
 
             assertThat(subscriber.active).containsExactlyInAnyOrder(
                 "quote:005930", "stream:005930", "quote:000660", "stream:000660",
@@ -39,19 +73,31 @@ class DemandRegistryTest {
         }
 
         @Test
-        fun `같은 유저 두 번째 세션 - 새 구독 없음`() {
-            registry.registerSession("s1", 1L, setOf("005930"))
-            val callsAfterFirst = subscriber.subscribeCalls.size
+        fun `죽은 세션에 부착 - 무시 (유령 세션 차단)`() {
+            registry.registerSession("s1", 1L)
+            registry.removeSession("s1")
 
-            registry.registerSession("s2", 1L, setOf("005930"))
+            registry.attachWatchlist("s1", setOf("005930"))
 
-            assertThat(subscriber.subscribeCalls).hasSize(callsAfterFirst)
+            assertThat(subscriber.subscribeCalls).isEmpty()
+            assertThat(registry.usersWatching("005930")).isEmpty()
+        }
+
+        @Test
+        fun `같은 유저 중복 부착 - 두 번째는 무시`() {
+            connectAndAttach("s1", 1L, setOf("005930"))
+            registry.registerSession("s2", 1L)
+
+            registry.attachWatchlist("s2", setOf("999999"))
+
+            assertThat(registry.usersWatching("999999")).isEmpty()
+            assertThat(registry.usersWatching("005930")).containsExactly(1L)
         }
 
         @Test
         fun `두 유저가 같은 code - 채널은 1회만 구독, 한 명 나가도 유지`() {
-            registry.registerSession("s1", 1L, setOf("005930"))
-            registry.registerSession("s2", 2L, setOf("005930"))
+            connectAndAttach("s1", 1L, setOf("005930"))
+            connectAndAttach("s2", 2L, setOf("005930"))
 
             assertThat(subscriber.subscribeCalls.filter { it == "quote:005930" }).hasSize(1)
             assertThat(registry.usersWatching("005930")).containsExactlyInAnyOrder(1L, 2L)
@@ -63,8 +109,8 @@ class DemandRegistryTest {
 
         @Test
         fun `유저 마지막 세션 종료 - 수요 0이 된 채널 해지`() {
-            registry.registerSession("s1", 1L, setOf("005930"))
-            registry.registerSession("s2", 1L, setOf("005930"))
+            connectAndAttach("s1", 1L, setOf("005930"))
+            registry.registerSession("s2", 1L)
 
             registry.removeSession("s1")
             assertThat(subscriber.active).isNotEmpty
@@ -80,24 +126,13 @@ class DemandRegistryTest {
             registry.removeSession("ghost")
             assertThat(subscriber.unsubscribeCalls).isEmpty()
         }
-
-        @Test
-        fun `isSessionRegistered - 등록 후 true, 종료 후 false`() {
-            assertThat(registry.isSessionRegistered("s1")).isFalse()
-
-            registry.registerSession("s1", 1L, setOf("005930"))
-            assertThat(registry.isSessionRegistered("s1")).isTrue()
-
-            registry.removeSession("s1")
-            assertThat(registry.isSessionRegistered("s1")).isFalse()
-        }
     }
 
     @Nested
     inner class WatchlistDiff {
         @Test
         fun `added - 새 code 구독, removed - 수요 0이면 해지`() {
-            registry.registerSession("s1", 1L, setOf("005930"))
+            connectAndAttach("s1", 1L, setOf("005930"))
 
             registry.applyWatchlistDiff(1L, added = listOf("000660"), removed = listOf("005930"))
 
@@ -115,8 +150,18 @@ class DemandRegistryTest {
         }
 
         @Test
+        fun `접속했지만 watchlist 미부착 유저의 diff - 무시 (첫 해소가 최신을 읽는다)`() {
+            registry.registerSession("s1", 1L)
+
+            registry.applyWatchlistDiff(1L, added = listOf("005930"), removed = emptyList())
+
+            assertThat(subscriber.subscribeCalls).isEmpty()
+            assertThat(registry.needsWatchlist("s1")).isTrue()
+        }
+
+        @Test
         fun `중복 added - 멱등`() {
-            registry.registerSession("s1", 1L, setOf("005930"))
+            connectAndAttach("s1", 1L, setOf("005930"))
             val calls = subscriber.subscribeCalls.size
 
             registry.applyWatchlistDiff(1L, added = listOf("005930"), removed = emptyList())
@@ -126,8 +171,8 @@ class DemandRegistryTest {
 
         @Test
         fun `다른 유저도 보는 code의 removed - 채널 유지`() {
-            registry.registerSession("s1", 1L, setOf("005930"))
-            registry.registerSession("s2", 2L, setOf("005930"))
+            connectAndAttach("s1", 1L, setOf("005930"))
+            connectAndAttach("s2", 2L, setOf("005930"))
 
             registry.applyWatchlistDiff(1L, added = emptyList(), removed = listOf("005930"))
 
@@ -140,8 +185,8 @@ class DemandRegistryTest {
     inner class RoomDemand {
         @Test
         fun `방 첫 구독 - post 채널 구독, 마지막 해제 - 해지`() {
-            registry.registerSession("s1", 1L, emptySet())
-            registry.registerSession("s2", 2L, emptySet())
+            registry.registerSession("s1", 1L)
+            registry.registerSession("s2", 2L)
 
             registry.subscribeRoom("s1", "sub-1", ChannelKind.POST, "005930")
             registry.subscribeRoom("s2", "sub-1", ChannelKind.POST, "005930")
@@ -156,7 +201,7 @@ class DemandRegistryTest {
 
         @Test
         fun `세션 종료 - 방 구독 자동 회수`() {
-            registry.registerSession("s1", 1L, emptySet())
+            registry.registerSession("s1", 1L)
             registry.subscribeRoom("s1", "sub-1", ChannelKind.POST, "005930")
             registry.subscribeRoom("s1", "sub-2", ChannelKind.TRADE, "005930")
 
@@ -167,7 +212,7 @@ class DemandRegistryTest {
 
         @Test
         fun `방 구독이 아닌 subId의 UNSUBSCRIBE - 무해 (user-queue 구독 해제 등)`() {
-            registry.registerSession("s1", 1L, setOf("005930"))
+            connectAndAttach("s1", 1L, setOf("005930"))
             registry.unsubscribeById("s1", "sub-user-queue")
 
             assertThat(subscriber.active).contains("quote:005930")
@@ -175,7 +220,7 @@ class DemandRegistryTest {
 
         @Test
         fun `watchlist code와 방 code가 겹쳐도 독립 관리`() {
-            registry.registerSession("s1", 1L, setOf("005930"))
+            connectAndAttach("s1", 1L, setOf("005930"))
             registry.subscribeRoom("s1", "sub-1", ChannelKind.POST, "005930")
 
             registry.unsubscribeById("s1", "sub-1")

@@ -1,8 +1,9 @@
-# Alpha Talk — `ws` 모듈 아키텍처 설계 v0.5
+# Alpha Talk — `ws` 모듈 아키텍처 설계 v0.6
 
 > 상위 문서: [구현 계획 v0.2](ws_module_plan.md) · [WS API 명세 v0.4](ws_api_spec.md) · [Redis 계약 v0.1](redis_contract.md)
 > 이 문서는 **코드 레벨 설계 기준**이다. "무엇을/왜"는 계획서가, "어떤 구조로"는 이 문서가 답한다.
 
+> **v0.5 → v0.6**: 외부 리뷰 반영 — **출석(등록)과 수요(관심목록 부착)를 분리**. CONNECTED에서 `registerSession`(세션↔유저, 인메모리만), 첫 SUBSCRIBE에서 resolve → `attachWatchlist`(살아있는 세션만). 프레즌스/메트릭이 접속자를 정확히 보고(리뷰 P2-4), resolve 중 끊긴 세션의 유령 등록이 차단된다(리뷰 P1-3). watchlist 미부착 유저의 diff는 무시(첫 해소가 최신을 읽음).
 > **v0.4 → v0.5**: 관심목록 해소를 **세션의 첫 SUBSCRIBE**로 단순화(§11.6 최종) — 프리페치 인터셉터·스태시 삭제, 같은 스레드 배치를 더 적은 구조로 달성. 미구독 세션의 헛수요도 제거.
 > **v0.3 → v0.4**: §11.6 적용 — 관심목록 해소를 `WatchlistPrefetchInterceptor`(CONNECT preSend, WS 전송 스레드)로 이동해 outbound 풀 블로킹 제거. §5.4·§6.1을 실측 스레드 기준으로 갱신.
 > **v0.2 → v0.3**: §11 설계 문답 추가 — 구현 리뷰에서 나온 결정들(관심목록 수요의 스위치, UNSUBSCRIBE 비대칭, 락 vs CHM, DemandRegistry 단일 클래스 유지, 제어/데이터 평면, onConnected 블로킹[열림])을 근거와 함께 기록. §5.4 스레딩 모델을 실측 기준으로 정정(SessionConnectedEvent는 inbound가 아니라 **outbound 풀**에서 발화).
@@ -222,26 +223,31 @@ roomIndex:       Map<code, Set<sessionId>>            // post: refcount (fan-out
 
 ## 6. 핵심 시퀀스
 
-### 6.1 접속 (CONNECT → 첫 SUBSCRIBE에서 관심목록 해소)
+### 6.1 접속 — 출석은 CONNECTED에, 수요는 첫 SUBSCRIBE에
 
-관심목록 해소+등록은 **세션의 첫 SUBSCRIBE**에서 한다(§11.6) — 그 시점엔 세션이 이미
-성립돼 있고, SessionSubscribeEvent는 전송 스레드에서 발화하므로 outbound 풀을 건드리지 않는다.
+두 기록을 각 사실이 확정되는 시점에 나눠 적는다: **출석부**(세션↔유저 — 프레즌스·메트릭·
+broadcast-filter가 소비)는 세션이 성립되는 CONNECTED에, **수요**(관심목록 → Redis 구독)는
+클라가 실제로 받기 시작하는 첫 SUBSCRIBE에.
 
 ```
 [WS 전송 스레드]
 CONNECT(JWT) → StompAuthChannelInterceptor: TokenVerifier.verify → Principal
 [outbound 스레드]
-CONNECTED ack → SessionConnectedEvent → PresenceRegistry.add(userId, sessionId)
+CONNECTED ack → SessionConnectedEvent
+    → DemandMutator.registerSession(sessionId, userId)   (인메모리 맵 기입만 — Redis 무접촉)
+    → PresenceRegistry.add(userId, sessionId)
 [WS 전송 스레드]
 클라 첫 SUBSCRIBE (아무 목적지) → SessionSubscribeEvent → SessionEventListener
-    → isSessionRegistered? 아니면: WatchlistResolver.resolve(userId)
-    → DemandMutator.registerSession(...)   (신규 code마다 ChannelSubscriber.subscribe(quote/stream))
+    → needsWatchlist(sessionId)? → WatchlistResolver.resolve(userId)   (Redis, ≤1s)
+    → DemandMutator.attachWatchlist(sessionId, ...)   (신규 code마다 subscribe(quote/stream))
     → (방 토픽이면 이어서 subscribeRoom)
 ```
 
-- registerSession은 멱등이라 같은 세션의 후속 SUBSCRIBE는 no-op. isSessionRegistered
-  check-then-act의 동시 SUBSCRIBE 레이스도 멱등성으로 무해(중복 resolve 1회뿐).
-- 아무것도 구독하지 않는 세션은 수요를 만들지 않는다 — 접속만 하고 노는 클라의 헛수요 제거.
+- **attachWatchlist는 출석부에 살아있는 세션만 받는다** — resolve 도중 disconnect가
+  지나가면 no-op → 유령 세션 원천 차단.
+- 부착은 유저 단위 1회(needsWatchlist가 게이트). 동시 SUBSCRIBE 레이스는 중복 resolve
+  1회로 무해. 미부착 유저의 `watchlist:updated` diff는 무시한다 — 첫 해소가 최신을 읽는다.
+- 아무것도 구독하지 않는 세션은 출석만 있고 수요는 없다 — 헛수요 없음, 접속자 집계는 정확.
 
 ### 6.2 틱 relay (가장 뜨거운 경로)
 

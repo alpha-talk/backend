@@ -5,13 +5,15 @@ import com.alphatalk.contracts.ChannelKind
 interface DemandQuery {
     fun usersWatching(code: String): Set<Long>
     fun isUserConnected(userId: Long): Boolean
-    fun isSessionRegistered(sessionId: String): Boolean
+    fun needsWatchlist(sessionId: String): Boolean
     fun connectedUserIds(): Set<Long>
     fun connectedSessionCount(): Int
 }
 
 interface DemandMutator {
-    fun registerSession(sessionId: String, userId: Long, watchlist: Set<String>)
+    fun registerSession(sessionId: String, userId: Long)
+
+    fun attachWatchlist(sessionId: String, watchlist: Set<String>)
 
     fun removeSession(sessionId: String)
 
