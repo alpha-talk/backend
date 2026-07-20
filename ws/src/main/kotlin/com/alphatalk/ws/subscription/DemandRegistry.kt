@@ -33,22 +33,29 @@ class DemandRegistry(
 
     override fun isUserConnected(userId: Long): Boolean = lock.withLock { userId in userSessions }
 
-    override fun isSessionRegistered(sessionId: String): Boolean = lock.withLock { sessionId in sessions }
+    override fun needsWatchlist(sessionId: String): Boolean = lock.withLock {
+        val info = sessions[sessionId] ?: return false
+        info.userId !in userWatchlists
+    }
 
     override fun connectedUserIds(): Set<Long> = lock.withLock { userSessions.keys.toSet() }
 
     override fun connectedSessionCount(): Int = lock.withLock { sessions.size }
 
-    override fun registerSession(sessionId: String, userId: Long, watchlist: Set<String>) {
+    override fun registerSession(sessionId: String, userId: Long) {
         lock.withLock {
             if (sessionId in sessions) return
             sessions[sessionId] = SessionInfo(userId)
-            val isFirstSession = userSessions.getOrPut(userId) { HashSet() }.add(sessionId) &&
-                userSessions.getValue(userId).size == 1
-            if (isFirstSession) {
-                userWatchlists[userId] = watchlist.toMutableSet()
-                watchlist.forEach { addUserToCode(it, userId) }
-            }
+            userSessions.getOrPut(userId) { HashSet() }.add(sessionId)
+        }
+    }
+
+    override fun attachWatchlist(sessionId: String, watchlist: Set<String>) {
+        lock.withLock {
+            val info = sessions[sessionId] ?: return
+            if (info.userId in userWatchlists) return
+            userWatchlists[info.userId] = watchlist.toMutableSet()
+            watchlist.forEach { addUserToCode(it, info.userId) }
         }
     }
 
@@ -90,7 +97,7 @@ class DemandRegistry(
     override fun applyWatchlistDiff(userId: Long, added: Collection<String>, removed: Collection<String>) {
         lock.withLock {
             if (userId !in userSessions) return
-            val watchlist = userWatchlists.getOrPut(userId) { HashSet() }
+            val watchlist = userWatchlists[userId] ?: return
             added.forEach { code ->
                 if (watchlist.add(code)) addUserToCode(code, userId)
             }

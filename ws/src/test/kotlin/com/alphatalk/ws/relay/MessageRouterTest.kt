@@ -31,14 +31,15 @@ class MessageRouterTest {
     private class FakeDemand(private val watchers: Map<String, Set<Long>>) : DemandQuery {
         override fun usersWatching(code: String) = watchers[code] ?: emptySet()
         override fun isUserConnected(userId: Long) = watchers.values.any { userId in it }
-        override fun isSessionRegistered(sessionId: String) = false
+        override fun needsWatchlist(sessionId: String) = false
         override fun connectedUserIds() = watchers.values.flatten().toSet()
         override fun connectedSessionCount() = 0
     }
 
     private class RecordingMutator : DemandMutator {
         val diffs = mutableListOf<Triple<Long, Collection<String>, Collection<String>>>()
-        override fun registerSession(sessionId: String, userId: Long, watchlist: Set<String>) = Unit
+        override fun registerSession(sessionId: String, userId: Long) = Unit
+        override fun attachWatchlist(sessionId: String, watchlist: Set<String>) = Unit
         override fun removeSession(sessionId: String) = Unit
         override fun subscribeRoom(sessionId: String, subscriptionId: String, kind: ChannelKind, code: String) = Unit
         override fun unsubscribeById(sessionId: String, subscriptionId: String) = Unit
