@@ -10,15 +10,20 @@ import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
 import org.springframework.beans.factory.annotation.Autowired
+import org.springframework.beans.factory.annotation.Qualifier
 import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.boot.test.web.server.LocalServerPort
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection
 import org.springframework.data.redis.core.StringRedisTemplate
+import org.springframework.messaging.simp.broker.OrderedMessageChannelDecorator
 import org.springframework.messaging.simp.stomp.StompHeaders
 import org.springframework.messaging.simp.stomp.StompSession
 import org.springframework.messaging.simp.stomp.StompSessionHandlerAdapter
+import org.springframework.messaging.support.AbstractSubscribableChannel
 import org.springframework.web.socket.WebSocketHttpHeaders
 import org.springframework.web.socket.client.standard.StandardWebSocketClient
+import org.springframework.web.socket.messaging.StompSubProtocolHandler
+import org.springframework.web.socket.messaging.SubProtocolWebSocketHandler
 import org.springframework.web.socket.messaging.WebSocketStompClient
 import org.testcontainers.containers.GenericContainer
 import org.testcontainers.junit.jupiter.Container
@@ -47,6 +52,13 @@ class WsIntegrationTest {
 
     @Autowired
     private lateinit var redisTemplate: StringRedisTemplate
+
+    @Autowired
+    private lateinit var subProtocolWebSocketHandler: SubProtocolWebSocketHandler
+
+    @Autowired
+    @Qualifier("clientInboundChannel")
+    private lateinit var clientInboundChannel: AbstractSubscribableChannel
 
     private val sessions = mutableListOf<StompSession>()
 
@@ -146,6 +158,16 @@ class WsIntegrationTest {
             received,
         )
         assertThat(message).contains(""""code":"000660"""")
+    }
+
+    @Test
+    fun `수신 순서 보장 결선 - 핸들러 플래그와 채널 인터셉터가 함께 걸려 있다`() {
+        val stompHandler = subProtocolWebSocketHandler.protocolHandlers
+            .filterIsInstance<StompSubProtocolHandler>()
+            .single()
+
+        assertThat(stompHandler.isPreserveReceiveOrder).isTrue()
+        assertThat(OrderedMessageChannelDecorator.supportsOrderedMessages(clientInboundChannel)).isTrue()
     }
 
     @Test
