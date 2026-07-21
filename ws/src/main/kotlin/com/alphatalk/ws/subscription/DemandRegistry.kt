@@ -20,12 +20,24 @@ class DemandRegistry(
 
     private data class RoomSub(val kind: ChannelKind, val code: String)
 
+    private class PendingDiff {
+        val added = HashSet<String>()
+        val removed = HashSet<String>()
+
+        fun apply(add: Collection<String>, remove: Collection<String>) {
+            added -= remove
+            removed -= add
+            added += add
+            removed += remove
+        }
+    }
+
     private val lock = ReentrantLock()
 
     private val sessions = HashMap<String, SessionInfo>()
     private val userSessions = HashMap<Long, MutableSet<String>>()
     private val userWatchlists = HashMap<Long, MutableSet<String>>()
-    private val pendingDiffs = HashMap<Long, MutableList<Pair<Set<String>, Set<String>>>>()
+    private val pendingDiffs = HashMap<Long, PendingDiff>()
     private val roomIndex = HashMap<Pair<ChannelKind, String>, Int>()
 
     private val watchlistIndex = ConcurrentHashMap<String, Set<Long>>()
@@ -56,9 +68,9 @@ class DemandRegistry(
             val info = sessions[sessionId] ?: return
             if (info.userId in userWatchlists) return
             val merged = watchlist.toMutableSet()
-            pendingDiffs.remove(info.userId)?.forEach { (added, removed) ->
-                merged += added
-                merged -= removed
+            pendingDiffs.remove(info.userId)?.let { pending ->
+                merged += pending.added
+                merged -= pending.removed
             }
             userWatchlists[info.userId] = merged
             merged.forEach { addUserToCode(it, info.userId) }
@@ -105,7 +117,7 @@ class DemandRegistry(
         lock.withLock {
             if (userId !in userSessions) return
             val watchlist = userWatchlists[userId] ?: run {
-                pendingDiffs.getOrPut(userId) { mutableListOf() } += added.toSet() to removed.toSet()
+                pendingDiffs.getOrPut(userId) { PendingDiff() }.apply(added, removed)
                 return
             }
             added.forEach { code ->
