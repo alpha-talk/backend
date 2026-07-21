@@ -71,7 +71,8 @@ backend/
 ```bash
 ./gradlew build            # 전 모듈 빌드 + 테스트
 ./gradlew :ws:test         # 게이트웨이 테스트만
-./gradlew :ws:bootRun      # 로컬 실행 (Redis 필요: docker compose up -d)
+./gradlew :ws:bootRun --args='--spring.profiles.active=local'   # 로컬 실행 (Redis 필요: docker compose up -d)
+# JWT 시크릿은 기본값 없음(fail-closed) — 로컬은 local 프로파일, 운영은 ALPHATALK_AUTH_JWT_SECRET 환경변수
 ```
 
 로컬 인프라는 루트 `docker-compose.yml`(Redis). 통합 테스트는 Testcontainers가 자체 기동하므로 별도 준비 불요.
