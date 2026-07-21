@@ -164,6 +164,31 @@ class DemandRegistryTest {
         }
 
         @Test
+        fun `부착 전 여러 diff - 종목별 최종 연산으로 압축 (추가 후 제거)`() {
+            registry.registerSession("s1", 1L)
+
+            registry.applyWatchlistDiff(1L, added = listOf("000660"), removed = emptyList())
+            registry.applyWatchlistDiff(1L, added = emptyList(), removed = listOf("000660"))
+
+            registry.attachWatchlist("s1", emptySet())
+
+            assertThat(registry.usersWatching("000660")).isEmpty()
+            assertThat(subscriber.subscribeCalls).isEmpty()
+        }
+
+        @Test
+        fun `부착 전 여러 diff - 제거 후 재추가는 살아남는다`() {
+            registry.registerSession("s1", 1L)
+
+            registry.applyWatchlistDiff(1L, added = emptyList(), removed = listOf("000660"))
+            registry.applyWatchlistDiff(1L, added = listOf("000660"), removed = emptyList())
+
+            registry.attachWatchlist("s1", emptySet())
+
+            assertThat(registry.usersWatching("000660")).containsExactly(1L)
+        }
+
+        @Test
         fun `부착 전 diff 후 마지막 세션 종료 - pending 잔류 없음`() {
             registry.registerSession("s1", 1L)
             registry.applyWatchlistDiff(1L, added = listOf("000660"), removed = emptyList())
