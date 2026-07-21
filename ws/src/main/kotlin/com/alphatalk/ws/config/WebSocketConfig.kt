@@ -31,6 +31,7 @@ class WebSocketConfig(
     }
 
     override fun registerStompEndpoints(registry: StompEndpointRegistry) {
+        registry.setPreserveReceiveOrder(true)
         registry.addEndpoint("/ws").setAllowedOriginPatterns("*")
     }
 
