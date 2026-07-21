@@ -5,6 +5,7 @@ import com.alphatalk.auth.TokenVerifier
 import com.alphatalk.contracts.ChannelKind
 import com.alphatalk.contracts.Destinations
 import com.alphatalk.ws.config.WsProperties
+import io.micrometer.core.instrument.MeterRegistry
 import org.slf4j.LoggerFactory
 import org.springframework.messaging.Message
 import org.springframework.messaging.MessageChannel
@@ -19,8 +20,10 @@ import org.springframework.stereotype.Component
 class StompAuthChannelInterceptor(
     private val tokenVerifier: TokenVerifier,
     private val props: WsProperties,
+    meterRegistry: MeterRegistry,
 ) : ChannelInterceptor {
     private val log = LoggerFactory.getLogger(javaClass)
+    private val stompErrors = meterRegistry.counter("ws.stomp.errors")
 
     override fun preSend(message: Message<*>, channel: MessageChannel): Message<*> {
         val accessor = MessageHeaderAccessor.getAccessor(message, StompHeaderAccessor::class.java)
@@ -28,29 +31,33 @@ class StompAuthChannelInterceptor(
         when (accessor.command) {
             StompCommand.CONNECT -> authenticate(accessor)
             StompCommand.SUBSCRIBE -> authorizeSubscribe(accessor)
-            StompCommand.SEND -> throw MessagingException("send-not-allowed")
+            StompCommand.SEND -> reject("send-not-allowed")
             else -> Unit
         }
         return message
     }
 
     private fun authenticate(accessor: StompHeaderAccessor) {
-        val header = accessor.getFirstNativeHeader(AUTHORIZATION)
-            ?: throw MessagingException("unauthorized")
-        if (!header.startsWith(BEARER_PREFIX)) throw MessagingException("unauthorized")
+        val header = accessor.getFirstNativeHeader(AUTHORIZATION) ?: reject("unauthorized")
+        if (!header.startsWith(BEARER_PREFIX)) reject("unauthorized")
         val userId = try {
             tokenVerifier.verify(header.removePrefix(BEARER_PREFIX).trim())
         } catch (e: InvalidTokenException) {
             log.info("CONNECT rejected: invalid token ({})", e.message)
-            throw MessagingException("unauthorized")
+            reject("unauthorized")
         }
         accessor.user = StompPrincipal(userId)
     }
 
     private fun authorizeSubscribe(accessor: StompHeaderAccessor) {
-        if (accessor.user == null) throw MessagingException("unauthorized")
-        val destination = accessor.destination ?: throw MessagingException("forbidden-destination")
-        if (!isAllowed(destination)) throw MessagingException("forbidden-destination")
+        if (accessor.user == null) reject("unauthorized")
+        val destination = accessor.destination ?: reject("forbidden-destination")
+        if (!isAllowed(destination)) reject("forbidden-destination")
+    }
+
+    private fun reject(reason: String): Nothing {
+        stompErrors.increment()
+        throw MessagingException(reason)
     }
 
     private fun isAllowed(destination: String): Boolean {
