@@ -88,7 +88,7 @@
 
 - `DemandRegistry`를 **두 역할 인터페이스**로 노출한다:
   - `DemandQuery` (읽기 전용, `usersWatching(code)`) — 뜨거운 relay 경로의 핸들러가 의존. 실수로 상태를 못 바꾼다.
-  - `DemandMutator` (쓰기, `registerUser`/`enterRoom`/…) — 세션 수명 이벤트 처리기가 의존.
+  - `DemandMutator` (쓰기, `registerSession`/`attachWatchlist`/`subscribeRoom`/…) — 세션 수명 이벤트 처리기가 의존.
 - `ClientMessageSink`는 `sendToUser(userId, type, envelope)`·`sendToRoom(code, envelope)` **둘만** 노출한다. `SimpMessagingTemplate`의 광범위한 API를 도메인에 흘리지 않고, STOMP 목적지 문자열 조립 지식(→ `Destinations`)을 한 곳에 가둔다.
 - `ChannelSubscriber`는 `subscribe(channel)`·`unsubscribe(channel)` **둘만**. `DemandRegistry`는 Redis 리스너 컨테이너의 나머지를 볼 필요가 없다.
 
@@ -150,7 +150,7 @@ SOLID는 이음새가 있는 곳의 도구다. 이음새가 없는데 인터페�
 | 타입 | 종류 | 책임 |
 |---|---|---|
 | `DemandQuery` | **포트(읽기)** | `usersWatching(code): Set<userId>`(불변 스냅샷) 등. relay 핸들러가 의존 |
-| `DemandMutator` | **포트(쓰기)** | `registerUser`/`removeSession`/`enterRoom`/`leaveRoom`/`applyWatchlistDiff`. 세션 리스너가 의존 |
+| `DemandMutator` | **포트(쓰기)** | `registerSession`/`attachWatchlist`/`removeSession`/`subscribeRoom`/`unsubscribeById`/`applyWatchlistDiff`. 세션 리스너가 의존 |
 | `DemandRegistry` | 구현(둘 다) | §5 인덱스 단일 소유. 수요 전이(0↔1) 감지 시 `ChannelSubscriber` 호출. **상태 변경은 락 안에서 직렬화** |
 | `SessionEventListener` | 구현 | Spring 이벤트 4종 → 포트 호출 번역 + 세션 수명 정책(CONNECTED→`registerSession`, 첫 SUBSCRIBE에서 resolve→`attachWatchlist`, §11.6). resolve는 락 밖(I/O), 등록·부착은 멱등 |
 
@@ -189,7 +189,7 @@ SOLID는 이음새가 있는 곳의 도구다. 이음새가 없는데 인터페�
 sessions:        Map<sessionId, SessionInfo(userId, roomSubs: Map<subId, (kind, code)>)>
 userSessions:    Map<userId, Set<sessionId>>          // 멀티디바이스
 userWatchlists:  Map<userId, Set<code>>               // 부착된 관심목록 (키 존재 = 부착됨 마커)
-pendingDiffs:    Map<userId, List<(added, removed)>>  // 부착 전 도착한 diff 버퍼 (§11.6)
+pendingDiffs:    Map<userId, (added: Set, removed: Set)>  // 부착 전 diff의 압축 누적 — 이벤트 수와 무관하게 유계 (§11.6)
 watchlistIndex:  Map<code, Set<userId>>               // quote:/stream: 라우팅 + refcount (락 없이 읽기)
 roomIndex:       Map<(kind, code), Int>               // 방 구독 수 카운트 (fan-out은 브로커가)
 ```
@@ -250,7 +250,7 @@ CONNECTED ack → SessionConnectedEvent
 - **attachWatchlist는 출석부에 살아있는 세션만 받는다** — resolve 도중 disconnect가
   지나가면 no-op → 유령 세션 원천 차단.
 - 부착은 유저 단위 1회(needsWatchlist가 게이트). 동시 SUBSCRIBE 레이스는 중복 resolve
-  1회로 무해. 미부착 유저의 `watchlist:updated` diff는 무시한다 — 첫 해소가 최신을 읽는다.
+  1회로 무해. 미부착 유저의 `watchlist:updated` diff는 pendingDiffs에 압축 버퍼링했다가 부착 시 병합한다(§11.6).
 - 아무것도 구독하지 않는 세션은 출석만 있고 수요는 없다 — 헛수요 없음, 접속자 집계는 정확.
 
 ### 6.2 틱 relay (가장 뜨거운 경로)
@@ -267,7 +267,7 @@ price-worker PUBLISH quote:005930 {envelope}
 
 ```
 SUBSCRIBE /topic/rooms/005930/posts → 인터셉터 검증 → SessionSubscribeEvent
-→ DemandMutator.enterRoom: roomIndex 0→1 이면 ChannelSubscriber.subscribe(post:005930)
+→ DemandMutator.subscribeRoom: roomIndex 0→1 이면 ChannelSubscriber.subscribe(post:005930)
 (fan-out은 SimpleBroker 몫 — 우리는 Redis 구독 여부만 관리)
 퇴장: UNSUBSCRIBE/DISCONNECT → 1→0 이면 unsubscribe
 ```
@@ -428,7 +428,7 @@ auth-jwt/src/main/kotlin/com/alphatalk/auth/
 
 - **문제(실측)**: `SessionConnectedEvent`는 CONNECTED ack가 클라로 나가는 `clientOutboundChannel` 스레드에서 동기 발화한다. 초기 구현은 onConnected에서 watchlist 해소(SMEMBERS)를 수행해, **틱 MESSAGE 전달과 같은 풀**에서 Redis I/O가 블로킹됐다. 평시(산발 접속)엔 무해하나, **재접속 폭풍**(재배포 → 동접 전원 백오프 재연결) 시 부하가 가장 큰 순간에 틱 지연(p95 스파이크)을 만드는 구조였다.
 - **최종 해법 (v0.6) — 출석은 CONNECTED, 수요는 첫 SUBSCRIBE**: CONNECTED에서 `registerSession`(세션↔유저, 인메모리 맵만 — outbound 무해), 첫 SUBSCRIBE(전송 스레드 — 실측 `o-auto-N-exec-*`)에서 `needsWatchlist` 게이트 → resolve → `attachWatchlist`. 이점: ① `attachWatchlist`는 출석부에 살아있는 세션만 받아 resolve 중 disconnect 시 no-op — 유령 차단 ② 프레즌스/메트릭이 접속자를 정확히 봄 ③ 미구독 세션은 수요 없음(§11.2 헛수요 해소) ④ 핸드오프 구조 불필요.
-- **부착 전 diff 유실 방지 (2차 리뷰 반영)**: resolve가 구버전을 읽은 직후 `watchlist:updated`가 도착하면 미부착이라 버려지고 구버전이 부착되는 레이스가 있었다. 미부착 유저의 diff는 무시가 아니라 **pending 버퍼에 쌓고 부착 시 순서대로 병합**한다(마지막 세션 종료 시 버퍼 정리). diff 적용은 집합 연산이라 resolve 결과에 이미 반영된 diff를 다시 적용해도 멱등이다.
+- **부착 전 diff 유실 방지 (2차 리뷰 반영, 4차에서 압축)**: resolve가 구버전을 읽은 직후 `watchlist:updated`가 도착하면 미부착이라 버려지고 구버전이 부착되는 레이스가 있었다. 미부착 유저의 diff는 무시가 아니라 **pending 버퍼에 병합**한다(마지막 세션 종료 시 버퍼 정리). 버퍼는 diff를 리스트로 쌓지 않고 **종목별 최종 연산 (added, removed) 집합 쌍으로 압축 누적**한다 — 새 diff (a,r)마다 `A←(A∖r)∪a`, `R←(R∖a)∪r`. 장기 접속 + 반복 변경에도 메모리가 이벤트 수가 아니라 언급된 종목 수로 유계다. resolve 결과에 이미 반영된 diff를 다시 적용해도 집합 연산이라 멱등이다.
 - **거쳐간 대안들**:
   - *CONNECT 프리페치 인터셉터 + 스태시* (1차 적용 후 대체): 해소(전송 스레드)와 등록(outbound)의 시점이 갈라져 `PendingWatchlists` 핸드오프 버퍼 + 잔류 정리가 필요했다. 첫 SUBSCRIBE 방식이 같은 스레드 배치를 더 적은 구조로 달성해 대체.
   - *SessionConnectEvent 청취(한 줄 변경)*: 스레드 목표는 달성하나 event.user가 비어 있고(핸드셰이크 주체), **성립 전 등록**이라 실패 세션의 유령 수요를 disconnect 정리에 의존 — 기각.
