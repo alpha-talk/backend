@@ -26,7 +26,7 @@ class DemandRegistry(
     private val userSessions = HashMap<Long, MutableSet<String>>()
     private val userWatchlists = HashMap<Long, MutableSet<String>>()
     private val pendingDiffs = HashMap<Long, MutableList<Pair<Set<String>, Set<String>>>>()
-    private val roomIndex = HashMap<Pair<ChannelKind, String>, MutableSet<String>>()
+    private val roomIndex = HashMap<Pair<ChannelKind, String>, Int>()
 
     private val watchlistIndex = ConcurrentHashMap<String, Set<Long>>()
 
@@ -68,7 +68,7 @@ class DemandRegistry(
     override fun removeSession(sessionId: String) {
         lock.withLock {
             val info = sessions.remove(sessionId) ?: return
-            info.roomSubs.values.forEach { releaseRoom(it, sessionId) }
+            info.roomSubs.values.forEach { releaseRoom(it) }
             val remaining = userSessions[info.userId]?.apply { remove(sessionId) }
             if (remaining.isNullOrEmpty()) {
                 userSessions.remove(info.userId)
@@ -85,9 +85,9 @@ class DemandRegistry(
         lock.withLock {
             val info = sessions[sessionId] ?: return
             val previous = info.roomSubs.put(subscriptionId, RoomSub(kind, code))
-            if (previous != null) releaseRoom(previous, sessionId)
-            val members = roomIndex.getOrPut(kind to code) { HashSet() }
-            if (members.add(sessionId) && members.size == 1) {
+            if (previous != null) releaseRoom(previous)
+            val count = roomIndex.merge(kind to code, 1, Int::plus)
+            if (count == 1) {
                 channelSubscriber.subscribe(Channels.of(kind, code))
             }
         }
@@ -97,7 +97,7 @@ class DemandRegistry(
         lock.withLock {
             val info = sessions[sessionId] ?: return
             val sub = info.roomSubs.remove(subscriptionId) ?: return
-            releaseRoom(sub, sessionId)
+            releaseRoom(sub)
         }
     }
 
@@ -140,12 +140,14 @@ class DemandRegistry(
         }
     }
 
-    private fun releaseRoom(sub: RoomSub, sessionId: String) {
+    private fun releaseRoom(sub: RoomSub) {
         val key = sub.kind to sub.code
-        val members = roomIndex[key] ?: return
-        if (members.remove(sessionId) && members.isEmpty()) {
+        val count = roomIndex[key] ?: return
+        if (count <= 1) {
             roomIndex.remove(key)
             channelSubscriber.unsubscribe(Channels.of(sub.kind, sub.code))
+        } else {
+            roomIndex[key] = count - 1
         }
     }
 }
