@@ -228,6 +228,31 @@ class DemandRegistryTest {
         }
 
         @Test
+        fun `같은 세션이 다른 subId로 같은 방 구독 - 하나만 해제해도 채널 유지`() {
+            registry.registerSession("s1", 1L)
+            registry.subscribeRoom("s1", "sub-1", ChannelKind.POST, "005930")
+            registry.subscribeRoom("s1", "sub-2", ChannelKind.POST, "005930")
+            assertThat(subscriber.subscribeCalls.filter { it == "post:005930" }).hasSize(1)
+
+            registry.unsubscribeById("s1", "sub-1")
+            assertThat(subscriber.active).contains("post:005930")
+
+            registry.unsubscribeById("s1", "sub-2")
+            assertThat(subscriber.active).doesNotContain("post:005930")
+        }
+
+        @Test
+        fun `같은 subId 재사용 - 이전 방 해제 후 새 방 구독`() {
+            registry.registerSession("s1", 1L)
+            registry.subscribeRoom("s1", "sub-1", ChannelKind.POST, "005930")
+
+            registry.subscribeRoom("s1", "sub-1", ChannelKind.POST, "000660")
+
+            assertThat(subscriber.active).contains("post:000660")
+            assertThat(subscriber.active).doesNotContain("post:005930")
+        }
+
+        @Test
         fun `방 구독이 아닌 subId의 UNSUBSCRIBE - 무해 (user-queue 구독 해제 등)`() {
             connectAndAttach("s1", 1L, setOf("005930"))
             registry.unsubscribeById("s1", "sub-user-queue")
