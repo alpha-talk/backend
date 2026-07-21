@@ -25,6 +25,7 @@ class DemandRegistry(
     private val sessions = HashMap<String, SessionInfo>()
     private val userSessions = HashMap<Long, MutableSet<String>>()
     private val userWatchlists = HashMap<Long, MutableSet<String>>()
+    private val pendingDiffs = HashMap<Long, MutableList<Pair<Set<String>, Set<String>>>>()
     private val roomIndex = HashMap<Pair<ChannelKind, String>, MutableSet<String>>()
 
     private val watchlistIndex = ConcurrentHashMap<String, Set<Long>>()
@@ -54,8 +55,13 @@ class DemandRegistry(
         lock.withLock {
             val info = sessions[sessionId] ?: return
             if (info.userId in userWatchlists) return
-            userWatchlists[info.userId] = watchlist.toMutableSet()
-            watchlist.forEach { addUserToCode(it, info.userId) }
+            val merged = watchlist.toMutableSet()
+            pendingDiffs.remove(info.userId)?.forEach { (added, removed) ->
+                merged += added
+                merged -= removed
+            }
+            userWatchlists[info.userId] = merged
+            merged.forEach { addUserToCode(it, info.userId) }
         }
     }
 
@@ -66,6 +72,7 @@ class DemandRegistry(
             val remaining = userSessions[info.userId]?.apply { remove(sessionId) }
             if (remaining.isNullOrEmpty()) {
                 userSessions.remove(info.userId)
+                pendingDiffs.remove(info.userId)
                 userWatchlists.remove(info.userId)?.forEach { removeUserFromCode(it, info.userId) }
             }
         }
@@ -97,7 +104,10 @@ class DemandRegistry(
     override fun applyWatchlistDiff(userId: Long, added: Collection<String>, removed: Collection<String>) {
         lock.withLock {
             if (userId !in userSessions) return
-            val watchlist = userWatchlists[userId] ?: return
+            val watchlist = userWatchlists[userId] ?: run {
+                pendingDiffs.getOrPut(userId) { mutableListOf() } += added.toSet() to removed.toSet()
+                return
+            }
             added.forEach { code ->
                 if (watchlist.add(code)) addUserToCode(code, userId)
             }
