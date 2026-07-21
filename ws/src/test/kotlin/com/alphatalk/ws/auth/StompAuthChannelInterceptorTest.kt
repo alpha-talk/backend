@@ -25,7 +25,11 @@ class StompAuthChannelInterceptorTest {
     private val channel = org.springframework.messaging.support.ExecutorSubscribableChannel()
 
     private fun interceptor(tradeDepth: Boolean = false) =
-        StompAuthChannelInterceptor(FakeVerifier(), props(tradeDepth))
+        StompAuthChannelInterceptor(
+            FakeVerifier(),
+            props(tradeDepth),
+            io.micrometer.core.instrument.simple.SimpleMeterRegistry(),
+        )
 
     private fun connectMessage(authHeader: String?): Message<ByteArray> {
         val accessor = StompHeaderAccessor.create(StompCommand.CONNECT)

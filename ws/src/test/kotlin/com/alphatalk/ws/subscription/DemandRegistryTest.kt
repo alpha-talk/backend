@@ -150,13 +150,55 @@ class DemandRegistryTest {
         }
 
         @Test
-        fun `접속했지만 watchlist 미부착 유저의 diff - 무시 (첫 해소가 최신을 읽는다)`() {
+        fun `부착 전 도착한 diff - 버퍼링 후 부착 시 병합 (구버전 해소와의 레이스 방지)`() {
             registry.registerSession("s1", 1L)
 
-            registry.applyWatchlistDiff(1L, added = listOf("005930"), removed = emptyList())
-
+            registry.applyWatchlistDiff(1L, added = listOf("000660"), removed = listOf("005930"))
             assertThat(subscriber.subscribeCalls).isEmpty()
-            assertThat(registry.needsWatchlist("s1")).isTrue()
+
+            registry.attachWatchlist("s1", setOf("005930", "035420"))
+
+            assertThat(registry.usersWatching("005930")).isEmpty()
+            assertThat(registry.usersWatching("000660")).containsExactly(1L)
+            assertThat(registry.usersWatching("035420")).containsExactly(1L)
+        }
+
+        @Test
+        fun `부착 전 여러 diff - 종목별 최종 연산으로 압축 (추가 후 제거)`() {
+            registry.registerSession("s1", 1L)
+
+            registry.applyWatchlistDiff(1L, added = listOf("000660"), removed = emptyList())
+            registry.applyWatchlistDiff(1L, added = emptyList(), removed = listOf("000660"))
+
+            registry.attachWatchlist("s1", emptySet())
+
+            assertThat(registry.usersWatching("000660")).isEmpty()
+            assertThat(subscriber.subscribeCalls).isEmpty()
+        }
+
+        @Test
+        fun `부착 전 여러 diff - 제거 후 재추가는 살아남는다`() {
+            registry.registerSession("s1", 1L)
+
+            registry.applyWatchlistDiff(1L, added = emptyList(), removed = listOf("000660"))
+            registry.applyWatchlistDiff(1L, added = listOf("000660"), removed = emptyList())
+
+            registry.attachWatchlist("s1", emptySet())
+
+            assertThat(registry.usersWatching("000660")).containsExactly(1L)
+        }
+
+        @Test
+        fun `부착 전 diff 후 마지막 세션 종료 - pending 잔류 없음`() {
+            registry.registerSession("s1", 1L)
+            registry.applyWatchlistDiff(1L, added = listOf("000660"), removed = emptyList())
+            registry.removeSession("s1")
+
+            registry.registerSession("s2", 1L)
+            registry.attachWatchlist("s2", setOf("005930"))
+
+            assertThat(registry.usersWatching("000660")).isEmpty()
+            assertThat(registry.usersWatching("005930")).containsExactly(1L)
         }
 
         @Test
@@ -208,6 +250,31 @@ class DemandRegistryTest {
             registry.removeSession("s1")
 
             assertThat(subscriber.active).isEmpty()
+        }
+
+        @Test
+        fun `같은 세션이 다른 subId로 같은 방 구독 - 하나만 해제해도 채널 유지`() {
+            registry.registerSession("s1", 1L)
+            registry.subscribeRoom("s1", "sub-1", ChannelKind.POST, "005930")
+            registry.subscribeRoom("s1", "sub-2", ChannelKind.POST, "005930")
+            assertThat(subscriber.subscribeCalls.filter { it == "post:005930" }).hasSize(1)
+
+            registry.unsubscribeById("s1", "sub-1")
+            assertThat(subscriber.active).contains("post:005930")
+
+            registry.unsubscribeById("s1", "sub-2")
+            assertThat(subscriber.active).doesNotContain("post:005930")
+        }
+
+        @Test
+        fun `같은 subId 재사용 - 이전 방 해제 후 새 방 구독`() {
+            registry.registerSession("s1", 1L)
+            registry.subscribeRoom("s1", "sub-1", ChannelKind.POST, "005930")
+
+            registry.subscribeRoom("s1", "sub-1", ChannelKind.POST, "000660")
+
+            assertThat(subscriber.active).contains("post:000660")
+            assertThat(subscriber.active).doesNotContain("post:005930")
         }
 
         @Test

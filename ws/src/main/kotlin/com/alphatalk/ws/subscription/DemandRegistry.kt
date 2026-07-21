@@ -20,12 +20,25 @@ class DemandRegistry(
 
     private data class RoomSub(val kind: ChannelKind, val code: String)
 
+    private class PendingDiff {
+        val added = HashSet<String>()
+        val removed = HashSet<String>()
+
+        fun apply(add: Collection<String>, remove: Collection<String>) {
+            added -= remove
+            removed -= add
+            added += add
+            removed += remove
+        }
+    }
+
     private val lock = ReentrantLock()
 
     private val sessions = HashMap<String, SessionInfo>()
     private val userSessions = HashMap<Long, MutableSet<String>>()
     private val userWatchlists = HashMap<Long, MutableSet<String>>()
-    private val roomIndex = HashMap<Pair<ChannelKind, String>, MutableSet<String>>()
+    private val pendingDiffs = HashMap<Long, PendingDiff>()
+    private val roomIndex = HashMap<Pair<ChannelKind, String>, Int>()
 
     private val watchlistIndex = ConcurrentHashMap<String, Set<Long>>()
 
@@ -54,18 +67,24 @@ class DemandRegistry(
         lock.withLock {
             val info = sessions[sessionId] ?: return
             if (info.userId in userWatchlists) return
-            userWatchlists[info.userId] = watchlist.toMutableSet()
-            watchlist.forEach { addUserToCode(it, info.userId) }
+            val merged = watchlist.toMutableSet()
+            pendingDiffs.remove(info.userId)?.let { pending ->
+                merged += pending.added
+                merged -= pending.removed
+            }
+            userWatchlists[info.userId] = merged
+            merged.forEach { addUserToCode(it, info.userId) }
         }
     }
 
     override fun removeSession(sessionId: String) {
         lock.withLock {
             val info = sessions.remove(sessionId) ?: return
-            info.roomSubs.values.forEach { releaseRoom(it, sessionId) }
+            info.roomSubs.values.forEach { releaseRoom(it) }
             val remaining = userSessions[info.userId]?.apply { remove(sessionId) }
             if (remaining.isNullOrEmpty()) {
                 userSessions.remove(info.userId)
+                pendingDiffs.remove(info.userId)
                 userWatchlists.remove(info.userId)?.forEach { removeUserFromCode(it, info.userId) }
             }
         }
@@ -78,9 +97,9 @@ class DemandRegistry(
         lock.withLock {
             val info = sessions[sessionId] ?: return
             val previous = info.roomSubs.put(subscriptionId, RoomSub(kind, code))
-            if (previous != null) releaseRoom(previous, sessionId)
-            val members = roomIndex.getOrPut(kind to code) { HashSet() }
-            if (members.add(sessionId) && members.size == 1) {
+            if (previous != null) releaseRoom(previous)
+            val count = roomIndex.merge(kind to code, 1, Int::plus)
+            if (count == 1) {
                 channelSubscriber.subscribe(Channels.of(kind, code))
             }
         }
@@ -90,14 +109,17 @@ class DemandRegistry(
         lock.withLock {
             val info = sessions[sessionId] ?: return
             val sub = info.roomSubs.remove(subscriptionId) ?: return
-            releaseRoom(sub, sessionId)
+            releaseRoom(sub)
         }
     }
 
     override fun applyWatchlistDiff(userId: Long, added: Collection<String>, removed: Collection<String>) {
         lock.withLock {
             if (userId !in userSessions) return
-            val watchlist = userWatchlists[userId] ?: return
+            val watchlist = userWatchlists[userId] ?: run {
+                pendingDiffs.getOrPut(userId) { PendingDiff() }.apply(added, removed)
+                return
+            }
             added.forEach { code ->
                 if (watchlist.add(code)) addUserToCode(code, userId)
             }
@@ -130,12 +152,14 @@ class DemandRegistry(
         }
     }
 
-    private fun releaseRoom(sub: RoomSub, sessionId: String) {
+    private fun releaseRoom(sub: RoomSub) {
         val key = sub.kind to sub.code
-        val members = roomIndex[key] ?: return
-        if (members.remove(sessionId) && members.isEmpty()) {
+        val count = roomIndex[key] ?: return
+        if (count <= 1) {
             roomIndex.remove(key)
             channelSubscriber.unsubscribe(Channels.of(sub.kind, sub.code))
+        } else {
+            roomIndex[key] = count - 1
         }
     }
 }
