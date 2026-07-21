@@ -1,0 +1,6 @@
+# 로컬 개발 전용 프로파일 — 절대 운영에서 활성화하지 말 것.
+# 실행: ./gradlew :ws:bootRun --args='--spring.profiles.active=local'
+alphatalk:
+  auth:
+    jwt:
+      secret: insecure-local-dev-only-secret-0123456789abcdef

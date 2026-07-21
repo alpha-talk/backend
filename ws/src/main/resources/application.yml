@@ -18,9 +18,9 @@ server:
 alphatalk:
   auth:
     jwt:
-      # :auth-jwt 자동구성. HS256 32바이트 이상, core-api와 동일 값 주입.
-      # 운영은 반드시 환경변수(ALPHATALK_AUTH_JWT_SECRET) — 아래는 로컬 개발 전용 (NFR-07).
-      secret: ${ALPHATALK_AUTH_JWT_SECRET:insecure-local-dev-only-secret-0123456789abcdef}
+      # :auth-jwt 자동구성. HS256 32바이트 이상, core-api와 동일 값 주입 (NFR-07).
+      # 기본값 없음 — 환경변수 미설정 시 기동 실패(fail-closed). 로컬 개발은 local 프로파일 사용.
+      secret: ${ALPHATALK_AUTH_JWT_SECRET}
 
 ws:
   transport:
