@@ -215,7 +215,7 @@ roomIndex:       Map<(kind, code), Int>               // 방 구독 수 카운�
 
 | 스레드풀 | 소속 | 하는 일 | 주의 |
 |---|---|---|---|
-| WS 전송(Tomcat) 워커 | 컨테이너 | 프레임 수신 + 인바운드 인터셉터 preSend(JWT 검증) + **`SessionSubscribeEvent` 리스너 = watchlist 해소·등록**(실측 `o-auto-N-exec-*`) + `SessionDisconnectEvent` 리스너(실측) | 인터셉터·구독 이벤트는 **호출 스레드에서 실행**된다. 프레임 단위로 빌리는 **공유 워커 풀(기본 200)** — outbound(코어×2)보다 10배 커서 접속 폭풍의 블로킹이 틱 전달과 격리된다. Redis 장애 대비 커맨드 타임아웃 1s 상한 (§11.6) |
+| WS 전송(Tomcat) 워커 | 컨테이너 | 프레임 수신 + 인바운드 인터셉터 preSend(JWT 검증) + **`SessionSubscribeEvent` 리스너 = watchlist 해소·부착**(실측 `o-auto-N-exec-*`) + `SessionDisconnectEvent` 리스너(실측) | 인터셉터·구독 이벤트는 **호출 스레드에서 실행**된다. 프레임 단위로 빌리는 **공유 워커 풀(기본 200)** — outbound(코어×2)보다 10배 커서 접속 폭풍의 블로킹이 틱 전달과 격리된다. Redis 장애 대비 커맨드 타임아웃 1s 상한 (§11.6) |
 | `clientInboundChannel` | Spring | 브로커 앞단 프레임 처리 | 제어 프레임 경로 — 틱 전달과 무관 |
 | `clientOutboundChannel` | Spring | 클라 송신(MESSAGE 포함) + **`SessionConnectedEvent` 리스너**(실측: CONNECTED ack가 이 풀에서 나가며 이벤트도 여기서 발화) | §11.6 적용 후 여기 남은 것은 프레즌스 쓰기(SADD/EXPIRE, 1s 타임아웃)뿐. 큐 깊이 = 과부하 신호, 메트릭 필수 |
 | broker channel | Spring | 브로커 fan-out | — |
@@ -424,7 +424,7 @@ auth-jwt/src/main/kotlin/com/alphatalk/auth/
 - 그럼에도 현재는 단일 `MessageRouter` + 핸들러 맵으로 균일하게 처리한다(OCP 균일성, 코드 최소). 제어 리스너를 컨테이너에 직접 등록하는 분리안은 §11.4의 DI 순환도 근본 제거하지만, 채널 하나를 위해 등록 경로가 이원화되는 비용이 있어 보류.
 - **재검토 트리거**: 제어 채널이 하나 더 생기거나, trade/depth 활성화로 라우터 구조를 손댈 때 — 그 시점에는 제어/데이터 평면 분리가 이득이다.
 
-### 11.6 [적용됨] watchlist 해소의 블로킹 위치 — 최종: 첫 SUBSCRIBE에서 해소·등록
+### 11.6 [적용됨] watchlist 해소의 블로킹 위치 — 최종: 첫 SUBSCRIBE에서 해소·부착
 
 - **문제(실측)**: `SessionConnectedEvent`는 CONNECTED ack가 클라로 나가는 `clientOutboundChannel` 스레드에서 동기 발화한다. 초기 구현은 onConnected에서 watchlist 해소(SMEMBERS)를 수행해, **틱 MESSAGE 전달과 같은 풀**에서 Redis I/O가 블로킹됐다. 평시(산발 접속)엔 무해하나, **재접속 폭풍**(재배포 → 동접 전원 백오프 재연결) 시 부하가 가장 큰 순간에 틱 지연(p95 스파이크)을 만드는 구조였다.
 - **최종 해법 (v0.6) — 출석은 CONNECTED, 수요는 첫 SUBSCRIBE**: CONNECTED에서 `registerSession`(세션↔유저, 인메모리 맵만 — outbound 무해), 첫 SUBSCRIBE(전송 스레드 — 실측 `o-auto-N-exec-*`)에서 `needsWatchlist` 게이트 → resolve → `attachWatchlist`. 이점: ① `attachWatchlist`는 출석부에 살아있는 세션만 받아 resolve 중 disconnect 시 no-op — 유령 차단 ② 프레즌스/메트릭이 접속자를 정확히 봄 ③ 미구독 세션은 수요 없음(§11.2 헛수요 해소) ④ 핸드오프 구조 불필요.
