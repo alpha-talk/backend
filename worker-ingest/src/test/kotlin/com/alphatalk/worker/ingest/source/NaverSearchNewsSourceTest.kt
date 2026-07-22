@@ -52,6 +52,23 @@ class NaverSearchNewsSourceTest {
     }
 
     @Test
+    fun `여러 종목 쿼리에서 같은 기사가 나오면 코드 합집합으로 병합`() {
+        val merged = NaverSearchNewsSource(
+            clientId = "id",
+            clientSecret = "secret",
+            queries = listOf(
+                NaverSearchNewsSource.StockQuery("005930", "삼성전자"),
+                NaverSearchNewsSource.StockQuery("000660", "SK하이닉스"),
+            ),
+            display = 30,
+        ) { _, _ -> java.io.ByteArrayInputStream(response.toByteArray()) }
+
+        val articles = merged.fetchLatest()
+        assertEquals(1, articles.size)
+        assertEquals(listOf("000660", "005930"), articles.single().codes)
+    }
+
+    @Test
     fun `요청에 인증 헤더와 쿼리 인코딩 포함`() {
         source.fetchLatest()
         val (url, headers) = requested.single()
