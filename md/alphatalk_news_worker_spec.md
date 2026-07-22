@@ -1,7 +1,7 @@
 # Alpha Talk — 뉴스 파이프라인 명세 v0.1
-**worker-ingest · worker-llm · 담당: 팀원**
+**worker-ingest · worker-llm · 담당: 민균**
 
-뉴스를 수집해 관련 종목 방으로 배달하고, 같은 사건을 다룬 여러 언론사 기사를 하나로 묶고, 매일 종목별 호재·악재 브리핑을 생성하는 파이프라인의 설계 기준. [redis_contract.md](redis_contract.md) §2(`queue:ingest`)와 [ws_api_spec.md](ws_api_spec.md) §4.3(stream payload)을 전제로 하며, 계약에 없는 항목은 §6에 **증보 제안**으로 모아 표시했다(합의 후 해당 계약 문서에 병합).
+뉴스를 수집해 관련 종목 방으로 배달하고, 같은 사건을 다룬 여러 언론사 기사를 하나로 묶고, 매일 종목별 호재·악재 브리핑을 생성하는 파이프라인의 설계 기준. [redis_contract.md](redis_contract.md) §2(`queue:ingest`)와 [ws_api_spec.md](ws_api_spec.md) §4.3(stream payload)을 전제로 하며, 이 설계가 요구한 계약 확장은 **각 계약 문서에 반영 완료**(redis_contract v0.3 · ws_api_spec v0.5 · KIS 워커 명세 §4) — 내역은 §6.
 
 ---
 
@@ -25,6 +25,7 @@
 3. **감성(호재/악재)은 (클러스터, 종목) 단위** — 같은 기사가 A사엔 호재·B사엔 악재일 수 있다. (§3.4)
 4. **일일 다이제스트도 `queue:ingest`를 탄다** — ingest 스케줄러(싱글턴)가 `type=digest` 엔트리를 적재하고 llm-worker가 경쟁 소비. 신뢰성 장치(PEL·ACK·멱등)를 그대로 재사용하고 llm-worker의 무상태 ×N을 유지한다. (§4)
 5. **본문은 LLM 입력으로만 쓰고, 저장은 발췌(200자)+원문 링크** — 기획안 §6 저작권 방침(요약+원문 링크) 준수. (§2.3)
+6. **매크로·섹터 뉴스는 scope 사다리로** — LLM이 STOCK/SECTOR/MARKET 판정. SECTOR는 업종 구성 종목으로 해소해 fan-out(섹터 이슈 표기), MARKET은 방 fan-out 없이 일일 다이제스트로만. (§3.6)
 
 ---
 
@@ -95,7 +96,7 @@ MVP는 **설정 파일의 시드 종목 목록**(worker-price의 41종목과 동
 | 3차 | LLM 요약 시 관련 종목 확정 — 오탐 제거(예: "삼성" 단독 매칭) 및 추가 종목 발견 | llm |
 
 - 별칭 사전은 `stock_alias(code, alias)` 테이블(§5). 초기엔 정식 종목명 + 수동 등록 별칭("삼전" 등)으로 시작.
-- 2차까지 후보 0건이면 **큐에 넣지 않는다**(배달할 방이 없음). 3차에서 LLM이 모든 후보를 기각해도 drop(§3.4).
+- 2차까지 후보 0건이면 원칙적으로 **큐에 넣지 않는다**(배달할 방이 없음). **예외**: 매크로 키워드 사전(금리·환율·유가·업종 규제 등) 히트 시 `codes` 공란 + `macroHint` 필드로 적재한다 — 어느 섹터에 작용하는지는 llm이 판정(§3.6). 3차에서 LLM이 모든 후보(종목·섹터)를 기각하면 drop(§3.4).
 - `codes` 필드는 큐 스키마(Redis 계약 §2.1) 그대로 콤마 구분 다중.
 
 ### 2.5 큐 적재
@@ -148,13 +149,18 @@ Redis 계약 §2.1 스키마를 그대로 사용한다: `source` · `sourceId` �
 ```json
 {
   "summary": "3줄 요약 (각 줄 ≤ 80자)",
+  "scope": "STOCK | SECTOR | MARKET",
   "stocks": [
     { "code": "005930", "relevant": true, "sentiment": "POSITIVE|NEGATIVE|NEUTRAL", "confidence": 0.0~1.0, "reason": "한 줄" }
+  ],
+  "sectors": [
+    { "sectorCode": "27", "sentiment": "POSITIVE|NEGATIVE|NEUTRAL", "impact": "HIGH|MEDIUM|LOW", "reason": "한 줄" }
   ]
 }
 ```
 
-- `relevant=false`인 후보는 제외(사전 매칭 오탐 제거). 전부 false면 클러스터를 `IRRELEVANT`로 마킹하고 발행 없이 XACK.
+- `scope=STOCK`이면 `sectors` 무시, `SECTOR`/`MARKET` 처리는 §3.6. 프롬프트에 섹터 후보는 §5 `sector` 목록을 제시(자유 서술이 아니라 코드 선택).
+- `relevant=false`인 후보는 제외(사전 매칭 오탐 제거). 종목·섹터 전부 기각이면 클러스터를 `IRRELEVANT`로 마킹하고 발행 없이 XACK.
 - confidence < 0.6이면 sentiment를 NEUTRAL로 강등 — 애매한 건 호재/악재로 단정하지 않는다.
 - 모델: 클러스터 요약은 **claude-haiku-4-5**(건수 많음·단순), 일일 다이제스트는 **claude-sonnet-5**(하루 종목당 1회·종합 판단). `LlmClient` 포트 뒤라 교체 자유.
 - 비용 추정: 시드 41종목 기준 일 ~500기사 → ~150클러스터 × ~2K tokens(Haiku) + 41다이제스트 × ~3K tokens(Sonnet) — 월 수 달러 수준.
@@ -184,6 +190,26 @@ stream payload (ws_api_spec §4.3 확장 — ⚠️ §6 증보):
 
 `stream_event.payload`는 JSONB라 core-api 스키마 변경 없이 그대로 조회에 노출된다(`GET /rooms/{code}/stream`).
 
+### 3.6 섹터·매크로 뉴스 — scope 사다리
+
+금리 인상·환율 급변·업종 규제처럼 특정 기업 언급 없이 업종 전반에 작용하는 뉴스는 종목 사전 매칭에 잡히지 않고, 잡더라도 "어느 방에 배달할지"가 별도 문제다. LLM 판정 `scope`(§3.4)에 따라 세 갈래로 처리한다.
+
+| scope | 판정 예 | 배달 | 근거 |
+|---|---|---|---|
+| `STOCK` | 개별 기업 수주·실적·공시 | 현행 경로(§3.5) | — |
+| `SECTOR` | 기준금리 인상 → 은행·증권·건설 | 섹터를 구성 종목으로 해소해 종목별 stream_event INSERT + PUBLISH. payload에 `scope`·`sector` 표기 | 섹터 방이 없으므로("종목 하나=방 하나") 구성 종목 방이 유일한 노출면 — 방에서 "섹터 이슈" 배지로 구분 |
+| `MARKET` | 코스피 전체 급락, 거시 지표 | 방 fan-out **없음** — 일일 다이제스트 '시장 이슈'로만 반영(§4.2) | 전 방 동보(~2,600방)는 노이즈·비용만 크고 종목 방의 정보가치가 없다 |
+
+- **섹터 해소**: `stock_master.sector_code`(§5)로 구성 종목을 조회하되 **수집 커버리지 종목(§2.2)과의 교집합**만 배달한다. 해소 결과가 상한(기본 100종목) 초과면 MARKET으로 강등 — fan-out 폭주 방지.
+- **감성은 섹터별로 반대일 수 있다** — 금리 인상은 은행 POSITIVE·건설 NEGATIVE. `news_cluster_sector`에 섹터 단위로 저장하고, fan-out된 각 stream_event에는 **그 종목이 속한 섹터의 감성**을 싣는다.
+- **노이즈 가드 2중**: ① 매크로 기사는 물량이 많지만 클러스터링(§3.3)이 선행 방어선 — 금리 기사 수십 건도 1클러스터 1이벤트. ② `impact=LOW` 판정은 실시간 fan-out 없이 다이제스트에만 반영(방 스트림은 HIGH·MEDIUM만).
+- SECTOR 이벤트 payload 예:
+
+```json
+{ "category": "news", "scope": "SECTOR", "sector": { "code": "27", "name": "은행" },
+  "title": "한은, 기준금리 25bp 인상", "summary": "…", "sentiment": "POSITIVE", "sources": [ … ], "occurredAt": … }
+```
+
 ---
 
 ## 4. 일일 다이제스트 — 호재/악재 브리핑
@@ -208,6 +234,8 @@ stream payload (ws_api_spec §4.3 확장 — ⚠️ §6 증보):
     "date": "2026-07-16",
     "positives": [ { "title": "3나노 수주", "line": "한 줄 요지", "eventId": "01J…" } ],
     "negatives": [ { "title": "…", "line": "…", "eventId": "01J…" } ],
+    "sectorIssues": [ { "title": "기준금리 25bp 인상", "line": "은행업 이자이익 개선 기대", "sentiment": "POSITIVE", "eventId": "01J…" } ],
+    "marketIssues": [ { "title": "코스피 외국인 순매도 지속", "line": "…" } ],
     "neutralCount": 4,
     "newsCount": 12
   },
@@ -215,7 +243,8 @@ stream payload (ws_api_spec §4.3 확장 — ⚠️ §6 증보):
 }
 ```
 
-- `eventId` 참조로 클라가 브리핑에서 원 뉴스 이벤트로 점프할 수 있다.
+- **입력에 세 층을 모두 취합한다**: 종목 직접 클러스터(STOCK) + 그 종목 섹터의 SECTOR 클러스터(impact LOW 포함 — 실시간에서 걸렀어도 여기엔 반영) + MARKET 클러스터. 단 `positives/negatives`는 종목 직접 뉴스만 담고, 섹터·시장 요인은 `sectorIssues`/`marketIssues` 버킷으로 분리한다 — 전 종목 브리핑에 같은 매크로 문구가 반복돼 종목 고유 정보가 희석되는 것을 막는다.
+- `eventId` 참조로 클라가 브리핑에서 원 뉴스 이벤트로 점프할 수 있다(MARKET 클러스터는 방 이벤트가 없으므로 eventId 없이 제목·한 줄만).
 - 프롬프트에 면책 고정: 투자 판단의 근거가 아니라 정보 요약임을 명시(기획안 FR-17 면책 방침과 동일 기조). 클라 노출 문구는 클라 몫.
 - persist → publish(`stream:{code}`) → XACK — 뉴스와 동일 불변식.
 
@@ -247,6 +276,12 @@ news_cluster_stock(
   PK(cluster_id, code)
 )
 stock_alias(code CHAR(6), alias TEXT, PK(code, alias))
+news_cluster_sector(
+  cluster_id FK, sector_code FK,
+  sentiment TEXT, confidence NUMERIC(3,2), impact TEXT,   -- HIGH | MEDIUM | LOW
+  PK(cluster_id, sector_code)
+)
+-- sector 테이블·stock_master.sector_code는 KIS 워커 명세 §4 소유(반영됨) — 여기서 재정의하지 않는다
 
 -- INDEX news_article (embedding vector_cosine_ops) ivfflat · (title_hash) · (published_at)
 -- INDEX news_cluster (last_article_at) — 72h 창 후보 조회
@@ -256,17 +291,19 @@ stock_alias(code CHAR(6), alias TEXT, PK(code, alias))
 
 ---
 
-## 6. 계약 증보 제안 ⚠️
+## 6. 계약 반영 내역
 
-**아래는 현행 계약(redis_contract v0.2 · ws_api_spec v0.4)에 없는 신규 제안이다. 팀 합의 후 각 문서에 병합하고 나서 구현한다** (CLAUDE.md: 새 채널/키는 코드보다 문서 먼저).
+이 설계가 요구한 계약 확장은 **각 계약 문서와 `:contracts` 코드에 반영 완료**다(문서 먼저 원칙).
 
-| 대상 문서 | 항목 | 내용 |
+| 대상 문서 | 항목 | 상태 |
 |---|---|---|
-| redis_contract §2.1 | `type` 값 추가 | `"digest"` — 일일 브리핑 잡. `sourceId=digest:{code}:{date}`, title/url/body 공란 |
-| redis_contract §2/§3 | `queue:ingest:dlq` | poison 엔트리 격리(Stream, 소비자 없음 — 수동 점검) |
-| redis_contract §3 | `lock:cluster:{code}` | 클러스터 판정 직렬화 락, TTL 3s, llm-worker 전용 |
-| ws_api_spec §4.3 | stream payload 필드 추가 | `sentiment`(news) · `sources[]`(news) · `digest{}`(ai) — 전부 optional, 기존 클라 파싱 비파괴 |
-| :contracts | 상수 추가 | `Queues.INGEST`·`Queues.INGEST_DLQ`·그룹명 `g:llm`, `Keys.seenIngest(sourceId)`·`Keys.clusterLock(code)`, payload 필드명 |
+| redis_contract **v0.3** §2.1·§2.3 | `type="digest"` + digest 엔트리 규약(`sourceId=digest:{code}:{date}`) | ✅ 반영 |
+| redis_contract v0.3 §2.1 | `macroHint` 필드(선택) + `codes` 공란 허용 | ✅ 반영 |
+| redis_contract v0.3 §2·§4 | `queue:ingest:dlq` — poison 격리(delivery count > 5) | ✅ 반영 |
+| redis_contract v0.3 §3·§4 | `lock:cluster:{code}` — 클러스터 판정 직렬화 락(TTL 3s) | ✅ 반영 |
+| ws_api_spec **v0.5** §4.3 | `sentiment`·`scope`·`sector{}`·`sources[]`(news) · `digest{}`(ai) — 전부 optional, 비파괴 | ✅ 반영 |
+| KIS 워커 명세 §4 | `sector` 테이블 + `stock_master.sector_code`(마스터 파일 업종 필드 파싱, `stock_master_sync` 적재) | ✅ 반영 |
+| :contracts | `Queues`·`Keys.seenIngest/clusterLock`·`IngestQueueEntry`·`StreamData` v0.5 확장 | ✅ 반영 (N0) |
 
 ---
 
@@ -303,12 +340,13 @@ worker-llm/
 
 | 단계 | 범위 | DoD |
 |---|---|---|
-| **N0** | 두 모듈 스캐폴딩 · settings.gradle 등록 · :contracts 상수(§6 합의 후) | `./gradlew :worker-ingest:test :worker-llm:test` 통과 |
+| **N0** | 두 모듈 스캐폴딩 · settings.gradle 등록 · :contracts 상수(§6 잔여분) | `./gradlew :worker-ingest:test :worker-llm:test` 통과 |
 | **N1** | ingest: RSS 1소스 → 정규화·seen·사전 매핑 → XADD | 동일 기사 재수집 시 큐 적재 0건(Testcontainers Redis) |
 | **N2** | llm: 소비 → 요약·감성 → persist→publish→ack (클러스터링 없이 1기사=1이벤트) | **FR-11**: 동일 sourceId 중복 요약 0건 · XADD→`GET /rooms/{code}/stream` 노출 E2E |
 | **N3** | 클러스터링(pgvector·락·편입 병합) + 네이버 검색 API 소스 | 동일 사건 3개 언론사 기사 → stream_event 1건 · `sources` 3건 · 편입 재발행 0건 |
 | **N4** | 일일 다이제스트 | `digest:{code}:{date}` 멱등 — 잡 2회 적재에도 브리핑 1건 · 호재/악재 리스트 노출 |
 | **N5** | 운영: DLQ·XAUTOCLAIM·메트릭·알람 | poison 5회 초과 → DLQ 격리 · PEL 알람 동작 |
+| **N6** | 섹터·매크로(§3.6): 매크로 키워드 사전 · scope 판정 · 섹터 fan-out · 다이제스트 sectorIssues/marketIssues — **선행: `stock_master.sector_code` 적재(worker-batch)** | 금리 인상 기사 1건 → 은행 섹터 커버 종목 각 방에 `scope=SECTOR` 이벤트 1건씩 · MARKET 기사는 방 이벤트 0건 + 다이제스트 반영 |
 
 각 단계 = PR 1개(git_convention: scope=worker-ingest/worker-llm). `ClusterAssigner` 판정 로직은 refcount 규칙과 동급 — 단위 테스트 없는 변경 금지.
 
@@ -322,3 +360,6 @@ worker-llm/
 | 4 | 폴링 종목 확장 | 시드 41 → watchlist 합집합 ∪ 거래대금 상위 N. 네이버 API 일 한도 내 배분 설계 필요 |
 | 5 | RSS 소스 목록 확정 | 언론사별 RSS 제공 여부·약관 확인 후 목록 픽스 |
 | 6 | 편입 시 클라 갱신 | 현재 재발행 없음(접속 중 클라는 `sources` 갱신을 못 봄). 필요해지면 갱신 전용 경량 이벤트 검토 — MVP 아님 |
+| 7 | 섹터 분류 체계 | 기본: KIS 마스터 파일 업종 필드(`stock_master_sync`가 이미 파싱하는 소스). 세분화가 부족하면 KRX 업종분류/GICS 검토 — 판단 기준은 LLM 섹터 후보 목록의 품질 |
+| 8 | SECTOR fan-out 파라미터 | 상한 100종목·impact LOW 제외로 시작, 실데이터로 튜닝. 매크로 키워드 사전 목록 확정 |
+| 9 | MARKET 뉴스 실시간 노출면 | MVP는 다이제스트만. 홈 피드/시장 브리핑 방(종목 방 밖 노출면)은 별도 기획 필요 — P3 |

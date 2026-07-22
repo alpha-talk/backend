@@ -1,6 +1,7 @@
-# Alpha Talk — WebSocket(STOMP) API 명세 v0.4
+# Alpha Talk — WebSocket(STOMP) API 명세 v0.5
 **WS Gateway · 실시간 푸시 전용**
 
+> **v0.4 → v0.5**: `stream` payload 확장(§4.3) — `sentiment`·`scope`·`sector`·`sources[]`(news) · `digest{}`(ai) **optional** 필드 추가([뉴스 파이프라인 명세](alphatalk_news_worker_spec.md) §3.5·§3.6·§4.2). 기존 필드 변경 없음 — 모르는 필드는 무시하면 된다(비파괴).
 > **v0.3 → v0.4**: 게이트웨이 구현 스택을 WebFlux → **Spring MVC + STOMP 브로커**로 변경 (하단 구현 노트만 수정, 클라이언트 노출 프로토콜 §1~§9는 변경 없음)
  
 ---
@@ -116,9 +117,17 @@ accept-version:1.2
   "title": "...",
   "summary": "...",
   "sourceUrl": "https://...",
-  "occurredAt": 1719500000000
+  "occurredAt": 1719500000000,
+
+  "sentiment": "POSITIVE | NEGATIVE | NEUTRAL",
+  "scope": "STOCK | SECTOR | MARKET",
+  "sector": { "code": "27", "name": "은행" },
+  "sources": [ { "name": "한국경제", "url": "https://..." } ],
+  "digest": { "date": "2026-07-16", "positives": [], "negatives": [], "sectorIssues": [], "marketIssues": [], "neutralCount": 0, "newsCount": 0 }
 }
 ```
+
+- 빈 줄 아래 5개 필드는 **전부 optional**: `sentiment`·`scope`·`sector`·`sources`는 `category=news`에서, `digest`는 `category=ai`(일일 브리핑)에서만 온다. 상세 구조·생성 규칙은 [뉴스 파이프라인 명세](alphatalk_news_worker_spec.md) §3.5·§3.6·§4.2.
 
 ### 4.4 `post` (글/댓글)
 
