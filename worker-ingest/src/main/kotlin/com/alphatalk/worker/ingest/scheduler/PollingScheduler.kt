@@ -10,8 +10,7 @@ import org.springframework.stereotype.Component
 
 @Configuration
 @EnableScheduling
-@ConditionalOnProperty("alphatalk.ingest.poll-enabled", havingValue = "true", matchIfMissing = true)
-class PollingConfig
+class SchedulingConfig
 
 @Component
 @ConditionalOnProperty("alphatalk.ingest.poll-enabled", havingValue = "true", matchIfMissing = true)
