@@ -7,6 +7,9 @@ import com.alphatalk.worker.ingest.queue.IngestQueue
 import com.alphatalk.worker.ingest.source.FetchedArticle
 import com.alphatalk.worker.ingest.source.NewsSource
 import org.junit.jupiter.api.Test
+import java.util.concurrent.CyclicBarrier
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
@@ -95,6 +98,51 @@ class IngestPollerTest {
     }
 
     @Test
+    fun `소스 fetch는 스레드 풀에서 병렬 실행된다`() {
+        val barrier = CyclicBarrier(2)
+        val sources = listOf("a", "b").map { sourceName ->
+            object : NewsSource {
+                override val name = sourceName
+                override fun fetchLatest(): List<FetchedArticle> {
+                    barrier.await(2, TimeUnit.SECONDS)
+                    return listOf(FetchedArticle(title = "삼성전자 $sourceName", url = "https://example.com/$sourceName"))
+                }
+            }
+        }
+        val pool = Executors.newFixedThreadPool(2)
+        try {
+            val poller = IngestPoller(sources, mapper, seen, queue, excerptMaxLength = 200, fetchExecutor = pool)
+            val stats = poller.pollOnce()
+            assertEquals(0, stats.sourceErrors)
+            assertEquals(2, stats.fetched)
+            assertEquals(2, stats.enqueued)
+        } finally {
+            pool.shutdown()
+        }
+    }
+
+    @Test
+    fun `병렬 실행에서도 소스별 통계가 합산된다`() {
+        val pool = Executors.newFixedThreadPool(4)
+        try {
+            val poller = IngestPoller(
+                listOf(
+                    FakeSource("a", listOf(FetchedArticle(title = "삼성전자 A", url = "https://example.com/a"))),
+                    FakeSource("b", listOf(FetchedArticle(title = "오늘의 날씨", url = "https://example.com/w"))),
+                    FailingSource("c"),
+                ),
+                mapper, seen, queue, excerptMaxLength = 200, fetchExecutor = pool,
+            )
+            val stats = poller.pollOnce()
+            assertEquals(1, stats.enqueued)
+            assertEquals(1, stats.unmatchedSkipped)
+            assertEquals(1, stats.sourceErrors)
+        } finally {
+            pool.shutdown()
+        }
+    }
+
+    @Test
     fun `발췌는 상한 길이로 자른다`() {
         val poller = poller(
             FakeSource("hankyung", listOf(FetchedArticle(title = "삼성전자", url = "https://example.com/1", excerpt = "가".repeat(500)))),
@@ -113,7 +161,11 @@ class IngestPollerTest {
 
     private class InMemorySeenMarker : SeenMarker {
         val marked = mutableSetOf<String>()
+
+        @Synchronized
         override fun markIfNew(sourceId: String) = marked.add(sourceId)
+
+        @Synchronized
         override fun clear(sourceId: String) {
             marked.remove(sourceId)
         }
@@ -122,6 +174,8 @@ class IngestPollerTest {
     private class RecordingQueue : IngestQueue {
         val entries = mutableListOf<IngestQueueEntry>()
         var failNext = false
+
+        @Synchronized
         override fun enqueue(entry: IngestQueueEntry) {
             if (failNext) {
                 failNext = false

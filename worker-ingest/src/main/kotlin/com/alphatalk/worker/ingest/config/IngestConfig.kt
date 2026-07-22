@@ -11,9 +11,18 @@ import com.alphatalk.worker.ingest.source.RssNewsSource
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import org.springframework.data.redis.core.StringRedisTemplate
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 
 @Configuration
 class IngestConfig {
+
+    @Bean(destroyMethod = "shutdown")
+    fun ingestFetchExecutor(props: IngestProperties): ExecutorService =
+        Executors.newFixedThreadPool(
+            props.fetchConcurrency,
+            Thread.ofPlatform().name("ingest-fetch-", 0).factory(),
+        )
 
     @Bean
     fun stockCodeMapper(props: IngestProperties): StockCodeMapper =
@@ -35,6 +44,7 @@ class IngestConfig {
         mapper: StockCodeMapper,
         seen: SeenMarker,
         queue: IngestQueue,
+        ingestFetchExecutor: ExecutorService,
         props: IngestProperties,
     ): IngestPoller = IngestPoller(
         sources = props.feeds.map { RssNewsSource(it.name, it.url) },
@@ -42,5 +52,6 @@ class IngestConfig {
         seen = seen,
         queue = queue,
         excerptMaxLength = props.excerptMaxLength,
+        fetchExecutor = ingestFetchExecutor,
     )
 }
