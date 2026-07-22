@@ -27,6 +27,14 @@ alphatalk:
                       #   url: https://example.com/rss
     stocks: []        # - code: "005930"
                       #   names: [삼성전자, 삼전]
+    naver:
+      client-id: ${NAVER_CLIENT_ID:}        # 미설정이면 네이버 소스 비활성
+      client-secret: ${NAVER_CLIENT_SECRET:}
+      display: 30
+    digest:
+      enabled: true
+      cron: "0 0 18 * * *"                  # 매일 18:00 KST — 뉴스 워커 명세 §4.1
+      zone: Asia/Seoul
 
 management:
   endpoints:
