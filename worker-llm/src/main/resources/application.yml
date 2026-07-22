@@ -20,6 +20,7 @@ server:
 alphatalk:
   llm:
     consume-enabled: true
+    allow-fake: false
     consumer-block: 5s
     consumer-batch: 8
     poison-max-deliveries: 5      # 초과 시 queue:ingest:dlq 격리 (Redis 계약 v0.3 §2)
@@ -31,12 +32,16 @@ alphatalk:
       lock-ttl: 3s
     sector:
       fanout-cap: 100             # 초과 시 MARKET 강등 (명세 §3.6)
+      coverage-stocks: []
+    article:
+      allowed-host-suffixes: []
+      min-host-interval: 1s
     models:
       summary: claude-haiku-4-5
       digest: claude-sonnet-5
     anthropic:
       base-url: https://api.anthropic.com
-      api-key: ${ANTHROPIC_API_KEY:}    # 미설정이면 규칙 기반 fake로 동작 (로컬·테스트)
+      api-key: ${ANTHROPIC_API_KEY:}
       version: "2023-06-01"
       max-tokens: 1024
     embedding:

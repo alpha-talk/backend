@@ -3,6 +3,7 @@ package com.alphatalk.worker.llm.consume
 import com.alphatalk.contracts.Queues
 import com.alphatalk.contracts.queue.IngestQueueEntry
 import com.alphatalk.contracts.queue.IngestType
+import com.alphatalk.worker.llm.cluster.ClusterContendedException
 import com.alphatalk.worker.llm.enrich.DigestProcessor
 import com.alphatalk.worker.llm.enrich.NewsProcessor
 import io.micrometer.core.instrument.MeterRegistry
@@ -73,8 +74,9 @@ class IngestConsumer(
                 XClaimOptions.minIdle(claimIdle).ids(message.id),
             )
             for (record in claimed) {
-                if (message.totalDeliveryCount > poisonMaxDeliveries) {
-                    quarantine(record, "delivery count ${message.totalDeliveryCount} > $poisonMaxDeliveries")
+                val deliveryCount = message.totalDeliveryCount + 1
+                if (deliveryCount > poisonMaxDeliveries) {
+                    quarantine(record, "delivery count $deliveryCount > $poisonMaxDeliveries")
                     handled++
                 } else if (handle(record)) {
                     handled++
@@ -100,12 +102,24 @@ class IngestConsumer(
                 meters.counter("llm.processed", "type", entry.type.value).increment()
                 true
             },
-            onFailure = {
-                log.warn("entry processing failed, left in PEL: sourceId={}", entry.sourceId, it)
-                meters.counter("llm.failed", "type", entry.type.value).increment()
+            onFailure = { error ->
+                if (error is ClusterContendedException) {
+                    log.debug("cluster contended, retry later via PEL: sourceId={}", entry.sourceId)
+                    meters.counter("llm.contended").increment()
+                } else {
+                    log.warn("entry processing failed, left in PEL: sourceId={}", entry.sourceId, error)
+                    meters.counter("llm.failed", "type", entry.type.value).increment()
+                }
                 false
             },
         )
+    }
+
+    fun samplePending(): Long {
+        val summary = runCatching {
+            redis.opsForStream<String, String>().pending(Queues.INGEST, Queues.INGEST_GROUP_LLM)
+        }.getOrNull() ?: return 0
+        return summary.totalPendingMessages
     }
 
     private fun quarantine(record: MapRecord<String, String, String>, reason: String) {

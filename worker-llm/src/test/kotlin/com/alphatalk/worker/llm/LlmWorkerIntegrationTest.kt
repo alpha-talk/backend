@@ -1,12 +1,19 @@
 package com.alphatalk.worker.llm
 
 import com.alphatalk.contracts.Channels
+import com.alphatalk.contracts.Keys
 import com.alphatalk.contracts.Queues
+import com.alphatalk.contracts.envelope.DigestData
+import com.alphatalk.contracts.envelope.StreamData
 import com.alphatalk.contracts.queue.IngestQueueEntry
 import com.alphatalk.contracts.queue.IngestType
+import com.alphatalk.worker.llm.article.ArticleRequestGate
+import com.alphatalk.worker.llm.cluster.ClusterStore
 import com.alphatalk.worker.llm.consume.IngestConsumer
 import com.alphatalk.worker.llm.enrich.DigestProcessor
 import com.alphatalk.worker.llm.enrich.NewsProcessor
+import com.alphatalk.worker.llm.enrich.TransactionRunner
+import com.alphatalk.worker.llm.persist.StreamEventStore
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -24,11 +31,14 @@ import org.testcontainers.junit.jupiter.Container
 import org.testcontainers.junit.jupiter.Testcontainers
 import org.testcontainers.utility.DockerImageName
 import java.time.Duration
+import java.time.Instant
 import java.time.ZoneId
 import java.time.ZonedDateTime
+import java.net.URI
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
@@ -36,6 +46,8 @@ import kotlin.test.assertTrue
     properties = [
         "alphatalk.llm.consumer-block=300ms",
         "alphatalk.llm.cluster.similarity-threshold=0.8",
+        "alphatalk.llm.sector.coverage-stocks=105560,055550,086790",
+        "alphatalk.llm.article.min-host-interval=100ms",
     ],
 )
 @Testcontainers(disabledWithoutDocker = true)
@@ -68,6 +80,18 @@ class LlmWorkerIntegrationTest {
 
     @Autowired
     private lateinit var newsProcessor: NewsProcessor
+
+    @Autowired
+    private lateinit var eventStore: StreamEventStore
+
+    @Autowired
+    private lateinit var articleRequestGate: ArticleRequestGate
+
+    @Autowired
+    private lateinit var clusterStore: ClusterStore
+
+    @Autowired
+    private lateinit var transactions: TransactionRunner
 
     @BeforeEach
     fun reset() {
@@ -260,4 +284,84 @@ class LlmWorkerIntegrationTest {
     }
 
     private fun dlqSize(): Long = redisTemplate.opsForStream<String, String>().size(Queues.INGEST_DLQ) ?: 0
+
+    @Test
+    fun `원문 요청 게이트는 호스트별 최소 간격을 공유한다`() {
+        val uri = URI("https://news.example.com/article")
+        val key = Keys.articleFetchRate("news.example.com")
+        articleRequestGate.await(uri)
+        val remaining = redisTemplate.getExpire(key, TimeUnit.MILLISECONDS)
+        assertTrue(remaining > 0)
+
+        val started = System.nanoTime()
+        articleRequestGate.await(uri)
+        val elapsedMillis = Duration.ofNanos(System.nanoTime() - started).toMillis()
+
+        assertTrue(elapsedMillis >= (remaining - 20).coerceAtLeast(1))
+    }
+
+    @Test
+    fun `요약 저장 트랜잭션이 실패하면 부분 링크를 롤백한다`() {
+        val clusterId = "rollback-cluster".padEnd(26, '0')
+        clusterStore.createCluster(clusterId, "롤백 검증", Instant.now())
+
+        assertFailsWith<IllegalStateException> {
+            transactions.run {
+                clusterStore.addCandidateCode(clusterId, "005930")
+                throw IllegalStateException("rollback")
+            }
+        }
+
+        assertTrue(clusterStore.stockLinks(clusterId).isEmpty())
+    }
+
+    @Test
+    fun `V3 - 같은 날짜 다이제스트 이중 삽입은 유니크 인덱스가 차단`() {
+        val data = StreamData(
+            category = "ai",
+            title = "브리핑",
+            occurredAt = 1,
+            digest = DigestData(date = "2026-07-16"),
+        )
+        val first = eventStore.insertEvent("01ARZ3NDEKTSV4RRFFQ69G5FA1", "005930", "AI", Instant.now(), "worker-llm", data)
+        val second = eventStore.insertEvent("01ARZ3NDEKTSV4RRFFQ69G5FA2", "005930", "AI", Instant.now(), "worker-llm", data)
+        assertTrue(first)
+        assertEquals(false, second)
+    }
+
+    @Test
+    fun `N4+N6 - SECTOR fan-out 뉴스는 다이제스트 sectorIssues로 분류`() {
+        xadd(newsEntry("hankyung:sd1", "기준금리 인상에 은행 이자이익 개선 기대", codes = emptyList(), macroHint = "금리"))
+        drain()
+        assertEquals(1, newsEventCount("105560"))
+
+        val zone = ZoneId.of("Asia/Seoul")
+        val now = ZonedDateTime.now(zone)
+        val date = (if (now.hour >= 18) now.plusDays(1) else now).toLocalDate().toString()
+        xadd(
+            IngestQueueEntry(
+                source = IngestQueueEntry.DIGEST_SOURCE,
+                sourceId = IngestQueueEntry.digestSourceId("105560", date),
+                type = IngestType.DIGEST,
+                codes = listOf("105560"),
+                title = "",
+                url = "",
+                fetchedAt = System.currentTimeMillis(),
+            ),
+        )
+        drain()
+
+        val positives = jdbc.queryForObject(
+            "SELECT jsonb_array_length(payload -> 'digest' -> 'positives') FROM stream_event WHERE code = '105560' AND type = 'AI'",
+            emptyMap<String, Any>(),
+            Long::class.java,
+        )
+        val sectorIssues = jdbc.queryForObject(
+            "SELECT jsonb_array_length(payload -> 'digest' -> 'sectorIssues') FROM stream_event WHERE code = '105560' AND type = 'AI'",
+            emptyMap<String, Any>(),
+            Long::class.java,
+        )
+        assertEquals(0, positives)
+        assertEquals(1, sectorIssues)
+    }
 }

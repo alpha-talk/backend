@@ -1,0 +1,3 @@
+alphatalk:
+  llm:
+    allow-fake: true

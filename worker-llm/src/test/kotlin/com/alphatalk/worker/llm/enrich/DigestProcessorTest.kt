@@ -57,8 +57,8 @@ class DigestProcessorTest {
             it.scope = scope
         }
         code?.let {
-            store.insertStockLinkIfAbsent(id, it, sentiment?.name, 0.9)
-            store.setStockLinkEvent(id, it, "ev-$id".take(26).padEnd(26, '0'))
+            store.applyStockVerdict(id, it, sentiment?.name, 0.9, rejected = false)
+            store.claimStockEvent(id, it, "ev-$id".take(26).padEnd(26, '0'))
         }
     }
 
@@ -92,6 +92,20 @@ class DigestProcessorTest {
         processor.process(digestEntry())
         processor.process(digestEntry())
         assertEquals(1, events.inserted.size)
+    }
+
+    @Test
+    fun `SECTOR fan-out 클러스터는 positives가 아니라 sectorIssues로 분류`() {
+        val id = "c7".padEnd(26, '0')
+        seedCluster(id, "반도체 업황 개선", Sentiment.POSITIVE, inWindow, scope = "SECTOR")
+        store.upsertSectorLink(id, "33", "POSITIVE", 0.9, "HIGH")
+
+        processor.process(digestEntry())
+
+        val digest = events.inserted.single().data.digest!!
+        assertTrue(digest.positives.isEmpty())
+        assertEquals(listOf("반도체 업황 개선"), digest.sectorIssues.map { it.title })
+        assertEquals(store.stockLinks(id).single().streamEventId, digest.sectorIssues.single().eventId)
     }
 
     @Test

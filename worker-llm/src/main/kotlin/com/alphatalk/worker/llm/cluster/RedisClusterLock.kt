@@ -2,6 +2,7 @@ package com.alphatalk.worker.llm.cluster
 
 import com.alphatalk.contracts.Keys
 import org.springframework.data.redis.core.StringRedisTemplate
+import org.springframework.data.redis.core.script.DefaultRedisScript
 import java.time.Duration
 import java.util.UUID
 
@@ -23,9 +24,20 @@ class RedisClusterLock(
         try {
             return action()
         } finally {
-            if (redis.opsForValue().get(key) == token) {
-                redis.delete(key)
-            }
+            redis.execute(UNLOCK_SCRIPT, listOf(key), token)
         }
+    }
+
+    companion object {
+        private val UNLOCK_SCRIPT = DefaultRedisScript(
+            """
+            if redis.call('get', KEYS[1]) == ARGV[1] then
+                return redis.call('del', KEYS[1])
+            else
+                return 0
+            end
+            """.trimIndent(),
+            Long::class.java,
+        )
     }
 }
