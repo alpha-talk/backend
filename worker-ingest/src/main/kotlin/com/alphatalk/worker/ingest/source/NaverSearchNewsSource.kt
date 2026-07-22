@@ -1,5 +1,6 @@
 package com.alphatalk.worker.ingest.source
 
+import com.alphatalk.worker.ingest.normalize.ArticleNormalizer
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import org.slf4j.LoggerFactory
 import java.io.InputStream
@@ -23,11 +24,17 @@ class NaverSearchNewsSource(
 
     override val name: String = "naver"
 
-    override fun fetchLatest(): List<FetchedArticle> = queries.flatMap { query ->
-        runCatching { search(query) }.getOrElse {
-            log.warn("naver search failed: code={} reason={}", query.code, it.message)
-            emptyList()
+    override fun fetchLatest(): List<FetchedArticle> {
+        val articles = queries.flatMap { query ->
+            runCatching { search(query) }.getOrElse {
+                log.warn("naver search failed: code={} reason={}", query.code, it.message)
+                emptyList()
+            }
         }
+        return articles
+            .groupBy { ArticleNormalizer.normalizeUrl(it.url) }
+            .values
+            .map { group -> group.first().copy(codes = group.flatMap { it.codes }.distinct().sorted()) }
     }
 
     private fun search(query: StockQuery): List<FetchedArticle> {
