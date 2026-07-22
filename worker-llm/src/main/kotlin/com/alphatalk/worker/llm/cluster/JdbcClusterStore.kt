@@ -2,10 +2,12 @@ package com.alphatalk.worker.llm.cluster
 
 import com.alphatalk.contracts.envelope.SourceRef
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate
+import org.springframework.transaction.annotation.Transactional
 import java.sql.ResultSet
 import java.sql.Timestamp
 import java.time.Instant
 
+@Transactional
 class JdbcClusterStore(
     private val jdbc: NamedParameterJdbcTemplate,
 ) : ClusterStore {
@@ -21,30 +23,57 @@ class JdbcClusterStore(
             ::clusterRow,
         ).firstOrNull()
 
-    override fun findClusterByTitleHash(titleHash: String, since: Instant): String? =
-        jdbc.query(
+    override fun findClusterByTitleHash(titleHash: String, since: Instant, codes: List<String>): String? {
+        val params = mutableMapOf<String, Any>("hash" to titleHash, "since" to Timestamp.from(since))
+        val codeFilter = if (codes.isEmpty()) {
+            """
+            AND (
+                c.scope IN ('SECTOR', 'MARKET') OR
+                (c.status IN ('NEW', 'SUMMARIZING') AND NOT EXISTS (
+                    SELECT 1 FROM news_cluster_stock s WHERE s.cluster_id = a.cluster_id
+                ))
+            )
+            """.trimIndent()
+        } else {
+            params["codes"] = codes
+            "AND EXISTS (SELECT 1 FROM news_cluster_stock s WHERE s.cluster_id = a.cluster_id AND s.code IN (:codes))"
+        }
+        return jdbc.query(
             """
             SELECT a.cluster_id
             FROM news_article a JOIN news_cluster c ON c.id = a.cluster_id
             WHERE a.title_hash = :hash AND c.last_article_at >= :since
+              AND c.status <> 'IRRELEVANT' $codeFilter
             ORDER BY c.last_article_at DESC LIMIT 1
             """,
-            mapOf("hash" to titleHash, "since" to Timestamp.from(since)),
+            params,
         ) { rs, _ -> rs.getString(1) }.firstOrNull()
+    }
 
     override fun nearestCluster(embedding: FloatArray, since: Instant, codes: List<String>): Pair<String, Double>? {
-        val codeFilter = if (codes.isEmpty()) "" else
-            "AND (c.status = 'NEW' OR EXISTS (SELECT 1 FROM news_cluster_stock s WHERE s.cluster_id = c.id AND s.code IN (:codes)))"
         val params = mutableMapOf<String, Any>(
             "vector" to toVectorLiteral(embedding),
             "since" to Timestamp.from(since),
         )
-        if (codes.isNotEmpty()) params["codes"] = codes
+        val codeFilter = if (codes.isEmpty()) {
+            """
+            AND (
+                c.scope IN ('SECTOR', 'MARKET') OR
+                (c.status IN ('NEW', 'SUMMARIZING') AND NOT EXISTS (
+                    SELECT 1 FROM news_cluster_stock s WHERE s.cluster_id = c.id
+                ))
+            )
+            """.trimIndent()
+        } else {
+            params["codes"] = codes
+            "AND EXISTS (SELECT 1 FROM news_cluster_stock s WHERE s.cluster_id = c.id AND s.code IN (:codes))"
+        }
         return jdbc.query(
             """
             SELECT a.cluster_id, 1 - (a.embedding <=> CAST(:vector AS vector)) AS similarity
             FROM news_article a JOIN news_cluster c ON c.id = a.cluster_id
-            WHERE a.embedding IS NOT NULL AND c.last_article_at >= :since $codeFilter
+            WHERE a.embedding IS NOT NULL AND c.last_article_at >= :since
+              AND c.status <> 'IRRELEVANT' $codeFilter
             ORDER BY a.embedding <=> CAST(:vector AS vector) LIMIT 1
             """,
             params,
@@ -61,7 +90,19 @@ class JdbcClusterStore(
         )
     }
 
-    override fun attachArticle(article: ArticleRecord, clusterId: String, embedding: FloatArray?) {
+    override fun discardEmptyCluster(clusterId: String): Boolean =
+        jdbc.update(
+            """
+            DELETE FROM news_cluster c
+            WHERE c.id = :id AND c.status = 'NEW' AND c.article_count = 0
+              AND NOT EXISTS (SELECT 1 FROM news_article a WHERE a.cluster_id = c.id)
+              AND NOT EXISTS (SELECT 1 FROM news_cluster_stock s WHERE s.cluster_id = c.id)
+              AND NOT EXISTS (SELECT 1 FROM news_cluster_sector s WHERE s.cluster_id = c.id)
+            """,
+            mapOf("id" to clusterId),
+        ) > 0
+
+    override fun attachArticle(article: ArticleRecord, clusterId: String, embedding: FloatArray?): Boolean {
         val inserted = jdbc.update(
             """
             INSERT INTO news_article
@@ -94,6 +135,18 @@ class JdbcClusterStore(
                 mapOf("id" to clusterId, "at" to Timestamp.from(article.publishedAt)),
             )
         }
+        return inserted > 0
+    }
+
+    override fun addCandidateCode(clusterId: String, code: String) {
+        jdbc.update(
+            """
+            INSERT INTO news_cluster_stock (cluster_id, code)
+            VALUES (:clusterId, :code)
+            ON CONFLICT (cluster_id, code) DO NOTHING
+            """,
+            mapOf("clusterId" to clusterId, "code" to code),
+        )
     }
 
     override fun cluster(clusterId: String): ClusterRecord =
@@ -103,23 +156,58 @@ class JdbcClusterStore(
             ::clusterRow,
         ).first()
 
-    override fun markSummarized(clusterId: String, summary: String, scope: String) {
+    override fun claimSummarize(clusterId: String, token: String, claimedAt: Instant, staleBefore: Instant): Boolean =
         jdbc.update(
-            "UPDATE news_cluster SET status = 'SUMMARIZED', summary = :summary, scope = :scope WHERE id = :id",
-            mapOf("id" to clusterId, "summary" to summary, "scope" to scope),
-        )
-    }
+            """
+            UPDATE news_cluster
+            SET status = 'SUMMARIZING', summarizing_at = :claimedAt, summarizing_token = :token
+            WHERE id = :id AND (
+                status = 'NEW' OR (
+                    status = 'SUMMARIZING' AND (summarizing_at IS NULL OR summarizing_at < :staleBefore)
+                )
+            )
+            """,
+            mapOf(
+                "id" to clusterId,
+                "token" to token,
+                "claimedAt" to Timestamp.from(claimedAt),
+                "staleBefore" to Timestamp.from(staleBefore),
+            ),
+        ) > 0
 
-    override fun markIrrelevant(clusterId: String) {
+    override fun renewSummarize(clusterId: String, token: String, renewedAt: Instant): Boolean =
         jdbc.update(
-            "UPDATE news_cluster SET status = 'IRRELEVANT' WHERE id = :id",
-            mapOf("id" to clusterId),
-        )
-    }
+            """
+            UPDATE news_cluster SET summarizing_at = :renewedAt
+            WHERE id = :id AND status = 'SUMMARIZING' AND summarizing_token = :token
+            """,
+            mapOf("id" to clusterId, "token" to token, "renewedAt" to Timestamp.from(renewedAt)),
+        ) > 0
+
+    override fun markSummarized(clusterId: String, token: String, summary: String, scope: String): Boolean =
+        jdbc.update(
+            """
+            UPDATE news_cluster
+            SET status = 'SUMMARIZED', summary = :summary, scope = :scope,
+                summarizing_at = NULL, summarizing_token = NULL
+            WHERE id = :id AND status = 'SUMMARIZING' AND summarizing_token = :token
+            """,
+            mapOf("id" to clusterId, "token" to token, "summary" to summary, "scope" to scope),
+        ) > 0
+
+    override fun markIrrelevant(clusterId: String, token: String): Boolean =
+        jdbc.update(
+            """
+            UPDATE news_cluster
+            SET status = 'IRRELEVANT', summarizing_at = NULL, summarizing_token = NULL
+            WHERE id = :id AND status = 'SUMMARIZING' AND summarizing_token = :token
+            """,
+            mapOf("id" to clusterId, "token" to token),
+        ) > 0
 
     override fun stockLinks(clusterId: String): List<StockLink> =
         jdbc.query(
-            "SELECT code, sentiment, confidence, stream_event_id FROM news_cluster_stock WHERE cluster_id = :id",
+            "SELECT code, sentiment, confidence, stream_event_id, rejected FROM news_cluster_stock WHERE cluster_id = :id",
             mapOf("id" to clusterId),
         ) { rs, _ ->
             StockLink(
@@ -127,25 +215,42 @@ class JdbcClusterStore(
                 sentiment = rs.getString("sentiment"),
                 confidence = rs.getObject("confidence")?.let { (it as Number).toDouble() },
                 streamEventId = rs.getString("stream_event_id"),
+                rejected = rs.getObject("rejected") as Boolean?,
             )
         }
 
-    override fun insertStockLinkIfAbsent(clusterId: String, code: String, sentiment: String?, confidence: Double?): Boolean =
+    override fun applyStockVerdict(
+        clusterId: String,
+        code: String,
+        sentiment: String?,
+        confidence: Double?,
+        rejected: Boolean,
+    ) {
         jdbc.update(
             """
-            INSERT INTO news_cluster_stock (cluster_id, code, sentiment, confidence)
-            VALUES (:clusterId, :code, :sentiment, :confidence)
-            ON CONFLICT (cluster_id, code) DO NOTHING
+            INSERT INTO news_cluster_stock (cluster_id, code, sentiment, confidence, rejected)
+            VALUES (:clusterId, :code, :sentiment, :confidence, :rejected)
+            ON CONFLICT (cluster_id, code)
+            DO UPDATE SET sentiment = :sentiment, confidence = :confidence, rejected = :rejected
             """,
-            mapOf("clusterId" to clusterId, "code" to code, "sentiment" to sentiment, "confidence" to confidence),
-        ) > 0
-
-    override fun setStockLinkEvent(clusterId: String, code: String, streamEventId: String) {
-        jdbc.update(
-            "UPDATE news_cluster_stock SET stream_event_id = :eventId WHERE cluster_id = :clusterId AND code = :code",
-            mapOf("clusterId" to clusterId, "code" to code, "eventId" to streamEventId),
+            mapOf(
+                "clusterId" to clusterId,
+                "code" to code,
+                "sentiment" to sentiment,
+                "confidence" to confidence,
+                "rejected" to rejected,
+            ),
         )
     }
+
+    override fun claimStockEvent(clusterId: String, code: String, eventId: String): Boolean =
+        jdbc.update(
+            """
+            UPDATE news_cluster_stock SET stream_event_id = :eventId
+            WHERE cluster_id = :clusterId AND code = :code AND stream_event_id IS NULL
+            """,
+            mapOf("clusterId" to clusterId, "code" to code, "eventId" to eventId),
+        ) > 0
 
     override fun upsertSectorLink(clusterId: String, sectorCode: String, sentiment: String, confidence: Double, impact: String) {
         jdbc.update(
@@ -182,7 +287,8 @@ class JdbcClusterStore(
             """
             SELECT c.id, c.rep_title, c.summary, s.sentiment, c.article_count, s.stream_event_id
             FROM news_cluster c JOIN news_cluster_stock s ON s.cluster_id = c.id
-            WHERE s.code = :code AND c.status = 'SUMMARIZED'
+            WHERE s.code = :code AND s.stream_event_id IS NOT NULL
+              AND c.status = 'SUMMARIZED' AND c.scope = 'STOCK'
               AND c.last_article_at >= :from AND c.last_article_at < :to
             ORDER BY c.last_article_at DESC
             """,
@@ -190,16 +296,27 @@ class JdbcClusterStore(
             ::digestRow,
         )
 
-    override fun sectorClustersInWindow(sectorCode: String, from: Instant, to: Instant): List<DigestClusterRow> =
+    override fun sectorClustersInWindow(
+        sectorCode: String,
+        stockCode: String,
+        from: Instant,
+        to: Instant,
+    ): List<DigestClusterRow> =
         jdbc.query(
             """
-            SELECT c.id, c.rep_title, c.summary, s.sentiment, c.article_count, NULL AS stream_event_id
+            SELECT c.id, c.rep_title, c.summary, s.sentiment, c.article_count, stock.stream_event_id
             FROM news_cluster c JOIN news_cluster_sector s ON s.cluster_id = c.id
-            WHERE s.sector_code = :sectorCode AND c.status = 'SUMMARIZED'
+            LEFT JOIN news_cluster_stock stock ON stock.cluster_id = c.id AND stock.code = :stockCode
+            WHERE s.sector_code = :sectorCode AND c.status = 'SUMMARIZED' AND c.scope = 'SECTOR'
               AND c.last_article_at >= :from AND c.last_article_at < :to
             ORDER BY c.last_article_at DESC
             """,
-            mapOf("sectorCode" to sectorCode, "from" to Timestamp.from(from), "to" to Timestamp.from(to)),
+            mapOf(
+                "sectorCode" to sectorCode,
+                "stockCode" to stockCode,
+                "from" to Timestamp.from(from),
+                "to" to Timestamp.from(to),
+            ),
             ::digestRow,
         )
 

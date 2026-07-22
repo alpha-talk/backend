@@ -37,7 +37,7 @@ class DigestProcessor(
         val stockRows = store.stockClustersInWindow(code, windowFrom, windowTo)
         val stockClusterIds = stockRows.map { it.clusterId }.toSet()
         val sectorRows = sectors.sectorOf(code)
-            ?.let { store.sectorClustersInWindow(it, windowFrom, windowTo) }
+            ?.let { store.sectorClustersInWindow(it, code, windowFrom, windowTo) }
             .orEmpty()
             .filter { it.clusterId !in stockClusterIds }
         val marketRows = store.marketClustersInWindow(windowFrom, windowTo)

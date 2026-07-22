@@ -6,6 +6,7 @@ import java.time.Duration
 @ConfigurationProperties("alphatalk.llm")
 data class LlmProperties(
     val consumeEnabled: Boolean = true,
+    val allowFake: Boolean = false,
     val consumerBlock: Duration = Duration.ofSeconds(5),
     val consumerBatch: Int = 8,
     val poisonMaxDeliveries: Long = 5,
@@ -16,7 +17,13 @@ data class LlmProperties(
     val models: Models = Models(),
     val anthropic: Anthropic = Anthropic(),
     val embedding: Embedding = Embedding(),
+    val article: Article = Article(),
 ) {
+    data class Article(
+        val allowedHostSuffixes: List<String> = emptyList(),
+        val minHostInterval: Duration = Duration.ofSeconds(1),
+    )
+
     data class Cluster(
         val windowHours: Long = 72,
         val similarityThreshold: Double = 0.85,

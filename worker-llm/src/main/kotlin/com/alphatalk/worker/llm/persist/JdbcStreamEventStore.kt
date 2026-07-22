@@ -23,7 +23,7 @@ class JdbcStreamEventStore(
             """
             INSERT INTO stream_event (event_id, code, type, occurred_at, source, payload)
             VALUES (:eventId, :code, :type, :occurredAt, :source, CAST(:payload AS jsonb))
-            ON CONFLICT (event_id) DO NOTHING
+            ON CONFLICT DO NOTHING
             """,
             mapOf(
                 "eventId" to eventId,

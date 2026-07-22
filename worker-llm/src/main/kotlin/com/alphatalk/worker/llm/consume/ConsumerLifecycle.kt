@@ -4,11 +4,13 @@ import org.slf4j.LoggerFactory
 import org.springframework.context.SmartLifecycle
 import java.time.Duration
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.concurrent.thread
 
 class ConsumerLifecycle(
     private val consumer: IngestConsumer,
     private val claimInterval: Duration,
+    private val pendingGauge: AtomicLong,
 ) : SmartLifecycle {
     private val log = LoggerFactory.getLogger(javaClass)
     private val running = AtomicBoolean(false)
@@ -28,6 +30,7 @@ class ConsumerLifecycle(
                 if (System.nanoTime() - lastClaim > claimInterval.toNanos()) {
                     runCatching { consumer.claimStale() }
                         .onFailure { log.warn("stale claim failed", it) }
+                    pendingGauge.set(consumer.samplePending())
                     lastClaim = System.nanoTime()
                 }
             }

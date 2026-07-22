@@ -18,34 +18,57 @@ class ClusterAssigner(
     private val log = LoggerFactory.getLogger(javaClass)
 
     fun assign(entry: IngestQueueEntry): AssignResult {
+        store.findArticleCluster(entry.sourceId)?.let {
+            entry.codes.forEach { code -> store.addCandidateCode(it.id, code) }
+            return AssignResult(it.id, joined = false, created = false)
+        }
+        val titleHash = TitleNormalizer.hash(entry.title)
+        val since = clock.instant().minus(window)
+        val article = articleOf(entry, titleHash)
+        val embedding = if (store.findClusterByTitleHash(titleHash, since, entry.codes) == null) {
+            runCatching { embeddings.embed(embedText(entry)) }
+                .onFailure { log.warn("embedding failed, falling back to new cluster: sourceId={}", entry.sourceId, it) }
+                .getOrNull()
+        } else {
+            null
+        }
+
         val lockKey = entry.codes.firstOrNull() ?: MACRO_LOCK_KEY
         return lock.withLock(lockKey) {
             store.findArticleCluster(entry.sourceId)?.let {
+                entry.codes.forEach { code -> store.addCandidateCode(it.id, code) }
                 return@withLock AssignResult(it.id, joined = false, created = false)
             }
-            val titleHash = TitleNormalizer.hash(entry.title)
-            val since = clock.instant().minus(window)
-            val article = articleOf(entry, titleHash)
-
-            store.findClusterByTitleHash(titleHash, since)?.let { clusterId ->
-                store.attachArticle(article, clusterId, null)
-                return@withLock AssignResult(clusterId, joined = true, created = false)
+            store.findClusterByTitleHash(titleHash, since, entry.codes)?.let { clusterId ->
+                val landedClusterId = land(article, clusterId, null, entry.codes)
+                return@withLock AssignResult(landedClusterId, joined = true, created = false)
             }
-
-            val embedding = runCatching { embeddings.embed(embedText(entry)) }
-                .onFailure { log.warn("embedding failed, falling back to new cluster: sourceId={}", entry.sourceId, it) }
-                .getOrNull()
             val nearest = embedding?.let { store.nearestCluster(it, since, entry.codes) }
             if (nearest != null && nearest.second >= similarityThreshold) {
-                store.attachArticle(article, nearest.first, embedding)
-                return@withLock AssignResult(nearest.first, joined = true, created = false)
+                val landedClusterId = land(article, nearest.first, embedding, entry.codes)
+                return@withLock AssignResult(landedClusterId, joined = true, created = false)
             }
-
             val clusterId = clusterIds()
             store.createCluster(clusterId, entry.title, article.publishedAt)
-            store.attachArticle(article, clusterId, embedding)
-            AssignResult(clusterId, joined = false, created = true)
+            val landedClusterId = land(article, clusterId, embedding, entry.codes)
+            if (landedClusterId != clusterId) store.discardEmptyCluster(clusterId)
+            AssignResult(
+                clusterId = landedClusterId,
+                joined = landedClusterId != clusterId,
+                created = landedClusterId == clusterId,
+            )
         }
+    }
+
+    private fun land(article: ArticleRecord, clusterId: String, embedding: FloatArray?, codes: List<String>): String {
+        val landedClusterId = if (store.attachArticle(article, clusterId, embedding)) {
+            clusterId
+        } else {
+            store.findArticleCluster(article.sourceId)?.id
+                ?: throw IllegalStateException("article attach lost without existing cluster: ${article.sourceId}")
+        }
+        codes.forEach { store.addCandidateCode(landedClusterId, it) }
+        return landedClusterId
     }
 
     private fun articleOf(entry: IngestQueueEntry, titleHash: String): ArticleRecord {
