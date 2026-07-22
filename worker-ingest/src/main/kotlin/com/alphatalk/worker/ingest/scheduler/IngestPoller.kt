@@ -9,6 +9,8 @@ import com.alphatalk.worker.ingest.queue.IngestQueue
 import com.alphatalk.worker.ingest.source.FetchedArticle
 import com.alphatalk.worker.ingest.source.NewsSource
 import org.slf4j.LoggerFactory
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.Executor
 
 class IngestPoller(
     private val sources: List<NewsSource>,
@@ -16,22 +18,27 @@ class IngestPoller(
     private val seen: SeenMarker,
     private val queue: IngestQueue,
     private val excerptMaxLength: Int,
+    private val fetchExecutor: Executor = Executor { it.run() },
     private val clock: () -> Long = System::currentTimeMillis,
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
 
-    fun pollOnce(): PollStats {
+    fun pollOnce(): PollStats =
+        sources
+            .map { source -> CompletableFuture.supplyAsync({ pollSource(source) }, fetchExecutor) }
+            .map { it.join() }
+            .fold(PollStats()) { merged, stats -> merged + stats }
+
+    private fun pollSource(source: NewsSource): PollStats {
         val stats = Counters()
-        for (source in sources) {
-            val articles = runCatching { source.fetchLatest() }.getOrElse {
-                log.warn("source fetch failed: source={}", source.name, it)
-                stats.sourceErrors++
-                emptyList()
-            }
-            for (article in articles) {
+        runCatching {
+            for (article in source.fetchLatest()) {
                 stats.fetched++
                 process(source.name, article, stats)
             }
+        }.onFailure {
+            log.warn("source poll failed: source={}", source.name, it)
+            stats.sourceErrors++
         }
         return stats.snapshot()
     }
@@ -87,4 +94,13 @@ data class PollStats(
     val unmatchedSkipped: Int = 0,
     val sourceErrors: Int = 0,
     val enqueueErrors: Int = 0,
-)
+) {
+    operator fun plus(other: PollStats) = PollStats(
+        fetched = fetched + other.fetched,
+        enqueued = enqueued + other.enqueued,
+        duplicateSkipped = duplicateSkipped + other.duplicateSkipped,
+        unmatchedSkipped = unmatchedSkipped + other.unmatchedSkipped,
+        sourceErrors = sourceErrors + other.sourceErrors,
+        enqueueErrors = enqueueErrors + other.enqueueErrors,
+    )
+}
