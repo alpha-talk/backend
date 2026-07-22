@@ -1,6 +1,6 @@
 # Alpha Talk — `ws` 모듈 아키텍처 설계 v0.7
 
-> 상위 문서: [구현 계획 v0.2](ws_module_plan.md) · [WS API 명세 v0.4](ws_api_spec.md) · [Redis 계약 v0.1](redis_contract.md)
+> 상위 문서: [구현 계획 v0.2](ws_module_plan.md) · [WS API 명세 v0.5](ws_api_spec.md) · [Redis 계약 v0.4](redis_contract.md)
 > 이 문서는 **코드 레벨 설계 기준**이다. "무엇을/왜"는 계획서가, "어떤 구조로"는 이 문서가 답한다.
 
 > **v0.6 → v0.7**: 2·3차 리뷰 반영 — JWT 시크릿 fail-closed(local 프로파일 분리), 미부착 유저의 diff를 **pendingDiffs 버퍼로 병합**(무시 방식의 유실 레이스 수정), roomIndex를 **구독 수 카운트**로(동일 세션 중복 구독 보호), 수신 순서 보장을 **공개 API `StompEndpointRegistry.setPreserveReceiveOrder`** 로 전환(§11.7) + 결선 검증 테스트, `ws.stomp.errors`·`ws.relay.sent` 메트릭 추가.
