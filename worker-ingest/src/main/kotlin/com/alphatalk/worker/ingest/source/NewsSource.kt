@@ -11,4 +11,5 @@ data class FetchedArticle(
     val url: String,
     val excerpt: String? = null,
     val publishedAt: Long? = null,
+    val codes: List<String> = emptyList(),
 )

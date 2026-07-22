@@ -143,6 +143,25 @@ class IngestPollerTest {
     }
 
     @Test
+    fun `소스가 종목을 알면 사전 매칭 없이도 그 코드로 적재`() {
+        val poller = poller(
+            FakeSource("naver", listOf(FetchedArticle(title = "3나노 대규모 수주", url = "https://example.com/n1", codes = listOf("005930")))),
+        )
+        val stats = poller.pollOnce()
+        assertEquals(1, stats.enqueued)
+        assertEquals(listOf("005930"), queue.entries.single().codes)
+    }
+
+    @Test
+    fun `소스 제공 코드와 사전 매칭 코드는 합집합`() {
+        val poller = poller(
+            FakeSource("naver", listOf(FetchedArticle(title = "삼성전자 수주", url = "https://example.com/n2", codes = listOf("000660")))),
+        )
+        poller.pollOnce()
+        assertEquals(listOf("000660", "005930"), queue.entries.single().codes)
+    }
+
+    @Test
     fun `발췌는 상한 길이로 자른다`() {
         val poller = poller(
             FakeSource("hankyung", listOf(FetchedArticle(title = "삼성전자", url = "https://example.com/1", excerpt = "가".repeat(500)))),

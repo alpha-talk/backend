@@ -45,7 +45,8 @@ class IngestPoller(
 
     private fun process(sourceName: String, article: FetchedArticle, stats: Counters) {
         val mapping = mapper.map(article.title, article.excerpt)
-        if (mapping.unmatched) {
+        val codes = (article.codes + mapping.codes).distinct().sorted()
+        if (codes.isEmpty() && mapping.macroHint == null) {
             stats.unmatchedSkipped++
             return
         }
@@ -59,7 +60,7 @@ class IngestPoller(
             source = sourceName,
             sourceId = sourceId,
             type = IngestType.NEWS,
-            codes = mapping.codes,
+            codes = codes,
             title = article.title,
             url = url,
             body = article.excerpt?.take(excerptMaxLength),
