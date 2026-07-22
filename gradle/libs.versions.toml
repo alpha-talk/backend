@@ -5,6 +5,8 @@ spring-dependency-management = "1.1.7"
 jackson = "2.19.0"
 jjwt = "0.12.7"
 rome = "2.1.0"
+jsoup = "1.18.3"
+ulid = "5.2.3"
 
 [libraries]
 jackson-annotations = { module = "com.fasterxml.jackson.core:jackson-annotations", version.ref = "jackson" }
@@ -13,6 +15,8 @@ jackson-kotlin = { module = "com.fasterxml.jackson.module:jackson-module-kotlin"
 spring-boot-autoconfigure = { module = "org.springframework.boot:spring-boot-autoconfigure", version.ref = "spring-boot" }
 jjwt-api = { module = "io.jsonwebtoken:jjwt-api", version.ref = "jjwt" }
 rome = { module = "com.rometools:rome", version.ref = "rome" }
+jsoup = { module = "org.jsoup:jsoup", version.ref = "jsoup" }
+ulid-creator = { module = "com.github.f4b6a3:ulid-creator", version.ref = "ulid" }
 jjwt-impl = { module = "io.jsonwebtoken:jjwt-impl", version.ref = "jjwt" }
 jjwt-jackson = { module = "io.jsonwebtoken:jjwt-jackson", version.ref = "jjwt" }
 
