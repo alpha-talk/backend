@@ -10,4 +10,4 @@ dependencyResolutionManagement {
     }
 }
 
-include("contracts", "auth-jwt", "ws")
+include("contracts", "auth-jwt", "ws", "worker-ingest", "worker-llm")
