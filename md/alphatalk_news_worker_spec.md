@@ -110,7 +110,7 @@ Redis 계약 §2.1 스키마를 그대로 사용한다: `source` · `sourceId` �
 
 ### 3.1 소비 루프
 
-- `XREADGROUP GROUP g:llm {consumerName} COUNT 1 BLOCK 5000 STREAMS queue:ingest >` — consumerName은 호스트명+PID.
+- `XREADGROUP GROUP g:llm {consumerName} COUNT {batch} BLOCK 5000 STREAMS queue:ingest >` — consumerName은 PID@호스트명, batch 기본 8.
 - 유휴 회수: 주기적으로 `XAUTOCLAIM queue:ingest g:llm {me} min-idle-time=300000` — 죽은 워커의 PEL 엔트리 인계.
 - **poison 엔트리**: delivery count > 5면 `queue:ingest:dlq`로 XADD 후 원큐 XACK + 알람 메트릭. (⚠️ §6 증보)
 
@@ -217,7 +217,7 @@ stream payload (ws_api_spec §4.3 확장 — ⚠️ §6 증보):
 
 ### 4.1 트리거와 멱등
 
-- **ingest 스케줄러**가 매일 **18:00 KST**(장 마감 후)에: 윈도 `[전일 18:00, 당일 18:00)` 에 기사가 편입된 클러스터가 있는 종목마다 `XADD queue:ingest type=digest codes={code} sourceId=digest:{code}:{yyyy-MM-dd}`.
+- **ingest 스케줄러**가 매일 **18:00 KST**(장 마감 후)에 **시드 종목 전체**에 대해 `XADD queue:ingest type=digest codes={code} sourceId=digest:{code}:{yyyy-MM-dd}` — ingest는 어떤 종목에 클러스터가 쌓였는지 모르므로(DB 비접근) 잡은 전 종목에 적재하고, llm-worker가 윈도 `[전일 18:00, 당일 18:00)`에 소식(STOCK·SECTOR)이 없는 종목 잡은 브리핑 없이 ACK한다(시장 이슈만으로는 브리핑을 만들지 않는다).
 - llm-worker가 같은 그룹(`g:llm`)으로 경쟁 소비 — 스케줄은 싱글턴(ingest), 실행은 ×N(llm)으로 분리돼 리더 선출이 필요 없다.
 - 멱등 키 `digest:{code}:{date}` → `stream_event` upsert. 재처리·중복 적재에도 브리핑은 하루 1건.
 
@@ -338,6 +338,8 @@ worker-llm/
 - 알람: PEL 적체 > N(기존 합의), DLQ 유입 > 0, 일 LLM 토큰 예산 초과.
 
 ## 9. 구현 단계 & DoD
+
+> **상태(2026-07-22): N0~N6 전 단계 구현 완료.** LLM·임베딩은 포트 뒤에 있고, `ANTHROPIC_API_KEY`·임베딩 키 미설정 시 규칙 기반 fake로 동작한다(로컬·테스트 무키 실행 가능). 실서비스 투입 전 남은 것: 키 주입, RSS 소스 목록·시드 종목 설정(§10-5·§2.2), 임베딩 제공자 확정(§10-1).
 
 | 단계 | 범위 | DoD |
 |---|---|---|
