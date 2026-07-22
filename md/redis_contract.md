@@ -1,7 +1,8 @@
-# Alpha Talk — Redis 계약 (`:contracts`) v0.3
+# Alpha Talk — Redis 계약 (`:contracts`) v0.4
 
 게이트웨이 · 워커(price/ingest/llm) · 메인서버가 공유하는 Redis 키/채널/스트림 규약. 이 문서가 세 서비스 간 단일 진실의 원천이다.
 
+> v0.4 (2026-07-23): llm-worker 원문 fetch의 인스턴스 간 호스트별 요청 간격을 위한 `rate:article-fetch:{host}` 키 추가. PEL 회수 설명을 실제 구현인 `XPENDING` + `XCLAIM`으로 정정.
 > v0.3 (2026-07-22): 뉴스 파이프라인 반영([뉴스 워커 명세](alphatalk_news_worker_spec.md)) — `queue:ingest`에 `type="digest"`(§2.3)·`macroHint` 필드·`codes` 공란 허용, poison 격리 `queue:ingest:dlq`, `lock:cluster:{code}` 키 추가.
 > v0.2 (2026-07-16): `watchlist:{userId}` 미러 키 명문화(ws `RedisWatchlistResolver`·core-api 쓰기 반영), 메인서버 전용 키(`rl:*`·`idem:*`) 주석 추가.
  
@@ -15,7 +16,7 @@ Redis를 세 가지 용도로 쓰며, **이름이 비슷해도 메커니즘이 �
 |---|---|---|---|---|
 | **Pub/Sub** | 실시간 1→N 브로드캐스트 | `quote:{code}` · `stream:{code}` · `post:{code}` · `watchlist:updated` | 구독한 **전원이 사본** · 휘발 · ACK 없음 · best-effort | 게이트웨이가 구독 |
 | **Redis Streams** | 신뢰성 **작업 큐** | `queue:ingest` (+DLQ `queue:ingest:dlq`) | **경쟁 소비**(한 건=한 워커) · ACK · 재시도(PEL) | 워커끼리만 |
-| **자료구조** | 상태/캐시 | `price:{code}` · `presence:{userId}` · `cursor:*` · `seen:ingest:*` · `lock:cluster:*` | 영속(메모리) · TTL | 워커/메인/게이트웨이 |
+| **자료구조** | 상태/캐시 | `price:{code}` · `presence:{userId}` · `cursor:*` · `seen:ingest:*` · `lock:cluster:*` · `rate:article-fetch:*` | 영속(메모리) · TTL | 워커/메인/게이트웨이 |
 
 > ⚠️ **`stream:{code}`는 Pub/Sub 채널이다 — Redis Stream(데이터 구조)이 아니다.**
 > 이 시스템에서 진짜 Redis Stream은 **`queue:ingest`(와 그 DLQ `queue:ingest:dlq`)뿐**이다.
@@ -70,7 +71,7 @@ Redis를 세 가지 용도로 쓰며, **이름이 비슷해도 메커니즘이 �
 | 적재 | `XADD` (생산자: **ingest-worker**) |
 | 소비 | `XREADGROUP` (소비자 그룹 **`g:llm`**, 멤버: **llm-worker** ×N) |
 | 완료 | `XACK queue:ingest g:llm <id>` |
-| 장애 회수 | `XAUTOCLAIM` (idle 임계 초과한 PEL 엔트리를 다른 워커가 회수) |
+| 장애 회수 | `XPENDING`으로 idle 임계 초과 엔트리를 찾고 `XCLAIM`으로 다른 워커가 회수 |
 | 트림 | `XADD ... MAXLEN ~ N` 또는 주기적 `XTRIM` (이미 처리된 건은 DB에 있으므로 큐는 유한 보관) |
 | poison 격리 | delivery count > 5 엔트리는 llm-worker가 `queue:ingest:dlq`로 XADD 후 원큐 XACK — DLQ는 소비자 없음(수동 점검 + 알람) |
 
@@ -136,6 +137,7 @@ ingest-worker 스케줄러(싱글턴)가 매일 18:00 KST에 적재하고, 같�
 | `watchlist:{userId}` | Set | 관심목록 미러 — 게이트웨이 CONNECT 시 해소용 (진실은 메인서버 DB) | 메인서버 | 게이트웨이 | 없음 |
 | `seen:ingest:{sourceId}` | String | 수집 중복 제거 마커 | ingest/llm-worker | ingest/llm-worker | 며칠 |
 | `lock:cluster:{code}` | String (`SET NX PX 3000`) | 뉴스 클러스터 판정 직렬화 락(뉴스 워커 명세 §3.3) | llm-worker | llm-worker | 3초 |
+| `rate:article-fetch:{host}` | String (`SET PX`) | robots.txt·원문 fetch의 호스트별 다음 요청 간격을 llm-worker 인스턴스 간 직렬화 | llm-worker | llm-worker | 요청 간격(기본 1초) |
 
 - **현재가 스냅샷**은 REST(메인서버가 `price:{code}` 읽기)로 준다. 게이트웨이는 `quote:{code}` 라이브만 relay하고 캐시를 직접 읽지 않는다(얇은 엣지 유지).
 - 봉(OHLCV)은 KIS에서 받아 캐시하되, 권위 있는 가격 저장소로 쓰지 않는다(틱은 영속화 안 함).
@@ -159,6 +161,7 @@ ingest-worker 스케줄러(싱글턴)가 매일 18:00 KST에 적재하고, 같�
 | `watchlist:{userId}` (자료구조) | — | — | — | **WRITE** | **READ** |
 | `seen:ingest:{sourceId}` | — | WRITE | WRITE/READ | — | — |
 | `lock:cluster:{code}` | — | — | **WRITE/READ** | — | — |
+| `rate:article-fetch:{host}` | — | — | **WRITE/READ** | — | — |
 
 게이트웨이는 **Pub/Sub SUBSCRIBE만** 한다(+프레즌스). Streams·DB 쓰기는 만지지 않는다.
  
