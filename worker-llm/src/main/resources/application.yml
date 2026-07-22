@@ -1,12 +1,50 @@
 spring:
   application:
     name: worker-llm
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/alphatalk}
+    username: ${DB_USER:alphatalk}
+    password: ${DB_PASSWORD:alphatalk}
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      timeout: 3s
   lifecycle:
-    timeout-per-shutdown-phase: 10s
+    timeout-per-shutdown-phase: 20s
 
 server:
   port: 8085          # 모노레포 포트 배치 (기획안 §3.1)
   shutdown: graceful
+
+alphatalk:
+  llm:
+    consume-enabled: true
+    consumer-block: 5s
+    consumer-batch: 8
+    poison-max-deliveries: 5      # 초과 시 queue:ingest:dlq 격리 (Redis 계약 v0.3 §2)
+    claim-idle: 5m                # PEL 유휴 회수 임계 (죽은 워커 인계)
+    claim-interval: 1m
+    cluster:
+      window-hours: 72            # 유사 기사 비교 창 (명세 §3.3)
+      similarity-threshold: 0.85
+      lock-ttl: 3s
+    sector:
+      fanout-cap: 100             # 초과 시 MARKET 강등 (명세 §3.6)
+    models:
+      summary: claude-haiku-4-5
+      digest: claude-sonnet-5
+    anthropic:
+      base-url: https://api.anthropic.com
+      api-key: ${ANTHROPIC_API_KEY:}    # 미설정이면 규칙 기반 fake로 동작 (로컬·테스트)
+      version: "2023-06-01"
+      max-tokens: 1024
+    embedding:
+      provider: fake              # fake | rest(OpenAI 호환 /v1/embeddings)
+      base-url: ${EMBEDDING_BASE_URL:}
+      api-key: ${EMBEDDING_API_KEY:}
+      model: ${EMBEDDING_MODEL:}
+      dimension: 1024
 
 management:
   endpoints:
