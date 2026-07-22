@@ -17,7 +17,10 @@
 | [md/ws_architecture.md](md/ws_architecture.md) | **코드 레벨 설계 기준** — 컴포넌트 책임, 인덱스/동시성, 시퀀스, 에러 정책 |
 | [md/ws_module_plan.md](md/ws_module_plan.md) | 구현 계획 — 단계(S0~S7)별 범위·DoD, 열린 합의 안건 |
 | [md/ws_api_spec.md](md/ws_api_spec.md) | 클라 ↔ 게이트웨이 STOMP 프로토콜 계약 (v0.4) |
-| [md/redis_contract.md](md/redis_contract.md) | 게이트웨이 ↔ 워커 ↔ 메인서버 Redis 계약 — **서비스 간 단일 진실** |
+| [md/redis_contract.md](md/redis_contract.md) | 게이트웨이 ↔ 워커 ↔ 메인서버 Redis 계약 — **서비스 간 단일 진실** (v0.2) |
+| [md/alphatalk_core_api_spec.md](md/alphatalk_core_api_spec.md) | 클라 ↔ 메인서버 REST 계약 (v0.1 + §12 구현 노트) — core-api 구현 기준 |
+| [md/alphatalk_kis_worker_spec.md](md/alphatalk_kis_worker_spec.md) | KIS/OpenDART 수집 워커 명세 — 워커 적재 테이블 스키마(§4)의 원천 |
+| [md/alphatalk_news_worker_spec.md](md/alphatalk_news_worker_spec.md) | 뉴스 파이프라인 명세 — worker-ingest·worker-llm (수집·클러스터링·일일 호재/악재 브리핑) |
 | [md/기획안.md](md/기획안.md) | 전체 서비스 요구사항·아키텍처 (4개 처리 평면) |
 
 문서와 코드가 어긋나면: 코드를 문서에 맞추거나, 문서를 먼저 고치고 나서 코드를 바꾼다. 조용히 어긋난 채 두지 않는다.
@@ -68,8 +71,11 @@ backend/
 ```bash
 ./gradlew build            # 전 모듈 빌드 + 테스트
 ./gradlew :ws:test         # 게이트웨이 테스트만
-./gradlew :ws:bootRun      # 로컬 실행 (Redis 필요: docker compose up -d)
+./gradlew :ws:bootRun --args='--spring.profiles.active=local'   # 로컬 실행 (Redis 필요: docker compose up -d)
+# JWT 시크릿은 기본값 없음(fail-closed) — 로컬은 local 프로파일, 운영은 ALPHATALK_AUTH_JWT_SECRET 환경변수
 ```
+
+> **에이전트 실행 허용**: `./gradlew` 테스트·빌드 명령(`build`, `:모듈:test`, `check`, `compileKotlin`, `assemble` 등)은 확인 없이 실행해도 된다. 변경한 코드는 관련 모듈 테스트로 검증하는 것을 기본으로 한다. `bootRun`·`docker compose` 같은 장기 실행·외부 부작용 명령은 예외로 사용자에게 먼저 확인한다.
 
 로컬 인프라는 루트 `docker-compose.yml`(Redis). 통합 테스트는 Testcontainers가 자체 기동하므로 별도 준비 불요.
 
