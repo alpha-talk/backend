@@ -1,0 +1,15 @@
+spring:
+  application:
+    name: worker-llm
+  lifecycle:
+    timeout-per-shutdown-phase: 10s
+
+server:
+  port: 8085          # 모노레포 포트 배치 (기획안 §3.1)
+  shutdown: graceful
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, metrics
