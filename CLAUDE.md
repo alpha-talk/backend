@@ -94,4 +94,4 @@ backend/
 - 버전: Spring Boot 3.5.16 · Kotlin 2.2.21 · JDK 21(toolchain 자동 다운로드) · jjwt 0.12.7.
 - 남은 단계: **S6**(graceful shutdown 시나리오 검증, quote 샘플러 여부 판단) · **S7**(41종목×500세션 부하 스모크). 계획서 §5 참조.
 - 미해결 합의 안건은 [md/ws_module_plan.md](md/ws_module_plan.md) §7 (RS256 전환 여부, 관심목록 조회 경로 등). 해당 코드는 포트로 격리된 구현(`:auth-jwt`의 `JwtTokenProvider` HS256, `RedisWatchlistResolver`)을 쓴다.
-- **뉴스 파이프라인 N0~N1 구현 완료**: `:worker-ingest`(RSS 수집→정규화→종목 매핑→`queue:ingest` XADD, 테스트 23개) + `:worker-llm`(스캐폴딩만). 남은 단계 N2~N6은 [md/alphatalk_news_worker_spec.md](md/alphatalk_news_worker_spec.md) §9 참조.
+- **뉴스 파이프라인 N0~N6 구현 완료**: `:worker-ingest`(RSS·네이버 검색 수집→정규화→매핑→XADD + 다이제스트 트리거, 테스트 30개) + `:worker-llm`(소비→클러스터링(pgvector)→LLM 요약·감성→scope 사다리 fan-out→persist·publish·ack + 일일 브리핑·DLQ, 테스트 28개). LLM·임베딩 키 미설정 시 fake로 동작. 상세·잔여 설정은 [md/alphatalk_news_worker_spec.md](md/alphatalk_news_worker_spec.md) §9.
