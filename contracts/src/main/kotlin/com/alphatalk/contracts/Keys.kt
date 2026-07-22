@@ -9,4 +9,5 @@ object Keys {
 
     fun seenIngest(sourceId: String) = "seen:ingest:$sourceId"
     fun clusterLock(code: String) = "lock:cluster:$code"
+    fun articleFetchRate(host: String) = "rate:article-fetch:$host"
 }
