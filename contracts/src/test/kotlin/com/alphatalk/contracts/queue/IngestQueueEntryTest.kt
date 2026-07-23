@@ -39,8 +39,21 @@ class IngestQueueEntryTest {
     }
 
     @Test
-    fun `codes 공란은 macroHint 없이 불가`() {
-        assertFailsWith<IllegalArgumentException> { entry.copy(codes = emptyList()) }
+    fun `codes 공란 - macroHint 없이도 허용, 관련성 판정은 LLM 몫`() {
+        val gateless = entry.copy(codes = emptyList())
+        val back = IngestQueueEntry.fromFields(gateless.toFields())
+        assertEquals(gateless, back)
+        assertEquals(emptyList(), back.codes)
+    }
+
+    @Test
+    fun `digest는 code 정확히 1개 필수`() {
+        assertFailsWith<IllegalArgumentException> {
+            entry.copy(type = IngestType.DIGEST, codes = emptyList())
+        }
+        assertFailsWith<IllegalArgumentException> {
+            entry.copy(type = IngestType.DIGEST, codes = listOf("005930", "000660"))
+        }
     }
 
     @Test
