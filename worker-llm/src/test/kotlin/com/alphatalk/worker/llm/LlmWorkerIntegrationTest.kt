@@ -4,6 +4,7 @@ import com.alphatalk.contracts.Channels
 import com.alphatalk.contracts.Keys
 import com.alphatalk.contracts.Queues
 import com.alphatalk.contracts.envelope.DigestData
+import com.alphatalk.contracts.envelope.StreamCategory
 import com.alphatalk.contracts.envelope.StreamData
 import com.alphatalk.contracts.queue.IngestQueueEntry
 import com.alphatalk.contracts.queue.IngestType
@@ -115,10 +116,11 @@ class LlmWorkerIntegrationTest {
         source: String = "hankyung",
         codes: List<String> = listOf("005930"),
         macroHint: String? = null,
+        type: IngestType = IngestType.NEWS,
     ) = IngestQueueEntry(
         source = source,
         sourceId = sourceId,
-        type = IngestType.NEWS,
+        type = type,
         codes = codes,
         title = title,
         url = "",
@@ -188,6 +190,32 @@ class LlmWorkerIntegrationTest {
             Long::class.java,
         )
         assertEquals(3, sourcesCount)
+    }
+
+    @Test
+    fun `V6 - report type은 클러스터와 발행 이벤트까지 보존된다`() {
+        xadd(newsEntry("hankyung:report1", "삼성전자 목표주가 상향 리포트", type = IngestType.REPORT))
+        drain()
+
+        val category = jdbc.queryForObject(
+            "SELECT category FROM news_cluster",
+            emptyMap<String, Any>(),
+            String::class.java,
+        )
+        val eventType = jdbc.queryForObject(
+            "SELECT type FROM stream_event",
+            emptyMap<String, Any>(),
+            String::class.java,
+        )
+        val payloadCategory = jdbc.queryForObject(
+            "SELECT payload ->> 'category' FROM stream_event",
+            emptyMap<String, Any>(),
+            String::class.java,
+        )
+
+        assertEquals(StreamCategory.REPORT.payload, category)
+        assertEquals(StreamCategory.REPORT.eventType, eventType)
+        assertEquals(StreamCategory.REPORT.payload, payloadCategory)
     }
 
     @Test

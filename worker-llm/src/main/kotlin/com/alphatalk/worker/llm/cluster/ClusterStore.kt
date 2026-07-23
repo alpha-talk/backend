@@ -1,6 +1,7 @@
 package com.alphatalk.worker.llm.cluster
 
 import com.alphatalk.contracts.envelope.SourceRef
+import com.alphatalk.contracts.envelope.StreamCategory
 import java.time.Instant
 
 enum class ClusterStatus { NEW, SUMMARIZING, SUMMARIZED, IRRELEVANT }
@@ -12,6 +13,7 @@ data class ClusterRecord(
     val scope: String?,
     val status: ClusterStatus,
     val articleCount: Int,
+    val category: StreamCategory = StreamCategory.NEWS,
 )
 
 data class ArticleRecord(
@@ -46,7 +48,12 @@ interface ClusterStore {
     fun findArticleCluster(sourceId: String): ClusterRecord?
     fun findClusterByTitleHash(titleHash: String, since: Instant, codes: List<String>): String?
     fun nearestCluster(embedding: FloatArray, since: Instant, codes: List<String>): Pair<String, Double>?
-    fun createCluster(id: String, repTitle: String, publishedAt: Instant)
+    fun createCluster(
+        id: String,
+        repTitle: String,
+        publishedAt: Instant,
+        category: StreamCategory = StreamCategory.NEWS,
+    )
     fun discardEmptyCluster(clusterId: String): Boolean
     fun attachArticle(article: ArticleRecord, clusterId: String, embedding: FloatArray?): Boolean
     fun addCandidateCode(clusterId: String, code: String)

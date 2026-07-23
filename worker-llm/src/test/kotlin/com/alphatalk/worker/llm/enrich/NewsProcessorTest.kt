@@ -82,17 +82,22 @@ class NewsProcessorTest {
         clock = clock,
     )
 
-    private fun entry(sourceId: String, title: String, codes: List<String> = listOf("005930"), macroHint: String? = null) =
-        IngestQueueEntry(
-            source = "hankyung",
-            sourceId = sourceId,
-            type = IngestType.NEWS,
-            codes = codes,
-            title = title,
-            url = "https://example.com/$sourceId",
-            fetchedAt = clock.millis(),
-            macroHint = macroHint,
-        )
+    private fun entry(
+        sourceId: String,
+        title: String,
+        codes: List<String> = listOf("005930"),
+        macroHint: String? = null,
+        type: IngestType = IngestType.NEWS,
+    ) = IngestQueueEntry(
+        source = "hankyung",
+        sourceId = sourceId,
+        type = type,
+        codes = codes,
+        title = title,
+        url = "https://example.com/$sourceId",
+        fetchedAt = clock.millis(),
+        macroHint = macroHint,
+    )
 
     private fun stockVerdict() = ClusterSummaryOutput(
         summary = "3줄 요약",
@@ -108,6 +113,14 @@ class NewsProcessorTest {
         assertEquals("NEWS", events.inserted.single().type)
         assertEquals("POSITIVE", events.inserted.single().data.sentiment)
         assertEquals(listOf("005930"), publisher.published.map { it.first })
+    }
+
+    @Test
+    fun `REPORT 수집 type은 REPORT 카테고리·이벤트로 관통 발행`() {
+        processor().process(entry("r1", "삼성전자 목표가 상향", type = IngestType.REPORT))
+        val event = events.inserted.single()
+        assertEquals("REPORT", event.type)
+        assertEquals("report", event.data.category)
     }
 
     @Test

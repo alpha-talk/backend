@@ -1,6 +1,7 @@
 package com.alphatalk.worker.llm.cluster
 
 import com.alphatalk.contracts.envelope.SourceRef
+import com.alphatalk.contracts.envelope.StreamCategory
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate
 import org.springframework.transaction.annotation.Transactional
 import java.sql.ResultSet
@@ -15,7 +16,7 @@ class JdbcClusterStore(
     override fun findArticleCluster(sourceId: String): ClusterRecord? =
         jdbc.query(
             """
-            SELECT c.id, c.rep_title, c.summary, c.scope, c.status, c.article_count
+            SELECT c.id, c.rep_title, c.summary, c.scope, c.status, c.article_count, c.category
             FROM news_article a JOIN news_cluster c ON c.id = a.cluster_id
             WHERE a.source_id = :sourceId
             """,
@@ -80,13 +81,18 @@ class JdbcClusterStore(
         ) { rs, _ -> rs.getString(1) to rs.getDouble(2) }.firstOrNull()
     }
 
-    override fun createCluster(id: String, repTitle: String, publishedAt: Instant) {
+    override fun createCluster(id: String, repTitle: String, publishedAt: Instant, category: StreamCategory) {
         jdbc.update(
             """
-            INSERT INTO news_cluster (id, rep_title, status, first_published_at, last_article_at, article_count)
-            VALUES (:id, :repTitle, 'NEW', :publishedAt, :publishedAt, 0)
+            INSERT INTO news_cluster (id, rep_title, status, category, first_published_at, last_article_at, article_count)
+            VALUES (:id, :repTitle, 'NEW', :category, :publishedAt, :publishedAt, 0)
             """,
-            mapOf("id" to id, "repTitle" to repTitle, "publishedAt" to Timestamp.from(publishedAt)),
+            mapOf(
+                "id" to id,
+                "repTitle" to repTitle,
+                "category" to category.payload,
+                "publishedAt" to Timestamp.from(publishedAt),
+            ),
         )
     }
 
@@ -151,7 +157,7 @@ class JdbcClusterStore(
 
     override fun cluster(clusterId: String): ClusterRecord =
         jdbc.query(
-            "SELECT id, rep_title, summary, scope, status, article_count FROM news_cluster WHERE id = :id",
+            "SELECT id, rep_title, summary, scope, status, article_count, category FROM news_cluster WHERE id = :id",
             mapOf("id" to clusterId),
             ::clusterRow,
         ).first()
@@ -340,6 +346,9 @@ class JdbcClusterStore(
         scope = rs.getString("scope"),
         status = ClusterStatus.valueOf(rs.getString("status")),
         articleCount = rs.getInt("article_count"),
+        category = rs.getString("category").let {
+            StreamCategory.fromPayload(it) ?: throw IllegalStateException("unknown cluster category: $it")
+        },
     )
 
     private fun digestRow(rs: ResultSet, @Suppress("UNUSED_PARAMETER") rowNum: Int) = DigestClusterRow(
