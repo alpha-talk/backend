@@ -1,11 +1,20 @@
 package com.alphatalk.contracts.queue
 
+import com.alphatalk.contracts.envelope.StreamCategory
+
 enum class IngestType(val value: String) {
     NEWS("news"),
     REPORT("report"),
     DISCLOSURE("disclosure"),
     DIGEST("digest"),
     ;
+
+    fun streamCategory(): StreamCategory = when (this) {
+        NEWS -> StreamCategory.NEWS
+        REPORT -> StreamCategory.REPORT
+        DISCLOSURE -> StreamCategory.DISCLOSURE
+        DIGEST -> StreamCategory.AI
+    }
 
     companion object {
         fun from(value: String): IngestType =
