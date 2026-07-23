@@ -1,7 +1,9 @@
 package com.alphatalk.worker.llm.sector
 
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate
+import org.springframework.stereotype.Component
 
+@Component
 class JdbcSectorDirectory(
     private val jdbc: NamedParameterJdbcTemplate,
 ) : SectorDirectory {

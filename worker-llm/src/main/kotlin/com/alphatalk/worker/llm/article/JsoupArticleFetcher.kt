@@ -2,14 +2,22 @@ package com.alphatalk.worker.llm.article
 
 import org.jsoup.Jsoup
 import org.slf4j.LoggerFactory
+import org.springframework.stereotype.Component
 import java.net.URI
 
+@Component
 class JsoupArticleFetcher(
     private val policy: ArticleUrlPolicy,
-    private val robots: RobotsPolicy = RobotsPolicy(),
-    private val gate: ArticleRequestGate = ArticleRequestGate { },
+    private val robots: RobotsPolicy,
+    private val gate: ArticleRequestGate,
 ) : ArticleFetcher {
     private val log = LoggerFactory.getLogger(javaClass)
+
+    init {
+        if (!policy.enabled) {
+            log.info("article body fetch 비활성 — allowed-host-suffixes 미설정(제목·발췌만 사용)")
+        }
+    }
 
     override fun fetchBody(url: String): String? {
         if (!policy.enabled) return null

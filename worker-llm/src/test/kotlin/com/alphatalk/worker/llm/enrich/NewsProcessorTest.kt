@@ -67,7 +67,8 @@ class NewsProcessorTest {
         store = store,
         assigner = ClusterAssigner(
             store, FakeEmbeddingClient(64), NoopClusterLock(),
-            Duration.ofHours(72), 0.85, { "cl-${ids.incrementAndGet()}".padEnd(26, '0') }, clock,
+            Duration.ofHours(72), 0.85,
+            { "cl-${ids.incrementAndGet()}".padEnd(26, '0') }, clock,
         ),
         fetcher = ArticleFetcher { null },
         summarizer = ClusterSummarizer(llm),
@@ -79,6 +80,7 @@ class NewsProcessorTest {
         meters = SimpleMeterRegistry(),
         fanoutCap = fanoutCap,
         coverageStocks = coverage,
+        transactions = TransactionRunner { it() },
         clock = clock,
     )
 

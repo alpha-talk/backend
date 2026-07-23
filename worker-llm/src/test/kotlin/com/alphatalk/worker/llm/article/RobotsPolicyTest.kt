@@ -8,6 +8,7 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class RobotsPolicyTest {
+    private val noopGate = ArticleRequestGate { }
     private val robotsTxt = """
         User-agent: *
         Disallow: /private
@@ -21,6 +22,7 @@ class RobotsPolicyTest {
 
     private var fetchCount = 0
     private fun policy(clock: () -> Long = { 0 }) = RobotsPolicy(
+        gate = noopGate,
         fetch = {
             fetchCount++
             RobotsPolicy.FetchResult.Ok(robotsTxt)
@@ -52,6 +54,7 @@ class RobotsPolicyTest {
     @Test
     fun `같은 길이 규칙이면 Allow가 Disallow를 이긴다`() {
         val tied = RobotsPolicy(
+            gate = noopGate,
             fetch = {
                 RobotsPolicy.FetchResult.Ok(
                     """
@@ -86,7 +89,11 @@ class RobotsPolicyTest {
     @Test
     fun `조회 실패는 허용하되 짧게 캐시`() {
         var now = 0L
-        val lenient = RobotsPolicy(fetch = { fetchCount++; RobotsPolicy.FetchResult.Unavailable }, clock = { now })
+        val lenient = RobotsPolicy(
+            gate = noopGate,
+            fetch = { fetchCount++; RobotsPolicy.FetchResult.Unavailable },
+            clock = { now },
+        )
         assertTrue(lenient.allowed(URI("https://example.com/anything")))
         now = Duration.ofMinutes(6).toMillis()
         lenient.allowed(URI("https://example.com/anything"))

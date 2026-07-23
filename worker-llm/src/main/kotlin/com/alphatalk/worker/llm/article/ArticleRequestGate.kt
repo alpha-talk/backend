@@ -1,20 +1,24 @@
 package com.alphatalk.worker.llm.article
 
 import com.alphatalk.contracts.Keys
+import com.alphatalk.worker.llm.config.LlmProperties
 import org.springframework.data.redis.core.StringRedisTemplate
 import org.springframework.data.redis.core.script.DefaultRedisScript
+import org.springframework.stereotype.Component
 import java.net.URI
-import java.time.Duration
 
 fun interface ArticleRequestGate {
     fun await(uri: URI)
 }
 
+@Component
 class RedisArticleRequestGate(
     private val redis: StringRedisTemplate,
-    private val minInterval: Duration,
+    props: LlmProperties,
     private val sleeper: (Long) -> Unit = ::sleepPreservingInterrupt,
 ) : ArticleRequestGate {
+    private val minInterval = props.article.minHostInterval
+
     init {
         require(!minInterval.isNegative)
     }

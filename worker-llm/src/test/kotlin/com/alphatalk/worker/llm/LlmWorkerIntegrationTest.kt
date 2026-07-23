@@ -10,6 +10,7 @@ import com.alphatalk.contracts.queue.IngestQueueEntry
 import com.alphatalk.contracts.queue.IngestType
 import com.alphatalk.worker.llm.article.ArticleRequestGate
 import com.alphatalk.worker.llm.cluster.ClusterStore
+import com.alphatalk.worker.llm.config.LlmProperties
 import com.alphatalk.worker.llm.consume.IngestConsumer
 import com.alphatalk.worker.llm.enrich.DigestProcessor
 import com.alphatalk.worker.llm.enrich.NewsProcessor
@@ -267,10 +268,11 @@ class LlmWorkerIntegrationTest {
             news = newsProcessor,
             digest = digestProcessor,
             meters = SimpleMeterRegistry(),
-            block = Duration.ofMillis(200),
-            batch = 8,
-            poisonMaxDeliveries = 1,
-            claimIdle = Duration.ZERO,
+            props = LlmProperties(
+                consumerBlock = Duration.ofMillis(200),
+                poisonMaxDeliveries = 1,
+                claimIdle = Duration.ZERO,
+            ),
             consumerName = "poison-test",
         )
         val badDigest = IngestQueueEntry(

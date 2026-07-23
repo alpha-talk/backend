@@ -1,15 +1,19 @@
 package com.alphatalk.worker.llm.cluster
 
 import com.alphatalk.contracts.Keys
+import com.alphatalk.worker.llm.config.LlmProperties
 import org.springframework.data.redis.core.StringRedisTemplate
 import org.springframework.data.redis.core.script.DefaultRedisScript
-import java.time.Duration
+import org.springframework.stereotype.Component
 import java.util.UUID
 
+@Component
 class RedisClusterLock(
     private val redis: StringRedisTemplate,
-    private val ttl: Duration,
+    props: LlmProperties,
 ) : ClusterLock {
+
+    private val ttl = props.cluster.lockTtl
 
     override fun <T> withLock(code: String, action: () -> T): T {
         val key = Keys.clusterLock(code)

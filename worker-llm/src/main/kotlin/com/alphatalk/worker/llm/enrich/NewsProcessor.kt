@@ -32,8 +32,8 @@ class NewsProcessor(
     private val mapper: ObjectMapper,
     private val meters: MeterRegistry,
     private val fanoutCap: Int,
-    private val coverageStocks: List<String>,
-    private val transactions: TransactionRunner = TransactionRunner { it() },
+    coverageStocks: List<String>,
+    private val transactions: TransactionRunner,
     private val summarizeLease: Duration = Duration.ofMinutes(2),
     private val clock: Clock = Clock.systemUTC(),
 ) {
