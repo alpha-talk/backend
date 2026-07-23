@@ -2,13 +2,18 @@ package com.alphatalk.worker.ingest.queue
 
 import com.alphatalk.contracts.Queues
 import com.alphatalk.contracts.queue.IngestQueueEntry
+import com.alphatalk.worker.ingest.config.IngestProperties
 import org.springframework.data.redis.connection.stream.StreamRecords
 import org.springframework.data.redis.core.StringRedisTemplate
+import org.springframework.stereotype.Component
 
+@Component
 class RedisIngestQueue(
     private val redis: StringRedisTemplate,
-    private val maxLen: Long,
+    props: IngestProperties,
 ) : IngestQueue {
+
+    private val maxLen = props.queueMaxLen
 
     override fun enqueue(entry: IngestQueueEntry) {
         val record = StreamRecords.mapBacked<String, String, String>(entry.toFields())

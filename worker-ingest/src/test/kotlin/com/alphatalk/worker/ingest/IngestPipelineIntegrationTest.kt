@@ -2,6 +2,7 @@ package com.alphatalk.worker.ingest
 
 import com.alphatalk.contracts.Queues
 import com.alphatalk.contracts.queue.IngestQueueEntry
+import com.alphatalk.worker.ingest.config.IngestProperties
 import com.alphatalk.worker.ingest.dedup.RedisSeenMarker
 import com.alphatalk.worker.ingest.mapping.DictionaryStockCodeMapper
 import com.alphatalk.worker.ingest.queue.RedisIngestQueue
@@ -44,6 +45,10 @@ class IngestPipelineIntegrationTest {
         stocks = mapOf("005930" to listOf("삼성전자")),
         macroKeywords = listOf("금리"),
     )
+    private val props = IngestProperties(
+        seenTtl = Duration.ofDays(7),
+        queueMaxLen = 100,
+    )
 
     @BeforeEach
     fun flush() {
@@ -52,7 +57,7 @@ class IngestPipelineIntegrationTest {
 
     @Test
     fun `seen 마커 - SETNX와 TTL`() {
-        val marker = RedisSeenMarker(template, Duration.ofDays(7))
+        val marker = RedisSeenMarker(template, props)
         assertTrue(marker.markIfNew("hankyung:a1"))
         assertEquals(false, marker.markIfNew("hankyung:a1"))
         val ttl = template.getExpire("seen:ingest:hankyung:a1")
@@ -61,7 +66,7 @@ class IngestPipelineIntegrationTest {
 
     @Test
     fun `큐 엔트리 필드 왕복 - XADD 후 재구성`() {
-        val queue = RedisIngestQueue(template, maxLen = 100)
+        val queue = RedisIngestQueue(template, props)
         val entry = IngestQueueEntry(
             source = "hankyung",
             sourceId = "hankyung:a1",
@@ -89,8 +94,8 @@ class IngestPipelineIntegrationTest {
         val poller = IngestPoller(
             sources = listOf(source),
             mapper = mapper,
-            seen = RedisSeenMarker(template, Duration.ofDays(7)),
-            queue = RedisIngestQueue(template, maxLen = 100),
+            seen = RedisSeenMarker(template, props),
+            queue = RedisIngestQueue(template, props),
             excerptMaxLength = 200,
         )
 
