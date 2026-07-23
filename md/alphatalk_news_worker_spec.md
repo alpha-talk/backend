@@ -190,6 +190,8 @@ stream payload (ws_api_spec §4.3 확장 — ⚠️ §6 증보):
 
 `stream_event.payload`는 JSONB라 core-api 스키마 변경 없이 그대로 조회에 노출된다(`GET /rooms/{code}/stream`).
 
+**수집 type의 관통(정형화)**: 큐 `type`(news/report/disclosure)은 `:contracts`의 `StreamCategory` 매핑으로 발행까지 관통한다 — `IngestType → StreamCategory(payload, eventType)` → payload `category`와 `stream_event.type`이 함께 결정된다(digest→ai). 클러스터는 **첫 기사 type으로 카테고리를 보유**하며(V6 `news_cluster.category`), 이후 편입 기사 type이 달라도 유지된다. 새 소식 종류를 추가할 때는 `IngestType`·`StreamCategory`에 값을 더하는 것으로 끝난다 — 워커 코드에 카테고리 리터럴을 두지 않는다.
+
 ### 3.6 섹터·매크로 뉴스 — scope 사다리
 
 금리 인상·환율 급변·업종 규제처럼 특정 기업 언급 없이 업종 전반에 작용하는 뉴스는 종목 사전 매칭에 잡히지 않고, 잡더라도 "어느 방에 배달할지"가 별도 문제다. LLM 판정 `scope`(§3.4)에 따라 세 갈래로 처리한다.
@@ -260,6 +262,7 @@ CREATE EXTENSION IF NOT EXISTS vector;
 news_cluster(
   id CHAR(26) PK,                -- ULID
   rep_title TEXT, summary TEXT NULL, scope TEXT NULL,
+  category TEXT,                 -- news | report | disclosure
   status TEXT,                   -- NEW | SUMMARIZING | SUMMARIZED | IRRELEVANT
   summarizing_at TIMESTAMPTZ NULL,  -- 요약 lease(§3.3 동시성) — CAS로 단일 워커 선점
   summarizing_token TEXT NULL,      -- 만료 재선점 후 이전 소유자의 저장을 막는 fencing token
@@ -292,7 +295,7 @@ news_cluster_sector(
 -- INDEX news_cluster (last_article_at) — 72h 창 후보 조회
 ```
 
-Flyway 마이그레이션(worker-llm 소유): `V1`(news_* + stock_alias) · `V2`(stream_event) · `V3`(다이제스트 부분 유니크 인덱스) · `V4`(news_cluster 요약 lease·fencing token) · `V5`(종목 verdict 기각 상태와 기존 완료 행 백필).
+Flyway 마이그레이션(worker-llm 소유): `V1`(news_* + stock_alias) · `V2`(stream_event) · `V3`(다이제스트 부분 유니크 인덱스) · `V4`(news_cluster 요약 lease·fencing token) · `V5`(종목 verdict 기각 상태와 기존 완료 행 백필) · `V6`(클러스터 category와 허용값 제약).
 
 **⚠️ `stream_event` 소유 경계** — `stream_event`의 **논리적 소유자는 core-api의 stream 모듈**(core-api 명세 §11, `StreamEventAppender` 경유 INSERT). worker-llm은 이 테이블에 **INSERT/UPDATE하는 별도 프로세스**다(기획안 §3.1: "worker-llm은 별도 프로세스로 같은 테이블에 INSERT"). 현재 저장소는 core-api가 별도 브랜치라 worker-llm의 `V2`가 `CREATE TABLE IF NOT EXISTS`로 **브리징**한다:
 - 통합 배포 시 Flyway는 저장소 단일 관리 — core-api가 `stream_event` DDL을 소유하고, worker-llm의 `V2`는 `IF NOT EXISTS`라 재실행돼도 무해(중복 생성 없음).
@@ -309,14 +312,15 @@ Flyway 마이그레이션(worker-llm 소유): `V1`(news_* + stock_alias) · `V2`
 
 | 대상 문서 | 항목 | 상태 |
 |---|---|---|
-| redis_contract **v0.3** §2.1·§2.3 | `type="digest"` + digest 엔트리 규약(`sourceId=digest:{code}:{date}`) | ✅ 반영 |
-| redis_contract v0.3 §2.1 | `macroHint` 필드(선택) + `codes` 공란 허용 | ✅ 반영 |
-| redis_contract v0.3 §2·§4 | `queue:ingest:dlq` — poison 격리(delivery count > 5) | ✅ 반영 |
-| redis_contract v0.3 §3·§4 | `lock:cluster:{code}` — 클러스터 판정 직렬화 락(TTL 3s) | ✅ 반영 |
+| redis_contract **v0.4** §2.1·§2.3 | `type="digest"` + digest 엔트리 규약(`sourceId=digest:{code}:{date}`) | ✅ 반영 |
+| redis_contract v0.4 §2.1 | `macroHint` 필드(선택) + `codes` 공란 허용 | ✅ 반영 |
+| redis_contract v0.4 §2·§4 | `queue:ingest:dlq` — poison 격리(delivery count > 5) | ✅ 반영 |
+| redis_contract v0.4 §3·§4 | `lock:cluster:{code}` — 클러스터 판정 직렬화 락(TTL 3s) | ✅ 반영 |
 | redis_contract v0.4 §3·§4 | `rate:article-fetch:{host}` — llm-worker 인스턴스 간 원문 요청 간격 | ✅ 반영 |
 | ws_api_spec **v0.5** §4.3 | `sentiment`·`scope`·`sector{}`·`sources[]`(news) · `digest{}`(ai) — 전부 optional, 비파괴 | ✅ 반영 |
 | KIS 워커 명세 §4 | `sector` 테이블 + `stock_master.sector_code`(마스터 파일 업종 필드 파싱, `stock_master_sync` 적재) | ✅ 반영 |
 | :contracts | `Queues`·`Keys.seenIngest/clusterLock`·`IngestQueueEntry`·`StreamData` v0.5 확장 | ✅ 반영 (N0) |
+| :contracts | `StreamCategory` + `IngestType.streamCategory()` — 수집 type→발행 category·이벤트 type 관통 매핑 | ✅ 반영 |
 
 ---
 
