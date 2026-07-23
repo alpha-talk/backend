@@ -22,6 +22,7 @@ data class ClusterSummaryInput(
 
 data class ClusterSummaryOutput(
     val summary: String,
+    val marketRelevant: Boolean,
     val scope: NewsScope,
     val stocks: List<StockVerdict>,
     val sectors: List<SectorVerdict>,

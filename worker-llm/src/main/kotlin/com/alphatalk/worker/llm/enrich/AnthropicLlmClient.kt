@@ -70,10 +70,11 @@ class AnthropicLlmClient(
     private fun parseSummary(node: JsonNode, input: ClusterSummaryInput): ClusterSummaryOutput =
         ClusterSummaryOutput(
             summary = node.path("summary").asText(),
+            marketRelevant = node.path("marketRelevant").asBoolean(false),
             scope = runCatching { NewsScope.valueOf(node.path("scope").asText()) }.getOrDefault(NewsScope.STOCK),
             stocks = node.path("stocks").mapNotNull { s ->
                 val code = s.path("code").asText()
-                if (input.stocks.none { it.code == code }) return@mapNotNull null
+                if (!code.matches(STOCK_CODE)) return@mapNotNull null
                 StockVerdict(
                     code = code,
                     relevant = s.path("relevant").asBoolean(),
@@ -103,9 +104,11 @@ class AnthropicLlmClient(
         appendLine("대표 제목: ${input.repTitle}")
         appendLine("클러스터 기사 제목들: ${input.articleTitles.joinToString(" | ")}")
         input.body?.let { appendLine("본문: ${it.take(3000)}") }
-        appendLine("종목 후보: ${input.stocks.joinToString { "${it.code}=${it.name}" }}")
+        appendLine("종목 후보: ${input.stocks.joinToString { "${it.code}=${it.name}" }.ifEmpty { "(없음)" }}")
         appendLine("섹터 후보: ${input.sectors.joinToString { "${it.code}=${it.name}" }}")
-        appendLine("scope는 특정 기업 뉴스면 STOCK, 업종 전반이면 SECTOR, 시장 전체면 MARKET.")
+        appendLine("먼저 한국 증시나 상장사에 실질적 영향이 있는 기사인지 marketRelevant로 판정하라. 단순 생활·사건·연예·스포츠 등 증시와 무관하면 false다.")
+        appendLine("marketRelevant=true이면 후보 각각의 실제 관련 여부를 판정하고, 후보에 없어도 이 뉴스의 실질적 영향(정책·규제·수혜 포함)을 받는 상장사가 확실하면 stocks에 6자리 종목코드로 추가하라. 코드가 불확실한 종목은 넣지 않는다.")
+        appendLine("scope는 특정 기업 뉴스면 STOCK, 업종 전반이면 SECTOR, 시장 전체면 MARKET이다. marketRelevant=false이면 모든 종목 후보도 relevant=false로 기각하라.")
     }
 
     private fun digestPrompt(input: DigestInput): String = buildString {
@@ -116,6 +119,8 @@ class AnthropicLlmClient(
     }
 
     companion object {
+        private val STOCK_CODE = Regex("\\d{6}")
+
         private val SUMMARIZE_TOOL = mapOf(
             "name" to "submit_news_analysis",
             "description" to "뉴스 클러스터 요약·감성 판정 결과 제출",
@@ -123,6 +128,10 @@ class AnthropicLlmClient(
                 "type" to "object",
                 "properties" to mapOf(
                     "summary" to mapOf("type" to "string", "description" to "3줄 요약, 각 줄 80자 이내"),
+                    "marketRelevant" to mapOf(
+                        "type" to "boolean",
+                        "description" to "한국 증시 또는 상장사에 실질적 영향이 있는 기사인지 여부",
+                    ),
                     "scope" to mapOf("type" to "string", "enum" to listOf("STOCK", "SECTOR", "MARKET")),
                     "stocks" to mapOf(
                         "type" to "array",
@@ -153,7 +162,7 @@ class AnthropicLlmClient(
                         ),
                     ),
                 ),
-                "required" to listOf("summary", "scope", "stocks"),
+                "required" to listOf("summary", "marketRelevant", "scope", "stocks"),
             ),
         )
 
