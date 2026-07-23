@@ -1,5 +1,6 @@
 package com.alphatalk.contracts.queue
 
+import com.alphatalk.contracts.envelope.StreamCategory
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -60,5 +61,16 @@ class IngestQueueEntryTest {
     @Test
     fun `미지의 type 거부`() {
         assertFailsWith<IllegalArgumentException> { IngestType.from("unknown") }
+    }
+
+    @Test
+    fun `수집 type은 발행 카테고리로 관통 - ws_api §4_3 category와 stream_event type`() {
+        assertEquals(StreamCategory.NEWS, IngestType.NEWS.streamCategory())
+        assertEquals(StreamCategory.REPORT, IngestType.REPORT.streamCategory())
+        assertEquals(StreamCategory.DISCLOSURE, IngestType.DISCLOSURE.streamCategory())
+        assertEquals(StreamCategory.AI, IngestType.DIGEST.streamCategory())
+        assertEquals("report", StreamCategory.REPORT.payload)
+        assertEquals("REPORT", StreamCategory.REPORT.eventType)
+        assertEquals(StreamCategory.AI, StreamCategory.fromPayload("ai"))
     }
 }
