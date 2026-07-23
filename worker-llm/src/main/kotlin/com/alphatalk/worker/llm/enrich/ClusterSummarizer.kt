@@ -1,7 +1,9 @@
 package com.alphatalk.worker.llm.enrich
 
 import com.alphatalk.contracts.envelope.Sentiment
+import org.springframework.stereotype.Component
 
+@Component
 class ClusterSummarizer(
     private val llm: LlmClient,
     private val confidenceFloor: Double = 0.6,

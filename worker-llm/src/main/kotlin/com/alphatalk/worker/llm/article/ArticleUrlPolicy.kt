@@ -2,9 +2,7 @@ package com.alphatalk.worker.llm.article
 
 import java.net.URI
 
-class ArticleUrlPolicy(
-    allowedHostSuffixes: List<String>,
-) {
+class ArticleUrlPolicy(allowedHostSuffixes: List<String>) {
     private val suffixes = allowedHostSuffixes.map { it.lowercase().removePrefix(".") }
 
     val enabled: Boolean = suffixes.isNotEmpty()

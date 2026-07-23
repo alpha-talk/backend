@@ -1,16 +1,18 @@
 package com.alphatalk.worker.llm.article
 
+import org.springframework.stereotype.Component
 import java.net.HttpURLConnection
 import java.net.URI
 import java.time.Duration
 import java.util.concurrent.ConcurrentHashMap
 
+@Component
 class RobotsPolicy(
+    private val gate: ArticleRequestGate,
     private val fetch: (URI) -> FetchResult = ::fetchRobotsTxt,
     private val ttl: Duration = Duration.ofHours(6),
     private val failureTtl: Duration = Duration.ofMinutes(5),
     private val clock: () -> Long = System::currentTimeMillis,
-    private val gate: ArticleRequestGate = ArticleRequestGate { },
 ) {
     sealed interface FetchResult {
         data class Ok(val body: String) : FetchResult

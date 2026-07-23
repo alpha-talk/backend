@@ -4,6 +4,7 @@ import com.alphatalk.contracts.Queues
 import com.alphatalk.contracts.queue.IngestQueueEntry
 import com.alphatalk.contracts.queue.IngestType
 import com.alphatalk.worker.llm.cluster.ClusterContendedException
+import com.alphatalk.worker.llm.config.LlmProperties
 import com.alphatalk.worker.llm.enrich.DigestProcessor
 import com.alphatalk.worker.llm.enrich.NewsProcessor
 import io.micrometer.core.instrument.MeterRegistry
@@ -18,21 +19,23 @@ import org.springframework.data.redis.connection.stream.StreamReadOptions
 import org.springframework.data.redis.connection.stream.StreamRecords
 import org.springframework.data.redis.core.StringRedisTemplate
 import org.springframework.data.redis.connection.RedisStreamCommands.XClaimOptions
+import org.springframework.stereotype.Component
 import java.lang.management.ManagementFactory
-import java.time.Duration
 
+@Component
 class IngestConsumer(
     private val redis: StringRedisTemplate,
     private val news: NewsProcessor,
     private val digest: DigestProcessor,
     private val meters: MeterRegistry,
-    private val block: Duration,
-    private val batch: Int,
-    private val poisonMaxDeliveries: Long,
-    private val claimIdle: Duration,
+    props: LlmProperties,
     val consumerName: String = ManagementFactory.getRuntimeMXBean().name,
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
+    private val block = props.consumerBlock
+    private val batch = props.consumerBatch
+    private val poisonMaxDeliveries = props.poisonMaxDeliveries
+    private val claimIdle = props.claimIdle
 
     fun ensureGroup() {
         runCatching {

@@ -1,20 +1,34 @@
 package com.alphatalk.worker.llm.consume
 
+import com.alphatalk.worker.llm.config.LlmProperties
+import io.micrometer.core.instrument.Gauge
+import io.micrometer.core.instrument.MeterRegistry
 import org.slf4j.LoggerFactory
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
 import org.springframework.context.SmartLifecycle
-import java.time.Duration
+import org.springframework.stereotype.Component
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.concurrent.thread
 
+@Component
+@ConditionalOnProperty("alphatalk.llm.consume-enabled", havingValue = "true", matchIfMissing = true)
 class ConsumerLifecycle(
     private val consumer: IngestConsumer,
-    private val claimInterval: Duration,
-    private val pendingGauge: AtomicLong,
+    props: LlmProperties,
+    meters: MeterRegistry,
 ) : SmartLifecycle {
     private val log = LoggerFactory.getLogger(javaClass)
+    private val claimInterval = props.claimInterval
+    private val pendingGauge = AtomicLong(0)
     private val running = AtomicBoolean(false)
     private var worker: Thread? = null
+
+    init {
+        Gauge.builder("queue.ingest.pending", pendingGauge, AtomicLong::toDouble)
+            .description("queue:ingest 소비자 그룹 g:llm PEL 크기 (기획안 §10 알람 대상)")
+            .register(meters)
+    }
 
     override fun start() {
         if (!running.compareAndSet(false, true)) return

@@ -7,8 +7,10 @@ import com.alphatalk.contracts.envelope.StreamData
 import com.fasterxml.jackson.databind.ObjectMapper
 import org.slf4j.LoggerFactory
 import org.springframework.data.redis.core.StringRedisTemplate
+import org.springframework.stereotype.Component
 import java.time.Clock
 
+@Component
 class RedisStreamPublisher(
     private val redis: StringRedisTemplate,
     private val mapper: ObjectMapper,
