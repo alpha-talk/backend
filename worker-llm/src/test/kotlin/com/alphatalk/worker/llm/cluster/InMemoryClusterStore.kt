@@ -52,6 +52,9 @@ class InMemoryClusterStore : ClusterStore {
         if (state.status == ClusterStatus.IRRELEVANT) return false
         if (codes.isNotEmpty()) return stockLinkRows.keys.any { it.first == clusterId && it.second in codes }
         return state.scope == "SECTOR" || state.scope == "MARKET" ||
+            articles.values.any { (article, candidateClusterId) ->
+                candidateClusterId == clusterId && article.candidateCodesEmpty
+            } ||
             (state.status in setOf(ClusterStatus.NEW, ClusterStatus.SUMMARIZING) &&
                 stockLinkRows.keys.none { it.first == clusterId })
     }

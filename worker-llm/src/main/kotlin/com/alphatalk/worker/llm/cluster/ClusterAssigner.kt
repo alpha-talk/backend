@@ -82,6 +82,7 @@ class ClusterAssigner(
             titleHash = titleHash,
             publishedAt = Instant.ofEpochMilli(entry.fetchedAt),
             fetchedAt = now,
+            candidateCodesEmpty = entry.codes.isEmpty(),
         )
     }
 

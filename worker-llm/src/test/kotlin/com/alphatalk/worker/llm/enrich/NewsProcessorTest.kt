@@ -103,6 +103,7 @@ class NewsProcessorTest {
 
     private fun stockVerdict() = ClusterSummaryOutput(
         summary = "3줄 요약",
+        marketRelevant = true,
         scope = NewsScope.STOCK,
         stocks = listOf(StockVerdict("005930", true, Sentiment.POSITIVE, 0.9, "수주")),
         sectors = emptyList(),
@@ -154,9 +155,45 @@ class NewsProcessorTest {
     }
 
     @Test
+    fun `후보 없는 기사 - LLM이 발견한 종목으로 발행`() {
+        processor().process(entry("g1", "반도체 지원법 국회 통과", codes = emptyList()))
+        assertEquals(listOf("005930"), events.inserted.map { it.code })
+        assertEquals(listOf("005930"), publisher.published.map { it.first })
+    }
+
+    @Test
+    fun `후보 없이 STOCK이 된 클러스터에 후속 빈 후보 기사가 재합류`() {
+        val p = processor()
+
+        p.process(entry("g1", "반도체 지원법 국회 통과", codes = emptyList()))
+        p.process(entry("g2", "[속보] 반도체 지원법 국회 통과", codes = emptyList()))
+
+        assertEquals(1, store.clusters.size)
+        assertEquals(2, store.articles.size)
+        assertEquals(1, events.inserted.size)
+        assertEquals(1, publisher.published.size)
+        assertTrue(events.refreshed.isNotEmpty())
+    }
+
+    @Test
+    fun `LLM 발견 종목이 stock_master에 없으면 버린다`() {
+        verdict = ClusterSummaryOutput(
+            summary = "요약",
+            marketRelevant = true,
+            scope = NewsScope.STOCK,
+            stocks = listOf(StockVerdict("999999", true, Sentiment.POSITIVE, 0.9, "환각 코드")),
+            sectors = emptyList(),
+        )
+        processor().process(entry("h1", "출처 불명 뉴스", codes = emptyList()))
+        assertTrue(events.inserted.isEmpty())
+        assertTrue(publisher.published.isEmpty())
+    }
+
+    @Test
     fun `LLM 기각 종목은 재전달과 후속 기사 편입에서 다시 발행하지 않는다`() {
         verdict = ClusterSummaryOutput(
             summary = "반도체 수주",
+            marketRelevant = true,
             scope = NewsScope.STOCK,
             stocks = listOf(
                 StockVerdict("005930", true, Sentiment.POSITIVE, 0.9, "직접 관련"),
@@ -181,6 +218,7 @@ class NewsProcessorTest {
     fun `SECTOR - 구성 종목 fan-out에 섹터·감성 표기`() {
         verdict = ClusterSummaryOutput(
             summary = "금리 인상",
+            marketRelevant = true,
             scope = NewsScope.SECTOR,
             stocks = emptyList(),
             sectors = listOf(SectorVerdict("27", Sentiment.POSITIVE, Impact.HIGH, 0.9, "이자이익")),
@@ -199,6 +237,7 @@ class NewsProcessorTest {
     fun `SECTOR - 직접 관련 종목도 scope·sector 표기해 발행`() {
         verdict = ClusterSummaryOutput(
             summary = "반도체 이슈",
+            marketRelevant = true,
             scope = NewsScope.SECTOR,
             stocks = listOf(StockVerdict("005930", true, Sentiment.POSITIVE, 0.9, "직접")),
             sectors = listOf(SectorVerdict("33", Sentiment.POSITIVE, Impact.HIGH, 0.9, "")),
@@ -213,6 +252,7 @@ class NewsProcessorTest {
     fun `SECTOR - 커버리지 교집합만 배달`() {
         verdict = ClusterSummaryOutput(
             summary = "금리 인상",
+            marketRelevant = true,
             scope = NewsScope.SECTOR,
             stocks = emptyList(),
             sectors = listOf(SectorVerdict("27", Sentiment.POSITIVE, Impact.HIGH, 0.9, "")),
@@ -225,6 +265,7 @@ class NewsProcessorTest {
     fun `SECTOR - fan-out 상한 초과면 MARKET 강등`() {
         verdict = ClusterSummaryOutput(
             summary = "금리 인상",
+            marketRelevant = true,
             scope = NewsScope.SECTOR,
             stocks = emptyList(),
             sectors = listOf(SectorVerdict("27", Sentiment.POSITIVE, Impact.HIGH, 0.9, "")),
@@ -238,6 +279,7 @@ class NewsProcessorTest {
     fun `SECTOR - impact LOW는 실시간 fan-out 없이 링크만`() {
         verdict = ClusterSummaryOutput(
             summary = "소폭 영향",
+            marketRelevant = true,
             scope = NewsScope.SECTOR,
             stocks = emptyList(),
             sectors = listOf(SectorVerdict("27", Sentiment.NEUTRAL, Impact.LOW, 0.9, "")),
@@ -252,6 +294,7 @@ class NewsProcessorTest {
     fun `MARKET - 방 fan-out 없음`() {
         verdict = ClusterSummaryOutput(
             summary = "코스피 급락",
+            marketRelevant = true,
             scope = NewsScope.MARKET,
             stocks = emptyList(),
             sectors = emptyList(),
@@ -263,9 +306,28 @@ class NewsProcessorTest {
     }
 
     @Test
+    fun `시장 무관 판정은 MARKET scope 응답이어도 IRRELEVANT`() {
+        verdict = ClusterSummaryOutput(
+            summary = "지역 축제 개막",
+            marketRelevant = false,
+            scope = NewsScope.MARKET,
+            stocks = emptyList(),
+            sectors = emptyList(),
+        )
+
+        processor().process(entry("social1", "지역 축제 개막", codes = emptyList()))
+
+        assertEquals(ClusterStatus.IRRELEVANT, store.clusters.values.single().status)
+        assertEquals(null, store.clusters.values.single().scope)
+        assertTrue(events.inserted.isEmpty())
+        assertTrue(publisher.published.isEmpty())
+    }
+
+    @Test
     fun `SECTOR - 관련 종목과 섹터가 모두 없으면 IRRELEVANT`() {
         verdict = ClusterSummaryOutput(
             summary = "무관",
+            marketRelevant = true,
             scope = NewsScope.SECTOR,
             stocks = emptyList(),
             sectors = emptyList(),
@@ -331,6 +393,7 @@ class NewsProcessorTest {
     fun `전부 기각 - IRRELEVANT 마킹 후 발행 없음`() {
         verdict = ClusterSummaryOutput(
             summary = "무관",
+            marketRelevant = true,
             scope = NewsScope.STOCK,
             stocks = listOf(StockVerdict("005930", false, Sentiment.NEUTRAL, 0.9, "무관")),
             sectors = emptyList(),

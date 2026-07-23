@@ -19,6 +19,7 @@ class ClusterSummarizerTest {
             fixedLlm(
                 ClusterSummaryOutput(
                     summary = "요약",
+                    marketRelevant = true,
                     scope = NewsScope.STOCK,
                     stocks = listOf(
                         StockVerdict("005930", true, Sentiment.POSITIVE, 0.55, "낮음"),

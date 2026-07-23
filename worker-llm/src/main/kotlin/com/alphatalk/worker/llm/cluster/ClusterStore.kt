@@ -25,6 +25,7 @@ data class ArticleRecord(
     val titleHash: String,
     val publishedAt: Instant,
     val fetchedAt: Instant,
+    val candidateCodesEmpty: Boolean,
 )
 
 data class StockLink(

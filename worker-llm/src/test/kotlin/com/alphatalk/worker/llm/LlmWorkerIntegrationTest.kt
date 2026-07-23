@@ -130,9 +130,11 @@ class LlmWorkerIntegrationTest {
         macroHint = macroHint,
     )
 
-    private fun xadd(entry: IngestQueueEntry) {
+    private fun xadd(entry: IngestQueueEntry) = xadd(entry.toFields())
+
+    private fun xadd(fields: Map<String, String>) {
         redisTemplate.opsForStream<String, String>().add(
-            StreamRecords.mapBacked<String, String, String>(entry.toFields()).withStreamKey(Queues.INGEST),
+            StreamRecords.mapBacked<String, String, String>(fields).withStreamKey(Queues.INGEST),
         )
     }
 
@@ -275,14 +277,14 @@ class LlmWorkerIntegrationTest {
             ),
             consumerName = "poison-test",
         )
-        val badDigest = IngestQueueEntry(
-            source = IngestQueueEntry.DIGEST_SOURCE,
-            sourceId = "digest:broken:2026-07-16",
-            type = IngestType.DIGEST,
-            codes = listOf("005930", "000660"),
-            title = "",
-            url = "",
-            fetchedAt = System.currentTimeMillis(),
+        val badDigest = mapOf(
+            IngestQueueEntry.FIELD_SOURCE to IngestQueueEntry.DIGEST_SOURCE,
+            IngestQueueEntry.FIELD_SOURCE_ID to "digest:broken:2026-07-16",
+            IngestQueueEntry.FIELD_TYPE to IngestType.DIGEST.value,
+            IngestQueueEntry.FIELD_CODES to "005930,000660",
+            IngestQueueEntry.FIELD_TITLE to "",
+            IngestQueueEntry.FIELD_URL to "",
+            IngestQueueEntry.FIELD_FETCHED_AT to System.currentTimeMillis().toString(),
         )
         xadd(badDigest)
         poison.pollOnce()
@@ -311,6 +313,39 @@ class LlmWorkerIntegrationTest {
         )!!
         assertTrue(payload.contains("\"SECTOR\""))
         assertTrue(payload.contains("은행"))
+    }
+
+    @Test
+    fun `후보 없이 수집된 기사는 STOCK 판정 후에도 같은 빈 후보 기사와 재클러스터링`() {
+        xadd(newsEntry("hankyung:empty1", "코스피 정책 발표", codes = emptyList()))
+        drain()
+
+        val clusterId = jdbc.queryForObject(
+            "SELECT id FROM news_cluster",
+            emptyMap<String, Any>(),
+            String::class.java,
+        )!!
+        jdbc.update(
+            "UPDATE news_cluster SET scope = 'STOCK' WHERE id = :id",
+            mapOf("id" to clusterId),
+        )
+        clusterStore.applyStockVerdict(clusterId, "005930", "NEUTRAL", 0.9, rejected = false)
+
+        xadd(newsEntry("maeil:empty2", "[속보] 코스피 정책 발표", source = "maeil", codes = emptyList()))
+        drain()
+
+        val clusterCount = jdbc.queryForObject(
+            "SELECT count(*) FROM news_cluster",
+            emptyMap<String, Any>(),
+            Long::class.java,
+        )
+        val articleCount = jdbc.queryForObject(
+            "SELECT count(*) FROM news_article WHERE cluster_id = :id",
+            mapOf("id" to clusterId),
+            Long::class.java,
+        )
+        assertEquals(1, clusterCount)
+        assertEquals(2, articleCount)
     }
 
     private fun dlqSize(): Long = redisTemplate.opsForStream<String, String>().size(Queues.INGEST_DLQ) ?: 0

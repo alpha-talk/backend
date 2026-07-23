@@ -10,6 +10,9 @@ class FakeLlmClient : LlmClient {
         val sentiment = sentimentOf(text)
         val relevantStocks = input.stocks.filter { text.contains(it.name) || text.contains(it.code) }
         val matchedSectors = input.sectors.filter { text.contains(it.name) }
+        val marketRelevant = relevantStocks.isNotEmpty() ||
+            matchedSectors.isNotEmpty() ||
+            MARKET_KEYWORDS.any(text::contains)
         val scope = when {
             relevantStocks.isNotEmpty() -> NewsScope.STOCK
             matchedSectors.isNotEmpty() -> NewsScope.SECTOR
@@ -17,6 +20,7 @@ class FakeLlmClient : LlmClient {
         }
         return ClusterSummaryOutput(
             summary = summaryOf(input),
+            marketRelevant = marketRelevant,
             scope = scope,
             stocks = input.stocks.map {
                 StockVerdict(
@@ -64,5 +68,7 @@ class FakeLlmClient : LlmClient {
             listOf("수주", "상승", "증가", "개선", "호재", "강세", "신고가", "흑자", "인상 수혜")
         private val NEGATIVE_KEYWORDS =
             listOf("하락", "적자", "감소", "소송", "리콜", "악재", "약세", "규제", "파산")
+        private val MARKET_KEYWORDS =
+            listOf("증시", "코스피", "코스닥", "금리", "환율", "유가", "물가", "수출", "관세", "경기")
     }
 }

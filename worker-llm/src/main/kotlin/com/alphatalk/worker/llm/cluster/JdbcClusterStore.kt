@@ -32,6 +32,11 @@ class JdbcClusterStore(
             """
             AND (
                 c.scope IN ('SECTOR', 'MARKET') OR
+                EXISTS (
+                    SELECT 1 FROM news_article candidate_free
+                    WHERE candidate_free.cluster_id = a.cluster_id
+                      AND candidate_free.candidate_codes_empty = TRUE
+                ) OR
                 (c.status IN ('NEW', 'SUMMARIZING') AND NOT EXISTS (
                     SELECT 1 FROM news_cluster_stock s WHERE s.cluster_id = a.cluster_id
                 ))
@@ -62,6 +67,11 @@ class JdbcClusterStore(
             """
             AND (
                 c.scope IN ('SECTOR', 'MARKET') OR
+                EXISTS (
+                    SELECT 1 FROM news_article candidate_free
+                    WHERE candidate_free.cluster_id = c.id
+                      AND candidate_free.candidate_codes_empty = TRUE
+                ) OR
                 (c.status IN ('NEW', 'SUMMARIZING') AND NOT EXISTS (
                     SELECT 1 FROM news_cluster_stock s WHERE s.cluster_id = c.id
                 ))
@@ -114,9 +124,11 @@ class JdbcClusterStore(
         val inserted = jdbc.update(
             """
             INSERT INTO news_article
-                (source, source_id, url, title, excerpt, title_hash, embedding, published_at, fetched_at, cluster_id)
+                (source, source_id, url, title, excerpt, title_hash, embedding, published_at, fetched_at,
+                 candidate_codes_empty, cluster_id)
             VALUES
-                (:source, :sourceId, :url, :title, :excerpt, :titleHash, CAST(:embedding AS vector), :publishedAt, :fetchedAt, :clusterId)
+                (:source, :sourceId, :url, :title, :excerpt, :titleHash, CAST(:embedding AS vector), :publishedAt, :fetchedAt,
+                 :candidateCodesEmpty, :clusterId)
             ON CONFLICT (source_id) DO NOTHING
             """,
             mapOf(
@@ -129,6 +141,7 @@ class JdbcClusterStore(
                 "embedding" to embedding?.let(::toVectorLiteral),
                 "publishedAt" to Timestamp.from(article.publishedAt),
                 "fetchedAt" to Timestamp.from(article.fetchedAt),
+                "candidateCodesEmpty" to article.candidateCodesEmpty,
                 "clusterId" to clusterId,
             ),
         )

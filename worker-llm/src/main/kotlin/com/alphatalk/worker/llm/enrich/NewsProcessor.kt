@@ -72,11 +72,18 @@ class NewsProcessor(
         val publications = mutableListOf<PendingPublication>()
         transactions.run {
             ensureSummarizeLease(cluster.id, token)
+            if (!verdict.marketRelevant) {
+                if (!store.markIrrelevant(cluster.id, token)) throw ClusterContendedException(cluster.id)
+                return@run
+            }
             verdict.sectors.forEach {
                 store.upsertSectorLink(cluster.id, it.sectorCode, it.sentiment.name, it.confidence, it.impact.name)
             }
 
-            val relevantStocks = verdict.stocks.filter { it.relevant }
+            val candidates = entry.codes.toSet()
+            val relevantStocks = verdict.stocks
+                .filter { it.relevant }
+                .filter { it.code in candidates || sectors.stockName(it.code) != null }
             val relevantCodes = relevantStocks.map { it.code }.toSet()
             entry.codes.filter { it !in relevantCodes }.forEach { code ->
                 val confidence = verdict.stocks.firstOrNull { it.code == code }?.confidence
