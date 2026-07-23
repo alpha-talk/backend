@@ -29,14 +29,13 @@ class PollingScheduler(
         meters.counter("ingest.fetched").increment(stats.fetched.toDouble())
         meters.counter("ingest.enqueued").increment(stats.enqueued.toDouble())
         meters.counter("ingest.dup.skipped").increment(stats.duplicateSkipped.toDouble())
-        meters.counter("ingest.unmatched.skipped").increment(stats.unmatchedSkipped.toDouble())
         meters.counter("ingest.source.errors").increment(stats.sourceErrors.toDouble())
         meters.counter("ingest.enqueue.errors").increment(stats.enqueueErrors.toDouble())
         if (stats != PollStats()) {
             log.info(
-                "poll done: fetched={} enqueued={} dup={} unmatched={} sourceErrors={} enqueueErrors={}",
+                "poll done: fetched={} enqueued={} dup={} sourceErrors={} enqueueErrors={}",
                 stats.fetched, stats.enqueued, stats.duplicateSkipped,
-                stats.unmatchedSkipped, stats.sourceErrors, stats.enqueueErrors,
+                stats.sourceErrors, stats.enqueueErrors,
             )
         }
     }

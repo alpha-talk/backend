@@ -46,10 +46,6 @@ class IngestPoller(
     private fun process(sourceName: String, article: FetchedArticle, stats: Counters) {
         val mapping = mapper.map(article.title, article.excerpt)
         val codes = (article.codes + mapping.codes).distinct().sorted()
-        if (codes.isEmpty() && mapping.macroHint == null) {
-            stats.unmatchedSkipped++
-            return
-        }
         val url = ArticleNormalizer.normalizeUrl(article.url)
         val sourceId = ArticleNormalizer.sourceId(sourceName, article.sourceId, url)
         if (!seen.markIfNew(sourceId)) {
@@ -80,11 +76,10 @@ class IngestPoller(
         var fetched: Int = 0,
         var enqueued: Int = 0,
         var duplicateSkipped: Int = 0,
-        var unmatchedSkipped: Int = 0,
         var sourceErrors: Int = 0,
         var enqueueErrors: Int = 0,
     ) {
-        fun snapshot() = PollStats(fetched, enqueued, duplicateSkipped, unmatchedSkipped, sourceErrors, enqueueErrors)
+        fun snapshot() = PollStats(fetched, enqueued, duplicateSkipped, sourceErrors, enqueueErrors)
     }
 }
 
@@ -92,7 +87,6 @@ data class PollStats(
     val fetched: Int = 0,
     val enqueued: Int = 0,
     val duplicateSkipped: Int = 0,
-    val unmatchedSkipped: Int = 0,
     val sourceErrors: Int = 0,
     val enqueueErrors: Int = 0,
 ) {
@@ -100,7 +94,6 @@ data class PollStats(
         fetched = fetched + other.fetched,
         enqueued = enqueued + other.enqueued,
         duplicateSkipped = duplicateSkipped + other.duplicateSkipped,
-        unmatchedSkipped = unmatchedSkipped + other.unmatchedSkipped,
         sourceErrors = sourceErrors + other.sourceErrors,
         enqueueErrors = enqueueErrors + other.enqueueErrors,
     )

@@ -42,7 +42,9 @@ class DictionaryStockCodeMapperTest {
     }
 
     @Test
-    fun `전부 미매칭 - unmatched`() {
-        assertTrue(mapper.map("오늘의 날씨", null).unmatched)
+    fun `전부 미매칭 - 후보 없음`() {
+        val result = mapper.map("오늘의 날씨", null)
+        assertTrue(result.codes.isEmpty())
+        assertNull(result.macroHint)
     }
 }
