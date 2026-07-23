@@ -2,6 +2,7 @@ package com.alphatalk.worker.llm.enrich
 
 import com.alphatalk.contracts.envelope.DigestData
 import com.alphatalk.contracts.envelope.Sentiment
+import com.alphatalk.contracts.envelope.StreamCategory
 import com.alphatalk.contracts.envelope.StreamData
 import com.alphatalk.contracts.queue.IngestQueueEntry
 import com.alphatalk.worker.llm.cluster.ClusterStore
@@ -57,7 +58,7 @@ class DigestProcessor(
         )
 
         val data = StreamData(
-            category = "ai",
+            category = StreamCategory.AI.payload,
             title = output.title,
             summary = output.summary,
             occurredAt = clock.millis(),
@@ -79,7 +80,7 @@ class DigestProcessor(
             ),
         )
         val eventId = eventIds.next()
-        if (events.insertEvent(eventId, code, "AI", clock.instant(), "worker-llm", data)) {
+        if (events.insertEvent(eventId, code, StreamCategory.AI.eventType, clock.instant(), "worker-llm", data)) {
             publisher.publish(code, eventId, data)
         }
     }

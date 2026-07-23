@@ -1,6 +1,7 @@
 package com.alphatalk.worker.llm.cluster
 
 import com.alphatalk.contracts.envelope.SourceRef
+import com.alphatalk.contracts.envelope.StreamCategory
 import java.time.Instant
 import kotlin.math.sqrt
 
@@ -15,6 +16,7 @@ class InMemoryClusterStore : ClusterStore {
         var articleCount: Int = 0,
         var summarizingAt: Instant? = null,
         var summarizingToken: String? = null,
+        var category: StreamCategory = StreamCategory.NEWS,
     )
 
     val clusters = linkedMapOf<String, ClusterState>()
@@ -55,8 +57,8 @@ class InMemoryClusterStore : ClusterStore {
     }
 
     @Synchronized
-    override fun createCluster(id: String, repTitle: String, publishedAt: Instant) {
-        clusters[id] = ClusterState(repTitle = repTitle, firstAt = publishedAt, lastAt = publishedAt)
+    override fun createCluster(id: String, repTitle: String, publishedAt: Instant, category: StreamCategory) {
+        clusters[id] = ClusterState(repTitle = repTitle, firstAt = publishedAt, lastAt = publishedAt, category = category)
     }
 
     @Synchronized
@@ -89,7 +91,7 @@ class InMemoryClusterStore : ClusterStore {
 
     @Synchronized
     override fun cluster(clusterId: String): ClusterRecord = clusters.getValue(clusterId).let {
-        ClusterRecord(clusterId, it.repTitle, it.summary, it.scope, it.status, it.articleCount)
+        ClusterRecord(clusterId, it.repTitle, it.summary, it.scope, it.status, it.articleCount, it.category)
     }
 
     @Synchronized

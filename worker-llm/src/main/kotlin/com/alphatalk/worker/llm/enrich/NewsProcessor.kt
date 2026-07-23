@@ -164,8 +164,9 @@ class NewsProcessor(
             ?: store.stockLinks(cluster.id).first { it.code == code }.streamEventId
             ?: return null
 
+        val category = cluster.category
         val data = StreamData(
-            category = "news",
+            category = category.payload,
             title = cluster.repTitle,
             summary = summary,
             sourceUrl = store.representativeUrl(cluster.id),
@@ -176,7 +177,7 @@ class NewsProcessor(
             sources = store.articleSources(cluster.id),
         )
         return PendingPublication(code, eventId, data)
-            .takeIf { events.insertEvent(eventId, code, "NEWS", clock.instant(), "worker-llm", data) }
+            .takeIf { events.insertEvent(eventId, code, category.eventType, clock.instant(), "worker-llm", data) }
     }
 
     private fun refreshAfterJoin(entry: IngestQueueEntry, cluster: ClusterRecord) {

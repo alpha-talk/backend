@@ -49,7 +49,7 @@ class ClusterAssigner(
                 return@withLock AssignResult(landedClusterId, joined = true, created = false)
             }
             val clusterId = clusterIds()
-            store.createCluster(clusterId, entry.title, article.publishedAt)
+            store.createCluster(clusterId, entry.title, article.publishedAt, entry.type.streamCategory())
             val landedClusterId = land(article, clusterId, embedding, entry.codes)
             if (landedClusterId != clusterId) store.discardEmptyCluster(clusterId)
             AssignResult(
