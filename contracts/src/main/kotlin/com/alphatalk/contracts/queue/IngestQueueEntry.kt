@@ -35,8 +35,8 @@ data class IngestQueueEntry(
     val macroHint: String? = null,
 ) {
     init {
-        require(codes.isNotEmpty() || macroHint != null) {
-            "codes may be empty only when macroHint is present"
+        require(type != IngestType.DIGEST || codes.size == 1) {
+            "digest entries must carry exactly one stock code"
         }
     }
 
