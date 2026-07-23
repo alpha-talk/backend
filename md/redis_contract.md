@@ -1,7 +1,8 @@
-# Alpha Talk — Redis 계약 (`:contracts`) v0.4
+# Alpha Talk — Redis 계약 (`:contracts`) v0.5
 
 게이트웨이 · 워커(price/ingest/llm) · 메인서버가 공유하는 Redis 키/채널/스트림 규약. 이 문서가 세 서비스 간 단일 진실의 원천이다.
 
+> v0.5 (2026-07-24): 전량 LLM 판정 전환 — `queue:ingest`의 `codes`를 `macroHint` 없이도 공란 허용(수집 측 종목 매칭 게이트 제거). 관련 종목 판정은 llm-worker LLM 전담([뉴스 워커 명세](alphatalk_news_worker_spec.md) §2.4). `digest` 엔트리만 `codes` 1개 필수 유지(§2.3).
 > v0.4 (2026-07-23): llm-worker 원문 fetch의 인스턴스 간 호스트별 요청 간격을 위한 `rate:article-fetch:{host}` 키 추가. PEL 회수 설명을 실제 구현인 `XPENDING` + `XCLAIM`으로 정정.
 > v0.3 (2026-07-22): 뉴스 파이프라인 반영([뉴스 워커 명세](alphatalk_news_worker_spec.md)) — `queue:ingest`에 `type="digest"`(§2.3)·`macroHint` 필드·`codes` 공란 허용, poison 격리 `queue:ingest:dlq`, `lock:cluster:{code}` 키 추가.
 > v0.2 (2026-07-16): `watchlist:{userId}` 미러 키 명문화(ws `RedisWatchlistResolver`·core-api 쓰기 반영), 메인서버 전용 키(`rl:*`·`idem:*`) 주석 추가.
@@ -84,12 +85,12 @@ Streams 필드는 문자열이다. 한 엔트리 = "가공해야 할 원본 소�
 | `source` | `"naver"` `"hankyung"` `"dart"` | 출처 |
 | `sourceId` | `"a1b2c3"` | 출처 고유 ID — **중복 제거 키** |
 | `type` | `"news"` `"report"` `"disclosure"` `"digest"` | 원본 종류 — `digest`는 일일 브리핑 잡(§2.3) |
-| `codes` | `"005930,000660"` | 영향 종목(콤마구분, 다중 가능). **`macroHint` 있으면 공란 허용** — 섹터 판정은 llm-worker(뉴스 워커 명세 §3.6) |
+| `codes` | `"005930,000660"` | 영향 종목 **후보**(콤마구분, 다중 가능). **공란 허용** — 수집 측 매칭은 힌트일 뿐이고 관련 종목 확정·발견은 llm-worker LLM이 전담(뉴스 워커 명세 §2.4·§3.6). `digest` 타입만 1개 필수(§2.3) |
 | `title` | `"..."` | 원문 제목 |
 | `url` | `"https://..."` | 원문 링크 |
 | `body` | `"..."` | 원문 본문/발췌(선택) |
 | `fetchedAt` | `1719500000000` | 수집 시각(epoch ms) |
-| `macroHint` *(선택)* | `"금리"` | 매크로 키워드 사전 히트 표시 — 종목 매칭 없이 적재된 기사(뉴스 워커 명세 §2.4) |
+| `macroHint` *(선택)* | `"금리"` | 매크로 키워드 사전 히트 표시 — llm-worker의 scope 판정 힌트(뉴스 워커 명세 §2.4) |
 
 ### 2.2 llm-worker 처리 순서 (★ persist → publish → ack)
 
