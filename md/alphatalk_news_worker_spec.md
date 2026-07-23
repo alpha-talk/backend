@@ -1,7 +1,7 @@
 # Alpha Talk — 뉴스 파이프라인 명세 v0.1
 **worker-ingest · worker-llm · 담당: 민균**
 
-뉴스를 수집해 관련 종목 방으로 배달하고, 같은 사건을 다룬 여러 언론사 기사를 하나로 묶고, 매일 종목별 호재·악재 브리핑을 생성하는 파이프라인의 설계 기준. [redis_contract.md](redis_contract.md) §2(`queue:ingest`)와 [ws_api_spec.md](ws_api_spec.md) §4.3(stream payload)을 전제로 하며, 이 설계가 요구한 계약 확장은 **각 계약 문서에 반영 완료**(redis_contract v0.4 · ws_api_spec v0.5 · KIS 워커 명세 §4) — 내역은 §6.
+뉴스를 수집해 관련 종목 방으로 배달하고, 같은 사건을 다룬 여러 언론사 기사를 하나로 묶고, 매일 종목별 호재·악재 브리핑을 생성하는 파이프라인의 설계 기준. [redis_contract.md](redis_contract.md) §2(`queue:ingest`)와 [ws_api_spec.md](ws_api_spec.md) §4.3(stream payload)을 전제로 하며, 이 설계가 요구한 계약 확장은 **각 계약 문서에 반영 완료**(redis_contract v0.5 · ws_api_spec v0.5 · KIS 워커 명세 §4) — 내역은 §6.
 
 ---
 
@@ -64,7 +64,7 @@ persist → publish → ack 순서 불변식(Redis 계약 §2.2)은 모든 분�
 
 | 소스 | 방식 | 종목 매핑 | 비고 |
 |---|---|---|---|
-| 언론사 RSS (한경·매경·연합 등 경제 섹션) | 주기 폴링(5분), `If-Modified-Since`/ETag 활용 | 사전 매칭 필요(§2.4) | 제목+링크+요약만 제공 — 저작권 안전 |
+| 언론사 RSS (경제·사회 섹션) | 주기 폴링(5분), `If-Modified-Since`/ETag 활용 | 사전은 후보 힌트만(§2.4) — 관련성 판정은 LLM | 제목+링크+요약만 제공 — 저작권 안전 |
 | 네이버 뉴스 검색 API | 종목명 쿼리, 주기 폴링(10분) | 쿼리 자체가 종목 — 매핑 공짜 | 공식 오픈 API, **25,000건/일** 한도 |
 | OpenDART 공시 *(후속)* | 목록 API 폴링 | 공시 자체에 종목 포함 | `type=disclosure`, 동일 경로 재사용 |
 
@@ -94,10 +94,10 @@ MVP는 **설정 파일의 시드 종목 목록**(worker-price의 41종목과 동
 |---|---|---|
 | 1차 | 소스가 종목을 알면 그대로(네이버 쿼리, DART 공시) | ingest |
 | 2차 | `stock_master` 종목명 + 별칭 사전을 제목·발췌에 매칭(Aho-Corasick 또는 단순 contains — 종목 수천 개 수준에서 충분) | ingest |
-| 3차 | LLM 요약 시 관련 종목 확정 — 오탐 제거(예: "삼성" 단독 매칭) 및 추가 종목 발견 | llm |
+| 3차 | LLM 요약 시 관련 종목 확정 — 오탐 제거(예: "삼성" 단독 매칭) 및 후보 외 종목 발견(발견 종목은 `stock_master` 존재 검증 후 채택) | llm |
 
 - 별칭 사전은 `stock_alias(code, alias)` 테이블(§5). 초기엔 정식 종목명 + 수동 등록 별칭("삼전" 등)으로 시작.
-- 2차까지 후보 0건이면 원칙적으로 **큐에 넣지 않는다**(배달할 방이 없음). **예외**: 매크로 키워드 사전(금리·환율·유가·업종 규제 등) 히트 시 `codes` 공란 + `macroHint` 필드로 적재한다 — 어느 섹터에 작용하는지는 llm이 판정(§3.6). 3차에서 LLM이 모든 후보(종목·섹터)를 기각하면 drop(§3.4).
+- 1·2차는 **후보 힌트일 뿐 게이트가 아니다** — 후보 0건이어도 **전량 적재**한다(`codes` 공란 허용, Redis 계약 v0.5 §2.1). 관련성 판정은 LLM(3차)이 전담한다: 사회 기사처럼 종목명이 등장하지 않는 뉴스의 간접 영향(정책→수혜 종목)까지 LLM이 판정하며, 후보에 없던 종목은 `stock_master` 존재 검증 후 채택한다(환각 코드 차단). 매크로 키워드 사전(금리·환율·유가 등) 히트는 `macroHint`로 실어 scope 판정 힌트로만 쓴다. LLM이 기사 전체를 `marketRelevant=false`로 판정하면 후보·scope와 무관하게 IRRELEVANT drop(§3.4) — 비용 방어선은 클러스터링(§3.3, 같은 사건 = LLM 1회)이다.
 - `codes` 필드는 큐 스키마(Redis 계약 §2.1) 그대로 콤마 구분 다중.
 
 ### 2.5 큐 적재
@@ -131,7 +131,7 @@ Redis 계약 §2.1 스키마를 그대로 사용한다: `source` · `sourceId` �
 
 | 항목 | 값 | 근거 |
 |---|---|---|
-| 비교 대상 | 종목 교집합이 있는 최근 **72시간** 클러스터. `codes`가 빈 매크로 기사는 SECTOR·MARKET 또는 아직 종목 후보가 없는 미완료 클러스터끼리만 비교 | 다른 종목 기사·매크로 기사끼리 오합류 방지, 오래된 사건과 분리 |
+| 비교 대상 | 종목 교집합이 있는 최근 **72시간** 클러스터. `codes`가 빈 기사는 SECTOR·MARKET, 아직 종목 후보가 없는 미완료 클러스터, 또는 후보 없이 들어온 기사를 이미 포함한 클러스터끼리 비교 | LLM이 뒤늦게 종목을 발견해 STOCK이 된 클러스터에도 같은 빈 후보 기사가 재합류하게 하면서 다른 종목 기사와의 오합류를 제한 |
 | 검색 | pgvector `embedding <=> :v` 최근접 5건 조회 | PG가 이미 있고 Flyway 단일 관리 원칙에 부합 — 별도 벡터 스토어 불요 |
 | 판정 | 코사인 유사도 ≥ **0.85** → 최고 유사 클러스터에 편입, 미만 → 신규 클러스터 | 임계값은 실데이터로 튜닝(§10) |
 | 지름길 | 정규화 제목 해시(언론사명·[속보]·특수문자 제거)가 기존 기사와 일치하면 임베딩 생략하고 그 클러스터에 편입 | 통신사 전재 기사(제목 거의 동일)가 다수 — 임베딩 호출 절약 |
@@ -149,6 +149,7 @@ Redis 계약 §2.1 스키마를 그대로 사용한다: `source` · `sourceId` �
 ```json
 {
   "summary": "3줄 요약 (각 줄 ≤ 80자)",
+  "marketRelevant": true,
   "scope": "STOCK | SECTOR | MARKET",
   "stocks": [
     { "code": "005930", "relevant": true, "sentiment": "POSITIVE|NEGATIVE|NEUTRAL", "confidence": 0.0~1.0, "reason": "한 줄" }
@@ -159,8 +160,9 @@ Redis 계약 §2.1 스키마를 그대로 사용한다: `source` · `sourceId` �
 }
 ```
 
-- `scope=STOCK`이면 `sectors` 무시, `SECTOR`/`MARKET` 처리는 §3.6. 프롬프트에 섹터 후보는 §5 `sector` 목록을 제시(자유 서술이 아니라 코드 선택).
-- `relevant=false`인 후보는 제외(사전 매칭 오탐 제거). 종목·섹터 전부 기각이면 클러스터를 `IRRELEVANT`로 마킹하고 발행 없이 XACK.
+- `marketRelevant=false`이면 `scope`·종목·섹터 결과를 보지 않고 클러스터를 `IRRELEVANT`로 마킹해 발행 없이 XACK한다. `MARKET`은 증시 전체에 관련된 기사만 뜻한다.
+- `marketRelevant=true`에서 `scope=STOCK`이면 `sectors` 무시, `SECTOR`/`MARKET` 처리는 §3.6. 프롬프트에 섹터 후보는 §5 `sector` 목록을 제시(자유 서술이 아니라 코드 선택).
+- `relevant=false`인 종목 후보는 제외한다(사전 매칭 오탐 제거). STOCK/SECTOR 판정인데 채택할 종목·섹터가 없으면 방어적으로 `IRRELEVANT` 처리한다.
 - confidence < 0.6이면 sentiment를 NEUTRAL로 강등 — 애매한 건 호재/악재로 단정하지 않는다.
 - 모델: 클러스터 요약은 **claude-haiku-4-5**(건수 많음·단순), 일일 다이제스트는 **claude-sonnet-5**(하루 종목당 1회·종합 판단). `LlmClient` 포트 뒤라 교체 자유.
 - 비용 추정: 시드 41종목 기준 일 ~500기사 → ~150클러스터 × ~2K tokens(Haiku) + 41다이제스트 × ~3K tokens(Sonnet) — 월 수 달러 수준.
@@ -274,6 +276,7 @@ news_article(
   url TEXT, title TEXT, excerpt VARCHAR(200),   -- 전문 저장 금지
   title_hash CHAR(16),                  -- 전재 기사 지름길(§3.3)
   embedding vector(1024) NULL,
+  candidate_codes_empty BOOLEAN,        -- 수집 시 종목 후보가 없었던 기사인지 여부
   published_at, fetched_at, cluster_id CHAR(26) FK NULL
 )
 news_cluster_stock(
@@ -295,7 +298,7 @@ news_cluster_sector(
 -- INDEX news_cluster (last_article_at) — 72h 창 후보 조회
 ```
 
-Flyway 마이그레이션(worker-llm 소유): `V1`(news_* + stock_alias) · `V2`(stream_event) · `V3`(다이제스트 부분 유니크 인덱스) · `V4`(news_cluster 요약 lease·fencing token) · `V5`(종목 verdict 기각 상태와 기존 완료 행 백필) · `V6`(클러스터 category와 허용값 제약).
+Flyway 마이그레이션(worker-llm 소유): `V1`(news_* + stock_alias) · `V2`(stream_event) · `V3`(다이제스트 부분 유니크 인덱스) · `V4`(news_cluster 요약 lease·fencing token) · `V5`(종목 verdict 기각 상태와 기존 완료 행 백필) · `V6`(클러스터 category와 허용값 제약) · `V7`(기사 수집 시 빈 후보 경계).
 
 **⚠️ `stream_event` 소유 경계** — `stream_event`의 **논리적 소유자는 core-api의 stream 모듈**(core-api 명세 §11, `StreamEventAppender` 경유 INSERT). worker-llm은 이 테이블에 **INSERT/UPDATE하는 별도 프로세스**다(기획안 §3.1: "worker-llm은 별도 프로세스로 같은 테이블에 INSERT"). 현재 저장소는 core-api가 별도 브랜치라 worker-llm의 `V2`가 `CREATE TABLE IF NOT EXISTS`로 **브리징**한다:
 - 통합 배포 시 Flyway는 저장소 단일 관리 — core-api가 `stream_event` DDL을 소유하고, worker-llm의 `V2`는 `IF NOT EXISTS`라 재실행돼도 무해(중복 생성 없음).
@@ -314,6 +317,7 @@ Flyway 마이그레이션(worker-llm 소유): `V1`(news_* + stock_alias) · `V2`
 |---|---|---|
 | redis_contract **v0.4** §2.1·§2.3 | `type="digest"` + digest 엔트리 규약(`sourceId=digest:{code}:{date}`) | ✅ 반영 |
 | redis_contract v0.4 §2.1 | `macroHint` 필드(선택) + `codes` 공란 허용 | ✅ 반영 |
+| redis_contract **v0.5** §2.1 | `codes` 공란 전면 허용(`macroHint` 불요) — 수집 게이트 제거, 전량 LLM 판정 전환 | ✅ 반영 |
 | redis_contract v0.4 §2·§4 | `queue:ingest:dlq` — poison 격리(delivery count > 5) | ✅ 반영 |
 | redis_contract v0.4 §3·§4 | `lock:cluster:{code}` — 클러스터 판정 직렬화 락(TTL 3s) | ✅ 반영 |
 | redis_contract v0.4 §3·§4 | `rate:article-fetch:{host}` — llm-worker 인스턴스 간 원문 요청 간격 | ✅ 반영 |
