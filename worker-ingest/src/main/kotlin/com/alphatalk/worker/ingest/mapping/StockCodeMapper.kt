@@ -7,6 +7,4 @@ interface StockCodeMapper {
 data class MappingResult(
     val codes: List<String>,
     val macroHint: String? = null,
-) {
-    val unmatched: Boolean get() = codes.isEmpty() && macroHint == null
-}
+)

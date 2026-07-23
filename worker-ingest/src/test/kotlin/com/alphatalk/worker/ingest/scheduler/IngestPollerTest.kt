@@ -11,7 +11,6 @@ import java.util.concurrent.CyclicBarrier
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import kotlin.test.assertEquals
-import kotlin.test.assertTrue
 
 class IngestPollerTest {
     private val mapper = DictionaryStockCodeMapper(
@@ -55,12 +54,13 @@ class IngestPollerTest {
     }
 
     @Test
-    fun `미매칭 기사는 적재도 seen 기록도 하지 않는다`() {
+    fun `미매칭 기사도 전량 적재 - 관련성 판정은 LLM 몫`() {
         val poller = poller(FakeSource("hankyung", listOf(FetchedArticle(title = "오늘의 날씨", url = "https://example.com/w"))))
         val stats = poller.pollOnce()
-        assertEquals(1, stats.unmatchedSkipped)
-        assertTrue(queue.entries.isEmpty())
-        assertTrue(seen.marked.isEmpty())
+        assertEquals(1, stats.enqueued)
+        val entry = queue.entries.single()
+        assertEquals(emptyList(), entry.codes)
+        assertEquals(null, entry.macroHint)
     }
 
     @Test
@@ -134,8 +134,7 @@ class IngestPollerTest {
                 mapper, seen, queue, excerptMaxLength = 200, fetchExecutor = pool,
             )
             val stats = poller.pollOnce()
-            assertEquals(1, stats.enqueued)
-            assertEquals(1, stats.unmatchedSkipped)
+            assertEquals(2, stats.enqueued)
             assertEquals(1, stats.sourceErrors)
         } finally {
             pool.shutdown()
