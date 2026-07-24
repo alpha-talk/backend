@@ -19,6 +19,7 @@ server:
 
 alphatalk:
   llm:
+    provider: ${LLM_PROVIDER:anthropic} # anthropic | claude-cli | codex-cli | fake
     consume-enabled: true
     allow-fake: false
     consumer-block: 5s
@@ -44,6 +45,14 @@ alphatalk:
       api-key: ${ANTHROPIC_API_KEY:}
       version: "2023-06-01"
       max-tokens: 1024
+    claude-cli:
+      executable: ${CLAUDE_CLI_EXECUTABLE:claude}
+      model: ${CLAUDE_CLI_MODEL:}
+      timeout: ${LLM_CLI_TIMEOUT:2m}
+    codex-cli:
+      executable: ${CODEX_CLI_EXECUTABLE:codex}
+      model: ${CODEX_CLI_MODEL:}
+      timeout: ${LLM_CLI_TIMEOUT:2m}
     embedding:
       provider: fake              # fake | rest(OpenAI 호환 /v1/embeddings)
       base-url: ${EMBEDDING_BASE_URL:}
