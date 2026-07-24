@@ -5,4 +5,5 @@ spring:
 alphatalk:
   llm:
     consume-enabled: false    # 통합 테스트는 소비 루프를 직접 구동한다
+    provider: fake
     allow-fake: true

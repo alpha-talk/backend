@@ -1,3 +1,5 @@
 alphatalk:
   llm:
+    provider: ${LLM_PROVIDER:claude-cli}
+    consumer-batch: 1
     allow-fake: true

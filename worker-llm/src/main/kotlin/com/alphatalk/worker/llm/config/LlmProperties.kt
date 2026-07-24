@@ -5,6 +5,7 @@ import java.time.Duration
 
 @ConfigurationProperties("alphatalk.llm")
 data class LlmProperties(
+    val provider: String = "anthropic",
     val consumeEnabled: Boolean = true,
     val allowFake: Boolean = false,
     val consumerBlock: Duration = Duration.ofSeconds(5),
@@ -16,6 +17,8 @@ data class LlmProperties(
     val sector: Sector = Sector(),
     val models: Models = Models(),
     val anthropic: Anthropic = Anthropic(),
+    val claudeCli: ClaudeCli = ClaudeCli(),
+    val codexCli: CodexCli = CodexCli(),
     val embedding: Embedding = Embedding(),
     val article: Article = Article(),
 ) {
@@ -45,6 +48,18 @@ data class LlmProperties(
         val apiKey: String = "",
         val version: String = "2023-06-01",
         val maxTokens: Int = 1024,
+    )
+
+    data class ClaudeCli(
+        val executable: String = "claude",
+        val model: String = "",
+        val timeout: Duration = Duration.ofMinutes(2),
+    )
+
+    data class CodexCli(
+        val executable: String = "codex",
+        val model: String = "",
+        val timeout: Duration = Duration.ofMinutes(2),
     )
 
     data class Embedding(
