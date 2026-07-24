@@ -164,7 +164,8 @@ Redis 계약 §2.1 스키마를 그대로 사용한다: `source` · `sourceId` �
 - `marketRelevant=true`에서 `scope=STOCK`이면 `sectors` 무시, `SECTOR`/`MARKET` 처리는 §3.6. 프롬프트에 섹터 후보는 §5 `sector` 목록을 제시(자유 서술이 아니라 코드 선택).
 - `relevant=false`인 종목 후보는 제외한다(사전 매칭 오탐 제거). STOCK/SECTOR 판정인데 채택할 종목·섹터가 없으면 방어적으로 `IRRELEVANT` 처리한다.
 - confidence < 0.6이면 sentiment를 NEUTRAL로 강등 — 애매한 건 호재/악재로 단정하지 않는다.
-- 모델: 클러스터 요약은 **claude-haiku-4-5**(건수 많음·단순), 일일 다이제스트는 **claude-sonnet-5**(하루 종목당 1회·종합 판단). `LlmClient` 포트 뒤라 교체 자유.
+- 운영 `anthropic` provider의 기본 모델은 클러스터 요약 **claude-haiku-4-5**(건수 많음·단순), 일일 다이제스트 **claude-sonnet-5**(하루 종목당 1회·종합 판단). `LlmClient` 포트 뒤라 교체 자유.
+- 로컬은 `claude-cli`(기본) 또는 `codex-cli` provider로 로그인된 개인 구독을 사용하며 **단일 worker-llm 인스턴스 운용만 지원**한다. 두 CLI 모두 단발성 비대화형 실행·JSON Schema 강제·세션 비영속·2분 타임아웃이며, API 키 환경변수를 자식 프로세스에서 제거해 구독 인증과 API 과금이 섞이지 않게 한다. Claude는 도구를 전부 끄고 safe mode로 실행하며, Codex는 빈 임시 작업공간과 read-only sandbox에서 실행한다. local 프로파일은 `consumer-batch=1`로 한 번에 PEL에 한 건만 선점하고, 기동 시 CLI timeout이 `claim-idle`보다 짧은지도 검증한다. worker-llm ×N 운용은 운영 `anthropic` provider에만 적용한다.
 - 비용 추정: 시드 41종목 기준 일 ~500기사 → ~150클러스터 × ~2K tokens(Haiku) + 41다이제스트 × ~3K tokens(Sonnet) — 월 수 달러 수준.
 - 워커 내 재시도는 백오프 1회만 — 그 이상은 PEL 재처리에 맡긴다(이중 재시도 루프 금지).
 
@@ -352,14 +353,23 @@ worker-llm/
 
 ## 8. 설정 · 메트릭
 
-- 시크릿(환경변수): `ANTHROPIC_API_KEY` · `NAVER_CLIENT_ID/SECRET` · 임베딩 API 키. 로그 출력 금지. **LLM·임베딩 키는 fail-closed** — 미설정 시 기동 실패하며, `alphatalk.llm.allow-fake=true`(local 프로파일·테스트 전용)일 때만 규칙 기반 fake로 대체 허용(ws JWT 시크릿과 동일 기조).
+- LLM provider는 `anthropic|claude-cli|codex-cli|fake` 중 하나를 명시한다. 기본 프로파일은 `anthropic`, local 프로파일은 `claude-cli`이며 `LLM_PROVIDER=codex-cli`로 전환한다. provider 사이 자동 fallback은 없다.
+- `anthropic`은 `ANTHROPIC_API_KEY`가 없으면 기동 실패한다. `claude-cli`·`codex-cli`는 각각 로그인된 로컬 CLI가 필요하고 실행 실패·타임아웃은 PEL 재처리 경로로 전파한다. `fake`는 `alphatalk.llm.allow-fake=true`일 때만 허용한다.
+- CLI provider는 개인 구독 로컬 단일 인스턴스 전용이다. `consumer-batch=1`이 아니거나 CLI timeout이 `claim-idle` 이상이면 기동 실패해, 긴 CLI 호출 중 다른 consumer가 아직 처리하지 않은 배치 레코드를 회수하는 구성을 막는다.
+- 시크릿(환경변수): `ANTHROPIC_API_KEY` · `NAVER_CLIENT_ID/SECRET` · 임베딩 API 키. 로그 출력 금지. 임베딩 키는 `provider=rest`에서 fail-closed한다.
 - 설정: 시드 종목 목록, 소스별 폴링 주기, 유사도 임계값(0.85), 클러스터 창(72h), 원문 허용 호스트·호스트별 요청 간격(기본 1초), digest 시각(18:00) — 전부 프로퍼티로 외부화(임계값 튜닝 대비).
 - 메트릭: `ingest_fetched_total{source}` · `ingest_dup_skipped_total` · `queue_ingest_pending`(PEL, 기획안 §10 알람 항목) · `llm_processed_total{type}` · `llm_failed_total` · `cluster_merged_total` · `dlq_total` · `llm_tokens_total{model}`(비용 감시, NFR-09).
 - 알람: PEL 적체 > N(기존 합의), DLQ 유입 > 0, 일 LLM 토큰 예산 초과.
 
+```bash
+SPRING_PROFILES_ACTIVE=local ./gradlew :worker-llm:bootRun
+SPRING_PROFILES_ACTIVE=local LLM_PROVIDER=codex-cli ./gradlew :worker-llm:bootRun
+SPRING_PROFILES_ACTIVE=local LLM_PROVIDER=fake ./gradlew :worker-llm:bootRun
+```
+
 ## 9. 구현 단계 & DoD
 
-> **상태(2026-07-23): N0~N6 전 단계 구현 완료.** LLM·임베딩은 포트 뒤에 있고 기본 프로파일은 키·provider 미설정 시 fail-closed한다. local·test에서만 `allow-fake=true`로 무키 실행한다. 실서비스 투입 전 남은 것: 키 주입, RSS 소스 목록·시드 종목 설정(§10-5·§2.2), 임베딩 제공자 확정(§10-1).
+> **상태(2026-07-24): N0~N6 전 단계 구현 완료.** LLM·임베딩은 포트 뒤에 있고 기본 프로파일은 API 키 미설정 시 fail-closed한다. local은 Claude/Codex CLI 구독을 선택하고 test는 명시적 fake를 쓴다. 실서비스 투입 전 남은 것: 키 주입, RSS 소스 목록·시드 종목 설정(§10-5·§2.2), 임베딩 제공자 확정(§10-1).
 
 | 단계 | 범위 | DoD |
 |---|---|---|
