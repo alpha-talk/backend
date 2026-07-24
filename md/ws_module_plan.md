@@ -1,6 +1,6 @@
 # Alpha Talk — `ws` 모듈(게이트웨이) 구현 계획 v0.3
 
-> 기준 문서: [기획안 v2](기획안.md) · [WS API 명세 v0.4](ws_api_spec.md) · [Redis 계약 v0.1](redis_contract.md) · [아키텍처 설계 v0.3](ws_architecture.md)
+> 기준 문서: [기획안 v2](기획안.md) · [WS API 명세 v0.5](ws_api_spec.md) · [Redis 계약 v0.5](redis_contract.md) · [아키텍처 설계 v0.5](ws_architecture.md)
 > 담당 범위: **클라 ↔ WS 게이트웨이** 경계. 문서상 명칭은 `gateway`, 본 저장소 모듈명은 `ws`로 한다.
 
 > **v0.2 → v0.3 변경**: 컴포넌트 경계에 SOLID 반영(포트/인터페이스 도입). 클래스 이름·패키지 구조를 [아키텍처 v0.2](ws_architecture.md)와 일치시킴 — **컴포넌트 구조의 단일 진실은 아키텍처 문서**이고, 계획서는 단계·범위·DoD를 담당한다.

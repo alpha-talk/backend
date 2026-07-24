@@ -1,0 +1,43 @@
+spring:
+  application:
+    name: worker-ingest
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      timeout: 3s
+  lifecycle:
+    timeout-per-shutdown-phase: 10s
+
+server:
+  port: 8084          # 모노레포 포트 배치 (기획안 §3.1)
+  shutdown: graceful
+
+alphatalk:
+  ingest:
+    poll-enabled: true
+    poll-delay: 5m
+    poll-initial-delay: 10s
+    seen-ttl: 7d      # Redis 계약 v0.3 §3 seen:ingest TTL
+    queue-max-len: 10000
+    excerpt-max-length: 200
+    fetch-concurrency: 4
+    macro-keywords: [금리, 기준금리, 환율, 유가, 관세, 수출규제]
+    feeds: []         # - name: hankyung
+                      #   url: https://example.com/rss
+    stocks: []        # - code: "005930"
+                      #   names: [삼성전자, 삼전]
+    naver:
+      client-id: ${NAVER_CLIENT_ID:}        # 미설정이면 네이버 소스 비활성
+      client-secret: ${NAVER_CLIENT_SECRET:}
+      display: 30
+    digest:
+      enabled: true
+      cron: "0 0 18 * * *"                  # 매일 18:00 KST — 뉴스 워커 명세 §4.1
+      zone: Asia/Seoul
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, metrics

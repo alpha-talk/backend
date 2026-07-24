@@ -1,0 +1,146 @@
+package com.alphatalk.worker.llm.config
+
+import com.alphatalk.worker.llm.article.ArticleFetcher
+import com.alphatalk.worker.llm.article.ArticleUrlPolicy
+import com.alphatalk.worker.llm.cluster.ClusterAssigner
+import com.alphatalk.worker.llm.cluster.EmbeddingClient
+import com.alphatalk.worker.llm.cluster.FakeEmbeddingClient
+import com.alphatalk.worker.llm.cluster.ClusterLock
+import com.alphatalk.worker.llm.cluster.ClusterStore
+import com.alphatalk.worker.llm.cluster.RestEmbeddingClient
+import com.alphatalk.worker.llm.enrich.AnthropicLlmClient
+import com.alphatalk.worker.llm.enrich.ClaudeCliLlmClient
+import com.alphatalk.worker.llm.enrich.ClusterSummarizer
+import com.alphatalk.worker.llm.enrich.CodexCliLlmClient
+import com.alphatalk.worker.llm.enrich.FakeLlmClient
+import com.alphatalk.worker.llm.enrich.LlmClient
+import com.alphatalk.worker.llm.enrich.NewsProcessor
+import com.alphatalk.worker.llm.enrich.TransactionRunner
+import com.alphatalk.worker.llm.persist.EventIdGenerator
+import com.alphatalk.worker.llm.persist.StreamEventStore
+import com.alphatalk.worker.llm.publish.StreamPublisher
+import com.alphatalk.worker.llm.sector.SectorDirectory
+import com.fasterxml.jackson.databind.ObjectMapper
+import com.github.f4b6a3.ulid.UlidCreator
+import io.micrometer.core.instrument.MeterRegistry
+import org.slf4j.LoggerFactory
+import org.springframework.context.annotation.Bean
+import org.springframework.context.annotation.Configuration
+import java.time.Duration
+
+@Configuration
+class LlmConfig {
+    private val log = LoggerFactory.getLogger(javaClass)
+
+    @Bean
+    fun embeddingClient(props: LlmProperties): EmbeddingClient = when {
+        props.embedding.provider == "rest" -> {
+            val e = props.embedding
+            check(e.baseUrl.isNotBlank() && e.apiKey.isNotBlank() && e.model.isNotBlank()) {
+                "embedding provider=rest에는 base-url·api-key·model이 모두 필요하다"
+            }
+            RestEmbeddingClient(e)
+        }
+        props.allowFake -> {
+            log.info("using fake embedding client (provider={}, allow-fake)", props.embedding.provider)
+            FakeEmbeddingClient(props.embedding.dimension)
+        }
+        else -> throw IllegalStateException(
+            "임베딩 미구성 — provider=rest(base-url·api-key·model) 설정 필수. 로컬·테스트는 alphatalk.llm.allow-fake=true",
+        )
+    }
+
+    @Bean
+    fun llmClient(props: LlmProperties, meters: MeterRegistry): LlmClient = when (props.provider.trim().lowercase()) {
+        "anthropic" -> {
+            check(props.anthropic.apiKey.isNotBlank()) {
+                "LLM provider=anthropic에는 ANTHROPIC_API_KEY가 필요하다"
+            }
+            AnthropicLlmClient(props, meters)
+        }
+        "claude-cli" -> {
+            check(props.claudeCli.executable.isNotBlank()) {
+                "LLM provider=claude-cli에는 실행 파일 경로가 필요하다"
+            }
+            validateCliConsumer(props, props.claudeCli.timeout)
+            log.info("using Claude CLI LLM client (subscription auth)")
+            ClaudeCliLlmClient(props)
+        }
+        "codex-cli" -> {
+            check(props.codexCli.executable.isNotBlank()) {
+                "LLM provider=codex-cli에는 실행 파일 경로가 필요하다"
+            }
+            validateCliConsumer(props, props.codexCli.timeout)
+            log.info("using Codex CLI LLM client (subscription auth)")
+            CodexCliLlmClient(props)
+        }
+        "fake" -> {
+            check(props.allowFake) {
+                "LLM provider=fake는 alphatalk.llm.allow-fake=true일 때만 허용된다"
+            }
+            log.info("using rule-based fake LLM client")
+            FakeLlmClient()
+        }
+        else -> throw IllegalStateException(
+            "지원하지 않는 LLM provider=${props.provider}. anthropic|claude-cli|codex-cli|fake 중 하나여야 한다",
+        )
+    }
+
+    private fun validateCliConsumer(props: LlmProperties, timeout: Duration) {
+        check(props.consumerBatch == 1) {
+            "CLI LLM provider는 PEL 선점 충돌 방지를 위해 consumer-batch=1이어야 한다"
+        }
+        check(!timeout.isZero && !timeout.isNegative && timeout < props.claimIdle) {
+            "CLI LLM timeout은 양수이고 claim-idle(${props.claimIdle})보다 짧아야 한다"
+        }
+    }
+
+    @Bean
+    fun articleUrlPolicy(props: LlmProperties): ArticleUrlPolicy =
+        ArticleUrlPolicy(props.article.allowedHostSuffixes)
+
+    @Bean
+    fun clusterAssigner(
+        store: ClusterStore,
+        embeddings: EmbeddingClient,
+        lock: ClusterLock,
+        props: LlmProperties,
+    ): ClusterAssigner = ClusterAssigner(
+        store = store,
+        embeddings = embeddings,
+        lock = lock,
+        window = Duration.ofHours(props.cluster.windowHours),
+        similarityThreshold = props.cluster.similarityThreshold,
+        clusterIds = { UlidCreator.getMonotonicUlid().toString() },
+    )
+
+    @Bean
+    fun newsProcessor(
+        store: ClusterStore,
+        assigner: ClusterAssigner,
+        fetcher: ArticleFetcher,
+        summarizer: ClusterSummarizer,
+        sectors: SectorDirectory,
+        events: StreamEventStore,
+        publisher: StreamPublisher,
+        eventIds: EventIdGenerator,
+        mapper: ObjectMapper,
+        meters: MeterRegistry,
+        transactions: TransactionRunner,
+        props: LlmProperties,
+    ): NewsProcessor = NewsProcessor(
+        store = store,
+        assigner = assigner,
+        fetcher = fetcher,
+        summarizer = summarizer,
+        sectors = sectors,
+        events = events,
+        publisher = publisher,
+        eventIds = eventIds,
+        mapper = mapper,
+        meters = meters,
+        fanoutCap = props.sector.fanoutCap,
+        coverageStocks = props.sector.coverageStocks,
+        transactions = transactions,
+    )
+}

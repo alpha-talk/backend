@@ -1,0 +1,436 @@
+package com.alphatalk.worker.llm.enrich
+
+import com.alphatalk.contracts.envelope.NewsScope
+import com.alphatalk.contracts.envelope.Sentiment
+import com.alphatalk.contracts.envelope.StreamData
+import com.alphatalk.contracts.queue.IngestQueueEntry
+import com.alphatalk.contracts.queue.IngestType
+import com.alphatalk.worker.llm.article.ArticleFetcher
+import com.alphatalk.worker.llm.cluster.ClusterAssigner
+import com.alphatalk.worker.llm.cluster.ClusterContendedException
+import com.alphatalk.worker.llm.cluster.ClusterStatus
+import com.alphatalk.worker.llm.cluster.FakeEmbeddingClient
+import com.alphatalk.worker.llm.cluster.InMemoryClusterStore
+import com.alphatalk.worker.llm.cluster.NoopClusterLock
+import com.alphatalk.worker.llm.persist.StreamEventStore
+import com.alphatalk.worker.llm.publish.StreamPublisher
+import com.alphatalk.worker.llm.sector.SectorDirectory
+import com.alphatalk.worker.llm.sector.SectorInfo
+import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry
+import org.junit.jupiter.api.Test
+import java.time.Clock
+import java.time.Duration
+import java.time.Instant
+import java.time.ZoneOffset
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
+import kotlin.concurrent.thread
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
+
+class NewsProcessorTest {
+    private val store = InMemoryClusterStore()
+    private val events = RecordingEventStore()
+    private val publisher = RecordingPublisher()
+    private val clock = Clock.fixed(Instant.parse("2026-07-16T09:00:00Z"), ZoneOffset.UTC)
+    private var verdict: ClusterSummaryOutput = stockVerdict()
+    private val ids = AtomicInteger()
+
+    private val directory = object : SectorDirectory {
+        override fun allSectors() = listOf(SectorInfo("27", "은행"), SectorInfo("33", "반도체"))
+        override fun sectorName(sectorCode: String) = allSectors().firstOrNull { it.code == sectorCode }?.name
+        override fun memberCodes(sectorCode: String) = when (sectorCode) {
+            "27" -> listOf("105560", "055550", "086790")
+            "33" -> listOf("005930", "000660")
+            else -> emptyList()
+        }
+        override fun stockName(stockCode: String) = mapOf(
+            "005930" to "삼성전자", "000660" to "SK하이닉스",
+            "105560" to "KB금융", "055550" to "신한지주", "086790" to "하나금융지주",
+        )[stockCode]
+        override fun sectorOf(stockCode: String) = if (stockCode in listOf("005930", "000660")) "33" else "27"
+    }
+
+    private fun defaultLlm() = object : LlmClient {
+        override fun summarize(input: ClusterSummaryInput) = verdict
+        override fun digest(input: DigestInput) = DigestOutput("t", "s")
+    }
+
+    private fun processor(
+        fanoutCap: Int = 100,
+        coverage: List<String> = emptyList(),
+        llm: LlmClient = defaultLlm(),
+    ) = NewsProcessor(
+        store = store,
+        assigner = ClusterAssigner(
+            store, FakeEmbeddingClient(64), NoopClusterLock(),
+            Duration.ofHours(72), 0.85,
+            { "cl-${ids.incrementAndGet()}".padEnd(26, '0') }, clock,
+        ),
+        fetcher = ArticleFetcher { null },
+        summarizer = ClusterSummarizer(llm),
+        sectors = directory,
+        events = events,
+        publisher = publisher,
+        eventIds = { "ev-${ids.incrementAndGet()}".padEnd(26, '0') },
+        mapper = jacksonObjectMapper(),
+        meters = SimpleMeterRegistry(),
+        fanoutCap = fanoutCap,
+        coverageStocks = coverage,
+        transactions = TransactionRunner { it() },
+        clock = clock,
+    )
+
+    private fun entry(
+        sourceId: String,
+        title: String,
+        codes: List<String> = listOf("005930"),
+        macroHint: String? = null,
+        type: IngestType = IngestType.NEWS,
+    ) = IngestQueueEntry(
+        source = "hankyung",
+        sourceId = sourceId,
+        type = type,
+        codes = codes,
+        title = title,
+        url = "https://example.com/$sourceId",
+        fetchedAt = clock.millis(),
+        macroHint = macroHint,
+    )
+
+    private fun stockVerdict() = ClusterSummaryOutput(
+        summary = "3줄 요약",
+        marketRelevant = true,
+        scope = NewsScope.STOCK,
+        stocks = listOf(StockVerdict("005930", true, Sentiment.POSITIVE, 0.9, "수주")),
+        sectors = emptyList(),
+    )
+
+    @Test
+    fun `STOCK - 관련 종목별 이벤트 저장·발행`() {
+        processor().process(entry("a1", "삼성전자 수주"))
+        assertEquals(1, events.inserted.size)
+        assertEquals("NEWS", events.inserted.single().type)
+        assertEquals("POSITIVE", events.inserted.single().data.sentiment)
+        assertEquals(listOf("005930"), publisher.published.map { it.first })
+    }
+
+    @Test
+    fun `REPORT 수집 type은 REPORT 카테고리·이벤트로 관통 발행`() {
+        processor().process(entry("r1", "삼성전자 목표가 상향", type = IngestType.REPORT))
+        val event = events.inserted.single()
+        assertEquals("REPORT", event.type)
+        assertEquals("report", event.data.category)
+    }
+
+    @Test
+    fun `멱등 - 처리 완료 기사 재처리는 아무것도 안 한다`() {
+        val p = processor()
+        p.process(entry("a1", "삼성전자 수주"))
+        p.process(entry("a1", "삼성전자 수주"))
+        assertEquals(1, events.inserted.size)
+        assertEquals(1, publisher.published.size)
+    }
+
+    @Test
+    fun `편입 - sources 갱신만 하고 재발행하지 않는다`() {
+        val p = processor()
+        p.process(entry("a1", "삼성전자 수주"))
+        p.process(entry("b1", "[속보] 삼성전자 수주"))
+        assertEquals(1, events.inserted.size)
+        assertEquals(1, publisher.published.size)
+        assertTrue(events.refreshed.isNotEmpty())
+    }
+
+    @Test
+    fun `편입 기사에 새 종목 - 그 종목만 신규 발행`() {
+        val p = processor()
+        p.process(entry("a1", "삼성전자 수주"))
+        p.process(entry("b1", "[속보] 삼성전자 수주", codes = listOf("005930", "000660")))
+        assertEquals(2, events.inserted.size)
+        assertEquals(listOf("005930", "000660"), publisher.published.map { it.first })
+    }
+
+    @Test
+    fun `후보 없는 기사 - LLM이 발견한 종목으로 발행`() {
+        processor().process(entry("g1", "반도체 지원법 국회 통과", codes = emptyList()))
+        assertEquals(listOf("005930"), events.inserted.map { it.code })
+        assertEquals(listOf("005930"), publisher.published.map { it.first })
+    }
+
+    @Test
+    fun `후보 없이 STOCK이 된 클러스터에 후속 빈 후보 기사가 재합류`() {
+        val p = processor()
+
+        p.process(entry("g1", "반도체 지원법 국회 통과", codes = emptyList()))
+        p.process(entry("g2", "[속보] 반도체 지원법 국회 통과", codes = emptyList()))
+
+        assertEquals(1, store.clusters.size)
+        assertEquals(2, store.articles.size)
+        assertEquals(1, events.inserted.size)
+        assertEquals(1, publisher.published.size)
+        assertTrue(events.refreshed.isNotEmpty())
+    }
+
+    @Test
+    fun `LLM 발견 종목이 stock_master에 없으면 버린다`() {
+        verdict = ClusterSummaryOutput(
+            summary = "요약",
+            marketRelevant = true,
+            scope = NewsScope.STOCK,
+            stocks = listOf(StockVerdict("999999", true, Sentiment.POSITIVE, 0.9, "환각 코드")),
+            sectors = emptyList(),
+        )
+        processor().process(entry("h1", "출처 불명 뉴스", codes = emptyList()))
+        assertTrue(events.inserted.isEmpty())
+        assertTrue(publisher.published.isEmpty())
+    }
+
+    @Test
+    fun `LLM 기각 종목은 재전달과 후속 기사 편입에서 다시 발행하지 않는다`() {
+        verdict = ClusterSummaryOutput(
+            summary = "반도체 수주",
+            marketRelevant = true,
+            scope = NewsScope.STOCK,
+            stocks = listOf(
+                StockVerdict("005930", true, Sentiment.POSITIVE, 0.9, "직접 관련"),
+                StockVerdict("000660", false, Sentiment.NEUTRAL, 0.8, "무관"),
+            ),
+            sectors = emptyList(),
+        )
+        val p = processor()
+        val first = entry("a1", "삼성전자 수주", codes = listOf("005930", "000660"))
+
+        p.process(first)
+        p.process(first)
+        p.process(entry("b1", "[속보] 삼성전자 수주", codes = listOf("005930", "000660")))
+
+        assertEquals(listOf("005930"), events.inserted.map { it.code })
+        assertEquals(true, store.stockLinks(store.clusters.keys.single()).single { it.code == "000660" }.rejected)
+    }
+
+    private val bankCoverage = listOf("105560", "055550", "086790")
+
+    @Test
+    fun `SECTOR - 구성 종목 fan-out에 섹터·감성 표기`() {
+        verdict = ClusterSummaryOutput(
+            summary = "금리 인상",
+            marketRelevant = true,
+            scope = NewsScope.SECTOR,
+            stocks = emptyList(),
+            sectors = listOf(SectorVerdict("27", Sentiment.POSITIVE, Impact.HIGH, 0.9, "이자이익")),
+        )
+        processor(coverage = bankCoverage).process(entry("a1", "기준금리 인상", codes = emptyList(), macroHint = "금리"))
+        assertEquals(3, events.inserted.size)
+        events.inserted.forEach {
+            assertEquals("SECTOR", it.data.scope)
+            assertEquals("은행", it.data.sector?.name)
+            assertEquals("POSITIVE", it.data.sentiment)
+        }
+        assertEquals("SECTOR", store.clusters.values.single().scope)
+    }
+
+    @Test
+    fun `SECTOR - 직접 관련 종목도 scope·sector 표기해 발행`() {
+        verdict = ClusterSummaryOutput(
+            summary = "반도체 이슈",
+            marketRelevant = true,
+            scope = NewsScope.SECTOR,
+            stocks = listOf(StockVerdict("005930", true, Sentiment.POSITIVE, 0.9, "직접")),
+            sectors = listOf(SectorVerdict("33", Sentiment.POSITIVE, Impact.HIGH, 0.9, "")),
+        )
+        processor(coverage = listOf("005930", "000660")).process(entry("a1", "반도체 업황"))
+        val direct = events.inserted.single { it.code == "005930" }
+        assertEquals("SECTOR", direct.data.scope)
+        assertEquals("반도체", direct.data.sector?.name)
+    }
+
+    @Test
+    fun `SECTOR - 커버리지 교집합만 배달`() {
+        verdict = ClusterSummaryOutput(
+            summary = "금리 인상",
+            marketRelevant = true,
+            scope = NewsScope.SECTOR,
+            stocks = emptyList(),
+            sectors = listOf(SectorVerdict("27", Sentiment.POSITIVE, Impact.HIGH, 0.9, "")),
+        )
+        processor(coverage = listOf("105560")).process(entry("a1", "기준금리 인상", codes = emptyList(), macroHint = "금리"))
+        assertEquals(listOf("105560"), events.inserted.map { it.code })
+    }
+
+    @Test
+    fun `SECTOR - fan-out 상한 초과면 MARKET 강등`() {
+        verdict = ClusterSummaryOutput(
+            summary = "금리 인상",
+            marketRelevant = true,
+            scope = NewsScope.SECTOR,
+            stocks = emptyList(),
+            sectors = listOf(SectorVerdict("27", Sentiment.POSITIVE, Impact.HIGH, 0.9, "")),
+        )
+        processor(fanoutCap = 2, coverage = bankCoverage).process(entry("a1", "기준금리 인상", codes = emptyList(), macroHint = "금리"))
+        assertEquals(0, events.inserted.size)
+        assertEquals("MARKET", store.clusters.values.single().scope)
+    }
+
+    @Test
+    fun `SECTOR - impact LOW는 실시간 fan-out 없이 링크만`() {
+        verdict = ClusterSummaryOutput(
+            summary = "소폭 영향",
+            marketRelevant = true,
+            scope = NewsScope.SECTOR,
+            stocks = emptyList(),
+            sectors = listOf(SectorVerdict("27", Sentiment.NEUTRAL, Impact.LOW, 0.9, "")),
+        )
+        processor().process(entry("a1", "업계 소식", codes = emptyList(), macroHint = "금리"))
+        assertEquals(0, events.inserted.size)
+        assertTrue(store.sectorLinkRows.containsKey(store.clusters.keys.single() to "27"))
+        assertEquals("SECTOR", store.clusters.values.single().scope)
+    }
+
+    @Test
+    fun `MARKET - 방 fan-out 없음`() {
+        verdict = ClusterSummaryOutput(
+            summary = "코스피 급락",
+            marketRelevant = true,
+            scope = NewsScope.MARKET,
+            stocks = emptyList(),
+            sectors = emptyList(),
+        )
+        processor().process(entry("a1", "코스피 급락", codes = emptyList(), macroHint = "증시"))
+        assertEquals(0, events.inserted.size)
+        assertEquals("MARKET", store.clusters.values.single().scope)
+        assertEquals(ClusterStatus.SUMMARIZED, store.clusters.values.single().status)
+    }
+
+    @Test
+    fun `시장 무관 판정은 MARKET scope 응답이어도 IRRELEVANT`() {
+        verdict = ClusterSummaryOutput(
+            summary = "지역 축제 개막",
+            marketRelevant = false,
+            scope = NewsScope.MARKET,
+            stocks = emptyList(),
+            sectors = emptyList(),
+        )
+
+        processor().process(entry("social1", "지역 축제 개막", codes = emptyList()))
+
+        assertEquals(ClusterStatus.IRRELEVANT, store.clusters.values.single().status)
+        assertEquals(null, store.clusters.values.single().scope)
+        assertTrue(events.inserted.isEmpty())
+        assertTrue(publisher.published.isEmpty())
+    }
+
+    @Test
+    fun `SECTOR - 관련 종목과 섹터가 모두 없으면 IRRELEVANT`() {
+        verdict = ClusterSummaryOutput(
+            summary = "무관",
+            marketRelevant = true,
+            scope = NewsScope.SECTOR,
+            stocks = emptyList(),
+            sectors = emptyList(),
+        )
+        processor().process(entry("a1", "업계 소식", codes = emptyList(), macroHint = "업계"))
+        assertEquals(ClusterStatus.IRRELEVANT, store.clusters.values.single().status)
+        assertTrue(events.inserted.isEmpty())
+    }
+
+    @Test
+    fun `동시 요약 경쟁 - 한 워커만 요약하고 다른 워커는 contended`() {
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val llmCalls = AtomicInteger()
+        val blockingLlm = object : LlmClient {
+            override fun summarize(input: ClusterSummaryInput): ClusterSummaryOutput {
+                llmCalls.incrementAndGet()
+                entered.countDown()
+                release.await(5, TimeUnit.SECONDS)
+                return stockVerdict()
+            }
+            override fun digest(input: DigestInput) = DigestOutput("t", "s")
+        }
+        val p = processor(llm = blockingLlm)
+
+        val worker1 = thread { p.process(entry("a1", "삼성전자 수주")) }
+        assertTrue(entered.await(5, TimeUnit.SECONDS))
+
+        var contended = false
+        val worker2 = thread {
+            try {
+                p.process(entry("b1", "[속보] 삼성전자 수주"))
+            } catch (e: ClusterContendedException) {
+                contended = true
+            }
+        }
+        worker2.join(5_000)
+
+        assertTrue(contended)
+        assertEquals(1, llmCalls.get())
+        release.countDown()
+        worker1.join(5_000)
+
+        assertEquals(1, store.clusters.size)
+        assertEquals(1, events.inserted.size)
+        assertEquals(1, publisher.published.size)
+    }
+
+    @Test
+    fun `만료 임대를 재선점하면 이전 소유자는 최종 저장할 수 없다`() {
+        val id = "lease-cluster".padEnd(26, '0')
+        val claimedAt = clock.instant()
+        store.createCluster(id, "삼성전자 수주", claimedAt)
+
+        assertTrue(store.claimSummarize(id, "old", claimedAt, claimedAt.minusSeconds(120)))
+        assertTrue(store.claimSummarize(id, "new", claimedAt.plusSeconds(180), claimedAt.plusSeconds(60)))
+        assertFalse(store.markSummarized(id, "old", "오래된 결과", "STOCK"))
+        assertTrue(store.markSummarized(id, "new", "최신 결과", "STOCK"))
+        assertEquals("최신 결과", store.clusters.getValue(id).summary)
+    }
+
+    @Test
+    fun `전부 기각 - IRRELEVANT 마킹 후 발행 없음`() {
+        verdict = ClusterSummaryOutput(
+            summary = "무관",
+            marketRelevant = true,
+            scope = NewsScope.STOCK,
+            stocks = listOf(StockVerdict("005930", false, Sentiment.NEUTRAL, 0.9, "무관")),
+            sectors = emptyList(),
+        )
+        processor().process(entry("a1", "삼성 라이온즈 우승"))
+        assertEquals(0, events.inserted.size)
+        assertEquals(ClusterStatus.IRRELEVANT, store.clusters.values.single().status)
+    }
+
+    class RecordingEventStore : StreamEventStore {
+        data class Inserted(val eventId: String, val code: String, val type: String, val data: StreamData)
+
+        val inserted = mutableListOf<Inserted>()
+        val refreshed = mutableListOf<String>()
+
+        @Synchronized
+        override fun insertEvent(eventId: String, code: String, type: String, occurredAt: Instant, source: String?, data: StreamData): Boolean {
+            if (inserted.any { it.eventId == eventId }) return false
+            inserted.add(Inserted(eventId, code, type, data))
+            return true
+        }
+
+        @Synchronized
+        override fun refreshSources(eventId: String, sourcesJson: String) {
+            refreshed.add(eventId)
+        }
+
+        override fun digestExists(code: String, date: String) =
+            inserted.any { it.code == code && it.type == "AI" && it.data.digest?.date == date }
+    }
+
+    class RecordingPublisher : StreamPublisher {
+        val published = mutableListOf<Pair<String, StreamData>>()
+
+        @Synchronized
+        override fun publish(code: String, eventId: String, data: StreamData) {
+            published.add(code to data)
+        }
+    }
+}

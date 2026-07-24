@@ -163,8 +163,9 @@ KIS 프레임 → 파싱 → 종목별 최신값 버퍼(덮어쓰기)
 ## 4. 워커 소유 데이터 스키마 (Flyway 관리)
 
 ```
-stock_master(code CHAR(6) PK, name, market, sector NULL, shares_outstanding BIGINT,
+stock_master(code CHAR(6) PK, name, market, sector_code NULL, shares_outstanding BIGINT,
              is_active BOOL, listed_at NULL, updated_at)
+sector(code TEXT PK, name)   -- KIS 마스터 파일 업종 필드에서 upsert (stock_master_sync가 함께 적재)
 daily_candle(code, date CHAR(8), open, high, low, close INT, volume BIGINT, value BIGINT,
              PK(code, date))
 valuation_daily(code, date, per NUMERIC, pbr NUMERIC, eps INT, bps INT, market_cap BIGINT,
@@ -179,7 +180,7 @@ financial_summary(code, year SMALLINT, reprt_code CHAR(5), fs_div CHAR(3),
 batch_job_run(id, job, run_date, status, ok_count, fail_count, started_at, finished_at, error)
 ```
 
-읽기 소비자는 core-api stockinfo/search 모듈(REST 명세 §8). 단위: 금액 컬럼은 원 단위 저장, API 변환은 core-api 책임(명세와 합의).
+읽기 소비자는 core-api stockinfo/search 모듈(REST 명세 §8) + worker-llm 섹터 해소(`sector`·`stock_master.sector_code` — [뉴스 파이프라인 명세](alphatalk_news_worker_spec.md) §3.6). 단위: 금액 컬럼은 원 단위 저장, API 변환은 core-api 책임(명세와 합의).
 
 ## 5. 설정·환경변수
 

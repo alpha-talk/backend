@@ -1,6 +1,11 @@
-# Alpha Talk — Redis 계약 (`:contracts`) v0.1
+# Alpha Talk — Redis 계약 (`:contracts`) v0.5
 
 게이트웨이 · 워커(price/ingest/llm) · 메인서버가 공유하는 Redis 키/채널/스트림 규약. 이 문서가 세 서비스 간 단일 진실의 원천이다.
+
+> v0.5 (2026-07-24): 전량 LLM 판정 전환 — `queue:ingest`의 `codes`를 `macroHint` 없이도 공란 허용(수집 측 종목 매칭 게이트 제거). 관련 종목 판정은 llm-worker LLM 전담([뉴스 워커 명세](alphatalk_news_worker_spec.md) §2.4). `digest` 엔트리만 `codes` 1개 필수 유지(§2.3).
+> v0.4 (2026-07-23): llm-worker 원문 fetch의 인스턴스 간 호스트별 요청 간격을 위한 `rate:article-fetch:{host}` 키 추가. PEL 회수 설명을 실제 구현인 `XPENDING` + `XCLAIM`으로 정정.
+> v0.3 (2026-07-22): 뉴스 파이프라인 반영([뉴스 워커 명세](alphatalk_news_worker_spec.md)) — `queue:ingest`에 `type="digest"`(§2.3)·`macroHint` 필드·`codes` 공란 허용, poison 격리 `queue:ingest:dlq`, `lock:cluster:{code}` 키 추가.
+> v0.2 (2026-07-16): `watchlist:{userId}` 미러 키 명문화(ws `RedisWatchlistResolver`·core-api 쓰기 반영), 메인서버 전용 키(`rl:*`·`idem:*`) 주석 추가.
  
 ---
 
@@ -11,11 +16,11 @@ Redis를 세 가지 용도로 쓰며, **이름이 비슷해도 메커니즘이 �
 | 메커니즘 | 무엇 | 키/채널 패턴 | 보장 | 누가 봄 |
 |---|---|---|---|---|
 | **Pub/Sub** | 실시간 1→N 브로드캐스트 | `quote:{code}` · `stream:{code}` · `post:{code}` · `watchlist:updated` | 구독한 **전원이 사본** · 휘발 · ACK 없음 · best-effort | 게이트웨이가 구독 |
-| **Redis Streams** | 신뢰성 **작업 큐** | `queue:ingest` | **경쟁 소비**(한 건=한 워커) · ACK · 재시도(PEL) | 워커끼리만 |
-| **자료구조** | 상태/캐시 | `price:{code}` · `presence:{userId}` · `cursor:*` · `seen:ingest:*` | 영속(메모리) · TTL | 워커/메인/게이트웨이 |
+| **Redis Streams** | 신뢰성 **작업 큐** | `queue:ingest` (+DLQ `queue:ingest:dlq`) | **경쟁 소비**(한 건=한 워커) · ACK · 재시도(PEL) | 워커끼리만 |
+| **자료구조** | 상태/캐시 | `price:{code}` · `presence:{userId}` · `cursor:*` · `seen:ingest:*` · `lock:cluster:*` · `rate:article-fetch:*` | 영속(메모리) · TTL | 워커/메인/게이트웨이 |
 
 > ⚠️ **`stream:{code}`는 Pub/Sub 채널이다 — Redis Stream(데이터 구조)이 아니다.**
-> 이 시스템에서 진짜 Redis Stream은 **`queue:ingest` 하나뿐**이다.
+> 이 시스템에서 진짜 Redis Stream은 **`queue:ingest`(와 그 DLQ `queue:ingest:dlq`)뿐**이다.
 > *(이름 충돌이 계속 헷갈리면 `stream:{code}` → `feed:{code}` 리네임을 권장. 이 문서는 일단 `stream`을 유지한다.)*
 
 **핵심 경계**: "**처리되어야 할 일(work)**"은 Streams로 안전 분배하고, "**이미 처리된 결과의 실시간 통보**"는 Pub/Sub으로 브로드캐스트한다.
@@ -67,8 +72,9 @@ Redis를 세 가지 용도로 쓰며, **이름이 비슷해도 메커니즘이 �
 | 적재 | `XADD` (생산자: **ingest-worker**) |
 | 소비 | `XREADGROUP` (소비자 그룹 **`g:llm`**, 멤버: **llm-worker** ×N) |
 | 완료 | `XACK queue:ingest g:llm <id>` |
-| 장애 회수 | `XAUTOCLAIM` (idle 임계 초과한 PEL 엔트리를 다른 워커가 회수) |
+| 장애 회수 | `XPENDING`으로 idle 임계 초과 엔트리를 찾고 `XCLAIM`으로 다른 워커가 회수 |
 | 트림 | `XADD ... MAXLEN ~ N` 또는 주기적 `XTRIM` (이미 처리된 건은 DB에 있으므로 큐는 유한 보관) |
+| poison 격리 | delivery count > 5 엔트리는 llm-worker가 `queue:ingest:dlq`로 XADD 후 원큐 XACK — DLQ는 소비자 없음(수동 점검 + 알람) |
 
 ### 2.1 큐 엔트리 스키마 (ingest-worker가 XADD)
 
@@ -78,12 +84,13 @@ Streams 필드는 문자열이다. 한 엔트리 = "가공해야 할 원본 소�
 |---|---|---|
 | `source` | `"naver"` `"hankyung"` `"dart"` | 출처 |
 | `sourceId` | `"a1b2c3"` | 출처 고유 ID — **중복 제거 키** |
-| `type` | `"news"` `"report"` `"disclosure"` | 원본 종류 |
-| `codes` | `"005930,000660"` | 영향 종목(콤마구분, 다중 가능) |
+| `type` | `"news"` `"report"` `"disclosure"` `"digest"` | 원본 종류 — `digest`는 일일 브리핑 잡(§2.3) |
+| `codes` | `"005930,000660"` | 영향 종목 **후보**(콤마구분, 다중 가능). **공란 허용** — 수집 측 매칭은 힌트일 뿐이고 관련 종목 확정·발견은 llm-worker LLM이 전담(뉴스 워커 명세 §2.4·§3.6). `digest` 타입만 1개 필수(§2.3) |
 | `title` | `"..."` | 원문 제목 |
 | `url` | `"https://..."` | 원문 링크 |
 | `body` | `"..."` | 원문 본문/발췌(선택) |
 | `fetchedAt` | `1719500000000` | 수집 시각(epoch ms) |
+| `macroHint` *(선택)* | `"금리"` | 매크로 키워드 사전 히트 표시 — llm-worker의 scope 판정 힌트(뉴스 워커 명세 §2.4) |
 
 ### 2.2 llm-worker 처리 순서 (★ persist → publish → ack)
 
@@ -103,6 +110,19 @@ Streams 필드는 문자열이다. 한 엔트리 = "가공해야 할 원본 소�
 - `codes`가 다중이면 StreamEvent를 종목별로 저장하고 `stream:{code}`를 **각 종목에 발행**(한 엔트리 → 여러 채널 fan-out).
 - **순서 의미**: 큐 처리는 워커 간 동시 진행이라 순서 비결정적이다. 방 안에서의 최종 순서는 **처리 시점에 부여한 `eventId`(ULID) 오름차순**으로 잡는다(큐 순서가 아님).
 > `post`(글/댓글)는 즉시 처리라 작업 큐가 없다 — 메인서버가 저장 후 바로 `post:{code}` 발행. `quote`(틱)도 큐 없이 price-worker가 바로 `quote:{code}` 발행. **Streams를 타는 건 소식(ingest→llm) 경로뿐이다.**
+
+### 2.3 `type="digest"` 엔트리 — 일일 브리핑 잡
+
+ingest-worker 스케줄러(싱글턴)가 매일 18:00 KST에 적재하고, 같은 그룹 `g:llm`이 경쟁 소비한다 — 스케줄은 싱글턴, 실행은 ×N(리더 선출 불요).
+
+| 필드 | 값 |
+|---|---|
+| `type` | `"digest"` |
+| `sourceId` | `digest:{code}:{yyyy-MM-dd}` — 멱등 키(종목·일자당 브리핑 1건) |
+| `codes` | 대상 종목 1개 |
+| `source` | `"scheduler"` — `title`/`url`/`body` 공란 |
+
+처리 순서·불변식은 §2.2와 동일(persist → publish → ack). 생성물은 `type=AI` StreamEvent(뉴스 워커 명세 §4).
  
 ---
 
@@ -115,10 +135,14 @@ Streams 필드는 문자열이다. 한 엔트리 = "가공해야 할 원본 소�
 | `price:{code}` | Hash/String | 현재가 last-value 캐시(스냅샷) | price-worker | 메인서버(REST 현재가) | 갱신/없음 |
 | `presence:{userId}` | Set(+멤버 TTL) | 접속 세션 집합(멀티디바이스) | 게이트웨이 | 게이트웨이 | 하트비트로 갱신 |
 | `cursor:{userId}:{code}` | String | 마지막 읽은 `eventId`(읽음 위치) | 메인서버(REST) | 메인서버 | 없음 |
+| `watchlist:{userId}` | Set | 관심목록 미러 — 게이트웨이 CONNECT 시 해소용 (진실은 메인서버 DB) | 메인서버 | 게이트웨이 | 없음 |
 | `seen:ingest:{sourceId}` | String | 수집 중복 제거 마커 | ingest/llm-worker | ingest/llm-worker | 며칠 |
+| `lock:cluster:{code}` | String (`SET NX PX 3000`) | 뉴스 클러스터 판정 직렬화 락(뉴스 워커 명세 §3.3) | llm-worker | llm-worker | 3초 |
+| `rate:article-fetch:{host}` | String (`SET PX`) | robots.txt·원문 fetch의 호스트별 다음 요청 간격을 llm-worker 인스턴스 간 직렬화 | llm-worker | llm-worker | 요청 간격(기본 1초) |
 
 - **현재가 스냅샷**은 REST(메인서버가 `price:{code}` 읽기)로 준다. 게이트웨이는 `quote:{code}` 라이브만 relay하고 캐시를 직접 읽지 않는다(얇은 엣지 유지).
 - 봉(OHLCV)은 KIS에서 받아 캐시하되, 권위 있는 가격 저장소로 쓰지 않는다(틱은 영속화 안 함).
+- 메인서버 **전용** 키(서비스 간 계약 아님 — 게이트웨이·워커는 접근 금지): `rl:{action}:{key}:{windowIndex}`(레이트리밋 고정 윈도 카운터, TTL=윈도), `idem:{userId}:{key}`(멱등 응답 캐시, TTL 10분).
 ---
 
 ## 4. 생산자 / 소비자 매트릭스
@@ -131,10 +155,14 @@ Streams 필드는 문자열이다. 한 엔트리 = "가공해야 할 원본 소�
 | `watchlist:updated` (P/S) | — | — | — | **PUBLISH** | **SUBSCRIBE** |
 | `trade/depth:{code}` (P/S) | **PUBLISH** | — | — | — | **SUBSCRIBE** |
 | `queue:ingest` (Stream) | — | **XADD** | **XREADGROUP/XACK** (`g:llm`) | — | — |
+| `queue:ingest:dlq` (Stream) | — | — | **XADD** (poison 격리) | — | — |
 | `price:{code}` (자료구조) | **WRITE** | — | — | READ | — |
 | `presence:{userId}` (자료구조) | — | — | — | — | **WRITE/READ** |
 | `cursor:{userId}:{code}` | — | — | — | **WRITE/READ** | — |
+| `watchlist:{userId}` (자료구조) | — | — | — | **WRITE** | **READ** |
 | `seen:ingest:{sourceId}` | — | WRITE | WRITE/READ | — | — |
+| `lock:cluster:{code}` | — | — | **WRITE/READ** | — | — |
+| `rate:article-fetch:{host}` | — | — | **WRITE/READ** | — | — |
 
 게이트웨이는 **Pub/Sub SUBSCRIBE만** 한다(+프레즌스). Streams·DB 쓰기는 만지지 않는다.
  
@@ -179,7 +207,7 @@ Streams 필드는 문자열이다. 한 엔트리 = "가공해야 할 원본 소�
 | 항목 | 게이트웨이 | 워커 | 메인서버 |
 |---|---|---|---|
 | 채널명 `quote/stream/post:{code}` | 구독 | quote=price, stream=llm 발행 | post 발행 |
-| `queue:ingest` 엔트리 스키마(§2.1) | — | ingest=생산, llm=소비 | — |
+| `queue:ingest` 엔트리 스키마(§2.1·§2.3) | — | ingest=생산, llm=소비 | — |
 | 봉투/`eventId`(ULID) 규약 | 파싱 | 생성 | 생성 |
 | `watchlist:updated` payload | 구독·세션조정 | — | 발행 |
 | `cursor` 의미(읽음 위치) | — | — | 쓰기/복구 |
