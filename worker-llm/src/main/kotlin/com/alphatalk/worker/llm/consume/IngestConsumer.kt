@@ -7,6 +7,7 @@ import com.alphatalk.worker.llm.cluster.ClusterContendedException
 import com.alphatalk.worker.llm.config.LlmProperties
 import com.alphatalk.worker.llm.enrich.DigestProcessor
 import com.alphatalk.worker.llm.enrich.NewsProcessor
+import io.lettuce.core.RedisBusyException
 import io.micrometer.core.instrument.MeterRegistry
 import org.slf4j.LoggerFactory
 import org.springframework.data.domain.Range
@@ -47,8 +48,10 @@ class IngestConsumer(
                     true,
                 )
             }
-        }.onFailure {
-            if (it.message?.contains("BUSYGROUP") != true) throw it
+        }.onFailure { failure ->
+            val busy = generateSequence<Throwable>(failure) { it.cause }
+                .any { it is RedisBusyException && it.message?.startsWith("BUSYGROUP") == true }
+            if (!busy) throw failure
         }
     }
 
