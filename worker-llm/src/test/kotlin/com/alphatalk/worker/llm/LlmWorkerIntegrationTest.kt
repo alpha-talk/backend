@@ -151,6 +151,11 @@ class LlmWorkerIntegrationTest {
     )!!
 
     @Test
+    fun `ensureGroup - 그룹이 이미 있어도(BUSYGROUP) 재기동이 실패하지 않는다`() {
+        consumer.ensureGroup()
+    }
+
+    @Test
     fun `FR-11 - 동일 sourceId 중복 요약 0건 + 발행 E2E`() {
         val received = LinkedBlockingQueue<String>()
         val listener = RedisMessageListenerContainer().apply {
