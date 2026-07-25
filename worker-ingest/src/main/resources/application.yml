@@ -18,13 +18,84 @@ alphatalk:
     poll-enabled: true
     poll-delay: 5m
     poll-initial-delay: 10s
-    seen-ttl: 7d      # Redis 계약 v0.3 §3 seen:ingest TTL
+    seen-ttl: 7d      # Redis 계약 v0.5 §3 seen:ingest TTL
     queue-max-len: 10000
     excerpt-max-length: 200
     fetch-concurrency: 4
     macro-keywords: [금리, 기준금리, 환율, 유가, 관세, 수출규제]
-    feeds: []         # - name: hankyung
-                      #   url: https://example.com/rss
+    feeds:
+      - id: yna-economy
+        source: yna
+        url: https://www.yna.co.kr/rss/economy.xml
+      - id: yna-industry
+        source: yna
+        url: https://www.yna.co.kr/rss/industry.xml
+      - id: yna-society
+        source: yna
+        url: https://www.yna.co.kr/rss/society.xml
+      - id: hankyung-economy
+        source: hankyung
+        url: https://www.hankyung.com/feed/economy
+      - id: hankyung-finance
+        source: hankyung
+        url: https://www.hankyung.com/feed/finance
+      - id: hankyung-society
+        source: hankyung
+        url: https://www.hankyung.com/feed/society
+      - id: mk-economy
+        source: mk
+        url: https://www.mk.co.kr/rss/30100041/
+      - id: mk-stock
+        source: mk
+        url: https://www.mk.co.kr/rss/50200011/
+      - id: mk-society
+        source: mk
+        url: https://www.mk.co.kr/rss/50400012/
+      - id: donga-economy
+        source: donga
+        url: https://rss.donga.com/economy.xml
+      - id: donga-society
+        source: donga
+        url: https://rss.donga.com/national.xml
+      - id: khan-economy
+        source: khan
+        url: https://www.khan.co.kr/rss/rssdata/economy_news.xml
+      - id: khan-society
+        source: khan
+        url: https://www.khan.co.kr/rss/rssdata/society_news.xml
+      - id: hani-economy
+        source: hani
+        url: https://www.hani.co.kr/rss/economy/
+      - id: hani-society
+        source: hani
+        url: https://www.hani.co.kr/rss/society/
+      - id: chosun-economy
+        source: chosun
+        url: https://www.chosun.com/arc/outboundfeeds/rss/category/economy/?outputType=xml
+      - id: chosun-society
+        source: chosun
+        url: https://www.chosun.com/arc/outboundfeeds/rss/category/national/?outputType=xml
+      - id: newsis-economy
+        source: newsis
+        url: https://www.newsis.com/RSS/economy.xml
+      - id: newsis-finance
+        source: newsis
+        url: https://www.newsis.com/RSS/bank.xml
+      - id: newsis-industry
+        source: newsis
+        url: https://www.newsis.com/RSS/industry.xml
+      - id: newsis-society
+        source: newsis
+        url: https://www.newsis.com/RSS/society.xml
+      - id: sedaily-finance
+        source: sedaily
+        url: https://www.sedaily.com/rss/finance
+      - id: sedaily-economy
+        source: sedaily
+        url: https://www.sedaily.com/rss/economy
+      - id: sedaily-society
+        source: sedaily
+        url: https://www.sedaily.com/rss/society
     stocks: []        # - code: "005930"
                       #   names: [삼성전자, 삼전]
     naver:

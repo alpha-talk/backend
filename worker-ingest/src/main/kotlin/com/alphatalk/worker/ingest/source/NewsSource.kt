@@ -1,6 +1,8 @@
 package com.alphatalk.worker.ingest.source
 
 interface NewsSource {
+    val id: String
+        get() = name
     val name: String
     fun fetchLatest(): List<FetchedArticle>
 }

@@ -1,0 +1,4 @@
+alphatalk:
+  ingest:
+    poll-delay: 5m
+    poll-initial-delay: 5s
