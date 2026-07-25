@@ -37,7 +37,7 @@ class IngestPoller(
                 process(source.name, article, stats)
             }
         }.onFailure {
-            log.warn("source poll failed: source={}", source.name, it)
+            log.warn("source poll failed: id={} source={}", source.id, source.name, it)
             stats.sourceErrors++
         }
         return stats.snapshot()

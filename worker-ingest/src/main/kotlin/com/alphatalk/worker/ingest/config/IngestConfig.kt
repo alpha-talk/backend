@@ -7,6 +7,7 @@ import com.alphatalk.worker.ingest.queue.IngestQueue
 import com.alphatalk.worker.ingest.scheduler.IngestPoller
 import com.alphatalk.worker.ingest.source.NaverSearchNewsSource
 import com.alphatalk.worker.ingest.source.NewsSource
+import com.alphatalk.worker.ingest.source.RssFeedClient
 import com.alphatalk.worker.ingest.source.RssNewsSource
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
@@ -37,8 +38,9 @@ class IngestConfig {
         queue: IngestQueue,
         ingestFetchExecutor: ExecutorService,
         props: IngestProperties,
+        rssFeedClient: RssFeedClient,
     ): IngestPoller = IngestPoller(
-        sources = newsSources(props),
+        sources = newsSources(props, rssFeedClient),
         mapper = mapper,
         seen = seen,
         queue = queue,
@@ -46,8 +48,8 @@ class IngestConfig {
         fetchExecutor = ingestFetchExecutor,
     )
 
-    private fun newsSources(props: IngestProperties): List<NewsSource> {
-        val rss = props.feeds.map { RssNewsSource(it.name, it.url) }
+    private fun newsSources(props: IngestProperties, rssFeedClient: RssFeedClient): List<NewsSource> {
+        val rss = props.feeds.map { RssNewsSource(it.id, it.source, it.url, rssFeedClient) }
         if (props.naver.clientId.isBlank()) return rss
         val naver = NaverSearchNewsSource(
             clientId = props.naver.clientId,

@@ -38,6 +38,26 @@ class IngestPollerTest {
     }
 
     @Test
+    fun `같은 언론사의 서로 다른 섹션에 실린 기사는 한 번만 적재`() {
+        val article = FetchedArticle(
+            sourceId = "news-0001",
+            title = "삼성전자 수주",
+            url = "https://example.com/1",
+        )
+        val poller = poller(
+            FakeSource("yna", listOf(article), "yna-economy"),
+            FakeSource("yna", listOf(article), "yna-society"),
+        )
+
+        val stats = poller.pollOnce()
+
+        assertEquals(1, stats.enqueued)
+        assertEquals(1, stats.duplicateSkipped)
+        assertEquals("yna", queue.entries.single().source)
+        assertEquals("yna:news-0001", queue.entries.single().sourceId)
+    }
+
+    @Test
     fun `추적 파라미터만 다른 같은 URL도 중복으로 잡는다`() {
         val poller = poller(
             FakeSource(
@@ -169,7 +189,11 @@ class IngestPollerTest {
         assertEquals(200, queue.entries.single().body?.length)
     }
 
-    private class FakeSource(override val name: String, private val articles: List<FetchedArticle>) : NewsSource {
+    private class FakeSource(
+        override val name: String,
+        private val articles: List<FetchedArticle>,
+        override val id: String = name,
+    ) : NewsSource {
         override fun fetchLatest() = articles
     }
 
