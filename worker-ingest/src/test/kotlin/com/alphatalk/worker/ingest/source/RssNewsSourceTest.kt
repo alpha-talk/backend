@@ -1,10 +1,10 @@
 package com.alphatalk.worker.ingest.source
 
 import org.junit.jupiter.api.Test
-import java.io.ByteArrayInputStream
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 
 class RssNewsSourceTest {
     private val rss = """
@@ -34,9 +34,14 @@ class RssNewsSourceTest {
         </rss>
     """.trimIndent()
 
-    private val source = RssNewsSource("test", "https://example.com/rss") {
-        ByteArrayInputStream(rss.toByteArray())
-    }
+    private val source = RssNewsSource(
+        id = "test-economy",
+        name = "test",
+        feedUrl = "https://example.com/rss",
+        client = RssFeedClient {
+            RssFeedResponse.Modified(rss.toByteArray(), null, null)
+        },
+    )
 
     @Test
     fun `RSS 파싱 - 제목 트림·HTML 제거·guid·발행시각`() {
@@ -54,5 +59,30 @@ class RssNewsSourceTest {
     @Test
     fun `guid가 링크와 같으면 sourceId로 쓰지 않는다`() {
         assertNull(source.fetchLatest().last().sourceId)
+    }
+
+    @Test
+    fun `ETag와 Last-Modified를 다음 요청에 전달하고 304는 빈 결과`() {
+        val requests = mutableListOf<RssFeedRequest>()
+        val conditionalSource = RssNewsSource(
+            id = "test-economy",
+            name = "test",
+            feedUrl = "https://example.com/rss",
+            client = RssFeedClient { request ->
+                requests += request
+                if (requests.size == 1) {
+                    RssFeedResponse.Modified(rss.toByteArray(), "\"v1\"", 1_700_000_000_000)
+                } else {
+                    RssFeedResponse.NotModified
+                }
+            },
+        )
+
+        assertEquals(2, conditionalSource.fetchLatest().size)
+        assertTrue(conditionalSource.fetchLatest().isEmpty())
+        assertEquals(null, requests.first().etag)
+        assertEquals(null, requests.first().lastModified)
+        assertEquals("\"v1\"", requests.last().etag)
+        assertEquals(1_700_000_000_000, requests.last().lastModified)
     }
 }

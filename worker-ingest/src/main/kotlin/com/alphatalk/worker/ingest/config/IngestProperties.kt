@@ -15,7 +15,11 @@ data class IngestProperties(
     val naver: Naver = Naver(),
     val digest: Digest = Digest(),
 ) {
-    data class Feed(val name: String, val url: String)
+    data class Feed(
+        val id: String,
+        val source: String,
+        val url: String,
+    )
 
     data class Stock(val code: String, val names: List<String>)
 
