@@ -22,7 +22,6 @@ alphatalk:
     queue-max-len: 10000
     excerpt-max-length: 200
     fetch-concurrency: 4
-    macro-keywords: [금리, 기준금리, 환율, 유가, 관세, 수출규제]
     feeds:
       - id: yna-economy
         source: yna

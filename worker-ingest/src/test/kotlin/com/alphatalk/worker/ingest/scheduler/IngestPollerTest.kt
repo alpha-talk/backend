@@ -2,7 +2,6 @@ package com.alphatalk.worker.ingest.scheduler
 
 import com.alphatalk.contracts.queue.IngestQueueEntry
 import com.alphatalk.worker.ingest.dedup.SeenMarker
-import com.alphatalk.worker.ingest.mapping.DictionaryStockCodeMapper
 import com.alphatalk.worker.ingest.queue.IngestQueue
 import com.alphatalk.worker.ingest.source.FetchedArticle
 import com.alphatalk.worker.ingest.source.NewsSource
@@ -13,15 +12,11 @@ import java.util.concurrent.TimeUnit
 import kotlin.test.assertEquals
 
 class IngestPollerTest {
-    private val mapper = DictionaryStockCodeMapper(
-        stocks = mapOf("005930" to listOf("삼성전자")),
-        macroKeywords = listOf("금리"),
-    )
     private val seen = InMemorySeenMarker()
     private val queue = RecordingQueue()
 
     private fun poller(vararg sources: NewsSource) =
-        IngestPoller(sources.toList(), mapper, seen, queue, excerptMaxLength = 200, clock = { 1719500000000 })
+        IngestPoller(sources.toList(), seen, queue, excerptMaxLength = 200, clock = { 1719500000000 })
 
     @Test
     fun `같은 기사를 두 번 폴링해도 큐 적재는 한 번`() {
@@ -74,8 +69,8 @@ class IngestPollerTest {
     }
 
     @Test
-    fun `미매칭 기사도 전량 적재 - 관련성 판정은 LLM 몫`() {
-        val poller = poller(FakeSource("hankyung", listOf(FetchedArticle(title = "오늘의 날씨", url = "https://example.com/w"))))
+    fun `후보 없는 기사도 전량 적재 - 관련성 판정은 LLM 몫`() {
+        val poller = poller(FakeSource("hankyung", listOf(FetchedArticle(title = "삼성전자 수주", url = "https://example.com/w"))))
         val stats = poller.pollOnce()
         assertEquals(1, stats.enqueued)
         val entry = queue.entries.single()
@@ -84,12 +79,16 @@ class IngestPollerTest {
     }
 
     @Test
-    fun `매크로 기사 - codes 공란 + macroHint 적재`() {
-        val poller = poller(FakeSource("hankyung", listOf(FetchedArticle(title = "한은 기준금리 인상", url = "https://example.com/m"))))
+    fun `소스가 부여한 종목 후보는 정렬·중복 제거해 그대로 적재`() {
+        val article = FetchedArticle(
+            title = "반도체 투톱 동반 강세",
+            url = "https://example.com/n",
+            codes = listOf("005930", "000660", "005930"),
+        )
+        val poller = poller(FakeSource("naver", listOf(article)))
         poller.pollOnce()
         val entry = queue.entries.single()
-        assertEquals(emptyList(), entry.codes)
-        assertEquals("금리", entry.macroHint)
+        assertEquals(listOf("000660", "005930"), entry.codes)
     }
 
     @Test
@@ -131,7 +130,7 @@ class IngestPollerTest {
         }
         val pool = Executors.newFixedThreadPool(2)
         try {
-            val poller = IngestPoller(sources, mapper, seen, queue, excerptMaxLength = 200, fetchExecutor = pool)
+            val poller = IngestPoller(sources, seen, queue, excerptMaxLength = 200, fetchExecutor = pool)
             val stats = poller.pollOnce()
             assertEquals(0, stats.sourceErrors)
             assertEquals(2, stats.fetched)
@@ -151,7 +150,7 @@ class IngestPollerTest {
                     FakeSource("b", listOf(FetchedArticle(title = "오늘의 날씨", url = "https://example.com/w"))),
                     FailingSource("c"),
                 ),
-                mapper, seen, queue, excerptMaxLength = 200, fetchExecutor = pool,
+                seen, queue, excerptMaxLength = 200, fetchExecutor = pool,
             )
             val stats = poller.pollOnce()
             assertEquals(2, stats.enqueued)
@@ -159,25 +158,6 @@ class IngestPollerTest {
         } finally {
             pool.shutdown()
         }
-    }
-
-    @Test
-    fun `소스가 종목을 알면 사전 매칭 없이도 그 코드로 적재`() {
-        val poller = poller(
-            FakeSource("naver", listOf(FetchedArticle(title = "3나노 대규모 수주", url = "https://example.com/n1", codes = listOf("005930")))),
-        )
-        val stats = poller.pollOnce()
-        assertEquals(1, stats.enqueued)
-        assertEquals(listOf("005930"), queue.entries.single().codes)
-    }
-
-    @Test
-    fun `소스 제공 코드와 사전 매칭 코드는 합집합`() {
-        val poller = poller(
-            FakeSource("naver", listOf(FetchedArticle(title = "삼성전자 수주", url = "https://example.com/n2", codes = listOf("000660")))),
-        )
-        poller.pollOnce()
-        assertEquals(listOf("000660", "005930"), queue.entries.single().codes)
     }
 
     @Test
