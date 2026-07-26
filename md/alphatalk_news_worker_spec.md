@@ -357,6 +357,7 @@ worker-llm/
 ## 8. 설정 · 메트릭
 
 - LLM provider는 `anthropic|claude-cli|codex-cli|fake` 중 하나를 명시한다. 기본 프로파일은 `anthropic`, local 프로파일은 `claude-cli`이며 `LLM_PROVIDER=codex-cli`로 전환한다. provider 사이 자동 fallback은 없다.
+- 로컬 무료 임베딩은 Ollama+BGE-M3를 기본 사용한다. 설치·환경변수·Docker 연결·문제 해결은 [로컬 임베딩 설정](local_embedding_setup.md)을 따른다.
 - `anthropic`은 `ANTHROPIC_API_KEY`가 없으면 기동 실패한다. `claude-cli`·`codex-cli`는 각각 로그인된 로컬 CLI가 필요하고 실행 실패·타임아웃은 PEL 재처리 경로로 전파한다. `fake`는 `alphatalk.llm.allow-fake=true`일 때만 허용한다.
 - CLI provider는 개인 구독 로컬 단일 인스턴스 전용이다. `consumer-batch=1`이 아니거나 CLI timeout이 `claim-idle` 이상이면 기동 실패해, 긴 CLI 호출 중 다른 consumer가 아직 처리하지 않은 배치 레코드를 회수하는 구성을 막는다.
 - 시크릿(환경변수): `ANTHROPIC_API_KEY` · `NAVER_CLIENT_ID/SECRET` · 임베딩 API 키. 로그 출력 금지. 임베딩 키는 `provider=rest`에서 fail-closed한다.
