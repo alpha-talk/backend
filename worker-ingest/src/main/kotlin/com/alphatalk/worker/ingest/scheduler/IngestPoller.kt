@@ -3,7 +3,6 @@ package com.alphatalk.worker.ingest.scheduler
 import com.alphatalk.contracts.queue.IngestQueueEntry
 import com.alphatalk.contracts.queue.IngestType
 import com.alphatalk.worker.ingest.dedup.SeenMarker
-import com.alphatalk.worker.ingest.mapping.StockCodeMapper
 import com.alphatalk.worker.ingest.normalize.ArticleNormalizer
 import com.alphatalk.worker.ingest.queue.IngestQueue
 import com.alphatalk.worker.ingest.source.FetchedArticle
@@ -14,7 +13,6 @@ import java.util.concurrent.Executor
 
 class IngestPoller(
     private val sources: List<NewsSource>,
-    private val mapper: StockCodeMapper,
     private val seen: SeenMarker,
     private val queue: IngestQueue,
     private val excerptMaxLength: Int,
@@ -44,8 +42,7 @@ class IngestPoller(
     }
 
     private fun process(sourceName: String, article: FetchedArticle, stats: Counters) {
-        val mapping = mapper.map(article.title, article.excerpt)
-        val codes = (article.codes + mapping.codes).distinct().sorted()
+        val codes = article.codes.distinct().sorted()
         val url = ArticleNormalizer.normalizeUrl(article.url)
         val sourceId = ArticleNormalizer.sourceId(sourceName, article.sourceId, url)
         if (!seen.markIfNew(sourceId)) {
@@ -61,7 +58,6 @@ class IngestPoller(
             url = url,
             body = article.excerpt?.take(excerptMaxLength),
             fetchedAt = article.publishedAt ?: clock(),
-            macroHint = mapping.macroHint,
         )
         runCatching { queue.enqueue(entry) }
             .onSuccess { stats.enqueued++ }
