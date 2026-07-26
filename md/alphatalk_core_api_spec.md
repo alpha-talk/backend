@@ -286,7 +286,7 @@ stream/stockinfo ──(읽기)──► Redis price:{code} / 워커 적재 테�
 auth ◄── 전 모듈 (SecurityContext)
 ```
 
-- `stream_event` 테이블 소유자는 **stream 모듈**. community는 직접 INSERT하지 않고 노출된 `StreamEventAppender`를 호출(경계 테스트로 강제). worker-llm은 별도 프로세스로 같은 테이블에 INSERT — 스키마는 Flyway가 단일 관리.
+- `stream_event` 테이블 소유자는 **stream 모듈**. community는 직접 INSERT하지 않고 노출된 `StreamEventAppender`를 호출(경계 테스트로 강제). worker-llm은 별도 프로세스로 같은 테이블에 INSERT — 스키마는 `db-migrations` 모듈(Liquibase)이 단일 관리.
 - 채널명·봉투는 `:contracts` 상수만 사용(문자열 하드코딩 금지).
 ## 10. 보안 체크리스트
 
@@ -307,7 +307,7 @@ post_like(post_id, user_id, created_at, PK(post_id, user_id))
 report(id, target_type, target_id, reporter_id, reason, detail, status, created_at)
 read_cursor(user_id, code, last_event_id, updated_at, PK(user_id, code))   -- Redis 미러
 -- 워커 소유 테이블(stock_master, daily_candle, valuation_daily, investor_flow_daily,
--- financial_summary 등)은 「KIS 수집 워커 명세」 §4 참조. Flyway는 저장소 단일 관리.
+-- financial_summary 등)은 「KIS 수집 워커 명세」 §4 참조. 마이그레이션은 db-migrations 모듈(Liquibase) 단일 관리.
 ```
 
 ### 전체 엔드포인트 요약 (22개)

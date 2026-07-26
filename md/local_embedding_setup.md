@@ -36,11 +36,11 @@
 
 - JDK 21
 - Redis와 PostgreSQL 실행
-- core-api Liquibase가 뉴스 파이프라인 스키마와 pgvector 확장을 적용한 DB
+- `db-migrations` changelog가 뉴스 파이프라인 스키마와 pgvector 확장을 적용한 DB (worker-llm 기동 시 자동 적용)
 - Claude CLI 또는 Codex CLI 로그인
 - [Ollama 설치](https://ollama.com/download)
 
-로컬 DB의 `news_article.embedding` 컬럼은 1024차원이다. 다른 차원의 모델을 사용하려면 뉴스 워커 명세를 먼저 변경하고 core-api Liquibase changeset과 worker-llm 테스트 스키마를 함께 변경해야 한다.
+로컬 DB의 `news_article.embedding` 컬럼은 1024차원이다. 다른 차원의 모델을 사용하려면 뉴스 워커 명세를 먼저 변경하고 `db-migrations` changeset과 worker-llm 테스트 스키마를 함께 변경해야 한다.
 
 ## 4. Ollama 준비
 
