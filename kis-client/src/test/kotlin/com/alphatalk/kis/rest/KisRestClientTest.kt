@@ -116,4 +116,39 @@ class KisRestClientTest {
 
         assertFailsWith<KisClientException> { client.quoteSnapshot(account, "005930") }
     }
+
+    @Test
+    fun `기간별 일봉을 파싱하고 빈 행은 건너뛴다`() {
+        server.enqueue("/oauth2/tokenP", 200, tokenBody("T1"))
+        server.enqueue(
+            "/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice",
+            200,
+            """
+            {"rt_cd":"0","output2":[
+              {"stck_bsop_date":"20260724","stck_oprc":"70600","stck_hgpr":"71500","stck_lwpr":"70400",
+               "stck_clpr":"71200","acml_vol":"1234567","acml_tr_pbmn":"87942671300"},
+              {"stck_bsop_date":"20260723","stck_oprc":"70100","stck_hgpr":"70900","stck_lwpr":"69800",
+               "stck_clpr":"70500","acml_vol":"2234567","acml_tr_pbmn":"97942671300"},
+              {"stck_bsop_date":""}]}
+            """.trimIndent(),
+        )
+
+        val candles = client.dailyCandles(
+            account,
+            "005930",
+            java.time.LocalDate.of(2026, 4, 25),
+            java.time.LocalDate.of(2026, 7, 24),
+        )
+
+        assertEquals(2, candles.size)
+        assertEquals("20260724", candles[0].date)
+        assertEquals(71200, candles[0].close)
+        assertEquals(87942671300, candles[0].value)
+        val call = server.received.single { it.path.endsWith("inquire-daily-itemchartprice") }
+        assertEquals("FHKST03010100", call.headers["tr_id"])
+        assertTrue("FID_INPUT_DATE_1=20260425" in call.query)
+        assertTrue("FID_INPUT_DATE_2=20260724" in call.query)
+        assertTrue("FID_PERIOD_DIV_CODE=D" in call.query)
+        assertTrue("FID_ORG_ADJ_PRC=0" in call.query)
+    }
 }

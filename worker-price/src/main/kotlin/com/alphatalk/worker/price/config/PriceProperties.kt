@@ -16,4 +16,6 @@ data class PriceProperties(
     val holidays: List<String> = emptyList(),
     val pollIntervalMs: Long = 30_000,
     val pollBudgetFactor: Double = 0.5,
+    val candleEnabled: Boolean = false,
+    val candleBackfillDays: Long = 90,
 )
