@@ -20,7 +20,7 @@ data class IngestProperties(
         val url: String,
     )
 
-    data class Stock(val code: String, val names: List<String>)
+    data class Stock(val code: String, val name: String)
 
     data class Naver(
         val clientId: String = "",

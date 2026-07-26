@@ -44,7 +44,7 @@ class IngestConfig {
             clientId = props.naver.clientId,
             clientSecret = props.naver.clientSecret,
             queries = props.stocks.mapNotNull { stock ->
-                stock.names.firstOrNull()?.let { NaverSearchNewsSource.StockQuery(stock.code, it) }
+                stock.name.takeIf { it.isNotBlank() }?.let { NaverSearchNewsSource.StockQuery(stock.code, it) }
             },
             display = props.naver.display,
         )

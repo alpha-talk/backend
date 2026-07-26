@@ -95,8 +95,9 @@ alphatalk:
       - id: sedaily-society
         source: sedaily
         url: https://www.sedaily.com/rss/society
-    stocks: []        # - code: "005930"
-                      #   names: [삼성전자, 삼전]
+    stocks: []        # 시드 종목 — 네이버 검색 쿼리·일일 다이제스트 대상 (사전 매핑 아님)
+                      # - code: "005930"
+                      #   name: 삼성전자
     naver:
       client-id: ${NAVER_CLIENT_ID:}        # 미설정이면 네이버 소스 비활성
       client-secret: ${NAVER_CLIENT_SECRET:}
