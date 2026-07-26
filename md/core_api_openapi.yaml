@@ -1,0 +1,1134 @@
+openapi: 3.0.3
+info:
+  title: Alpha Talk core-api
+  version: 0.1.0
+  description: |
+    Alpha Talk 메인서버(core-api) REST API — `md/alphatalk_core_api_spec.md` v0.1의 기계가독 계약.
+
+    - 모든 시각은 **epoch ms**(정수). 일자 필드는 `yyyymmdd` 문자열.
+    - 종목 코드는 6자리 문자열(선행 0 보존), 이벤트·글·댓글 ID는 **ULID 문자열**, 유저 ID는 숫자.
+    - 커서 페이지네이션은 ULID 사전순=시간순을 이용한 양방향 커서(§1.4).
+    - core-api는 KIS를 직접 호출하지 않으며, 워커가 적재한 DB(`stock_master`·`daily_candle`·
+      `valuation_daily`·`financial_summary`·`investor_flow_daily`)와 Redis(`price:{code}`)만 읽는다.
+servers:
+  - url: /api/v1
+
+tags:
+  - name: auth
+    description: 가입·로그인·토큰 회전(리프레시 rotation, 재사용 감지 시 전 토큰 무효화)
+  - name: search
+    description: 종목 검색·자동완성 (원천 stock_master, pg_trgm)
+  - name: subscription
+    description: 관심목록(방 구독) — 변경 커밋 후 `watchlist:updated` PUBLISH 부수효과
+  - name: stream
+    description: 방 통합 스트림 조회·복구, 입장 스냅샷
+  - name: notification
+    description: 알림 인박스 — fan-out-on-read, read_cursor 기반 집계
+  - name: community
+    description: 글·댓글·공감·신고 — POST는 stream_event 더블라이트(ADR A6)
+  - name: stockinfo
+    description: 종목 개요·봉·밸류에이션·재무·수급 (워커 적재 테이블 읽기 전용)
+
+security:
+  - bearerAuth: []
+
+paths:
+  /auth/signup:
+    post:
+      tags: [auth]
+      operationId: signup
+      summary: 이메일 가입
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password, nickname]
+              properties:
+                email:
+                  type: string
+                  format: email
+                  example: a@b.c
+                password:
+                  type: string
+                  format: password
+                  minLength: 8
+                  description: 8자 이상, 영문/숫자 조합
+                nickname:
+                  type: string
+                  minLength: 2
+                  maxLength: 12
+                  example: 민균
+      responses:
+        '201':
+          description: 가입 완료
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [userId]
+                properties:
+                  userId:
+                    type: integer
+                    format: int64
+                    example: 123
+        '400': { $ref: '#/components/responses/ValidationFailed' }
+        '409':
+          description: 중복 이메일/닉네임 (`DUPLICATE`)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /auth/login:
+    post:
+      tags: [auth]
+      operationId: login
+      summary: 토큰 쌍 발급
+      description: 로그인 시도 레이트리밋 10회/분 (IP+email).
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string, format: password }
+      responses:
+        '200':
+          description: 발급 성공
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenPair' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /auth/refresh:
+    post:
+      tags: [auth]
+      operationId: refresh
+      summary: 리프레시 회전
+      description: >
+        새 토큰 쌍 발급 + 구 리프레시 즉시 무효화.
+        재사용 감지 시 401과 함께 해당 유저의 전 토큰 무효화.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refreshToken]
+              properties:
+                refreshToken: { type: string }
+      responses:
+        '200':
+          description: 새 토큰 쌍
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenPair' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /auth/logout:
+    post:
+      tags: [auth]
+      operationId: logout
+      summary: 로그아웃 (리프레시 무효화)
+      responses:
+        '204': { description: 무효화 완료 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /users/me:
+    get:
+      tags: [auth]
+      operationId: getMe
+      summary: 내 프로필
+      responses:
+        '200':
+          description: 내 프로필
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [userId, email, nickname, createdAt]
+                properties:
+                  userId: { type: integer, format: int64, example: 123 }
+                  email: { type: string, format: email, example: a@b.c }
+                  nickname: { type: string, example: 민균 }
+                  createdAt: { $ref: '#/components/schemas/EpochMs' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /stocks/search:
+    get:
+      tags: [search]
+      operationId: searchStocks
+      summary: 종목명/코드 검색·자동완성
+      description: >
+        코드 prefix OR 이름 부분일치. 정렬은 prefix 일치 우선 → 시총 내림차순.
+        원천은 batch 워커의 `stock_master`(`is_active=true`만).
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema: { type: string, minLength: 1 }
+          example: 삼성전
+        - name: limit
+          in: query
+          schema: { type: integer, default: 10, minimum: 1, maximum: 30 }
+      responses:
+        '200':
+          description: 검색 결과
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/StockSummary' }
+        '400': { $ref: '#/components/responses/ValidationFailed' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /watchlist:
+    get:
+      tags: [subscription]
+      operationId: getWatchlist
+      summary: 내 방(관심 종목) 목록
+      parameters:
+        - name: include
+          in: query
+          description: 쉼표 구분. `price`=Redis 스냅샷, `unread`=미읽음 수. 미지정 시 해당 필드 생략.
+          schema:
+            type: string
+            example: price,unread
+      responses:
+        '200':
+          description: 관심 종목 목록 (구독 시각 내림차순)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/WatchlistItem' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /watchlist/{code}:
+    put:
+      tags: [subscription]
+      operationId: subscribeStock
+      summary: 구독 (멱등)
+      description: 커밋 후 `watchlist:updated` PUBLISH. 한도 100개.
+      parameters:
+        - $ref: '#/components/parameters/StockCode'
+      responses:
+        '200': { description: 이미 구독 중 (변화 없음) }
+        '201': { description: 신규 구독 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422':
+          description: 관심목록 한도(100개) 초과 (`LIMIT_EXCEEDED`)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+    delete:
+      tags: [subscription]
+      operationId: unsubscribeStock
+      summary: 구독 해지 (멱등)
+      description: 커밋 후 `watchlist:updated` PUBLISH.
+      parameters:
+        - $ref: '#/components/parameters/StockCode'
+      responses:
+        '204': { description: 해지 완료 (미구독 상태였어도 204) }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /rooms/{code}/stream:
+    get:
+      tags: [stream]
+      operationId: getRoomStream
+      summary: 방 통합 스트림 조회·복구
+      description: >
+        재접속 복구는 마지막 수신 `eventId`로 `direction=after` 호출 —
+        놓친 이벤트를 오름차순으로 재생하고 `hasMoreAfter=true`면 반복 호출.
+        클라는 `eventId` 기준 중복 제거(WS 수신분과 겹칠 수 있음 — 정상).
+      parameters:
+        - $ref: '#/components/parameters/StockCode'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Direction'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/EventTypes'
+      responses:
+        '200':
+          description: 스트림 페이지
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StreamPage' }
+        '400': { $ref: '#/components/responses/ValidationFailed' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /rooms/{code}/quote:
+    get:
+      tags: [stream]
+      operationId: getRoomQuote
+      summary: 입장 스냅샷 (시세)
+      description: >
+        Redis `price:{code}` Hash를 그대로 매핑. 미스(비수요 종목·장전) 시
+        최신 일봉 기반 + `delayed=true`. 필드는 WS `quote` data와 동일 —
+        클라가 스냅샷→라이브 덮어쓰기를 동일 모델로 처리.
+      parameters:
+        - $ref: '#/components/parameters/StockCode'
+      responses:
+        '200':
+          description: 시세 스냅샷
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Quote' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /notifications/badge:
+    get:
+      tags: [notification]
+      operationId: getBadge
+      summary: 종목별/전체 미읽음 수
+      description: >
+        관심 종목별 `count(event_id > cursor)` — 종목당 99로 캡. 결과 10초 Redis 캐시.
+      responses:
+        '200':
+          description: 미읽음 배지
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [total, byCode]
+                properties:
+                  total: { type: integer, example: 27 }
+                  byCode:
+                    type: object
+                    additionalProperties: { type: integer }
+                    example: { "005930": 12, "000660": 15 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /notifications:
+    get:
+      tags: [notification]
+      operationId: getNotifications
+      summary: 미읽음 이벤트 통합 목록
+      description: >
+        스트림과 동일 item 형태로 관심 종목 전체를 혼합, `eventId` 내림차순.
+        항목 클릭 시 클라는 `/rooms/{code}` 화면에서 해당 `eventId`로 점프.
+      parameters:
+        - $ref: '#/components/parameters/EventTypes'
+        - $ref: '#/components/parameters/Cursor'
+        - name: limit
+          in: query
+          schema: { type: integer, default: 30, minimum: 1, maximum: 100 }
+      responses:
+        '200':
+          description: 미읽음 이벤트 페이지
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StreamPage' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /rooms/{code}/cursor:
+    put:
+      tags: [notification]
+      operationId: advanceReadCursor
+      summary: 읽음 커서 전진
+      description: >
+        현재 커서보다 작은 값(역행)은 무시. Redis SET + DB `read_cursor` upsert(write-through).
+      parameters:
+        - $ref: '#/components/parameters/StockCode'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [lastEventId]
+              properties:
+                lastEventId: { $ref: '#/components/schemas/Ulid' }
+      responses:
+        '204': { description: 반영 완료 (역행 무시 포함) }
+        '400': { $ref: '#/components/responses/ValidationFailed' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /notifications/read-all:
+    post:
+      tags: [notification]
+      operationId: readAll
+      summary: 모두 읽음
+      description: 관심 종목 각각의 커서를 해당 종목 최신 `eventId`로 전진.
+      responses:
+        '204': { description: 완료 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /rooms/{code}/posts:
+    post:
+      tags: [community]
+      operationId: createPost
+      summary: 글 작성
+      description: >
+        더블라이트(ADR A6) — 한 트랜잭션에서 `post` INSERT + `stream_event`(type=POST,
+        event_id=postId 재사용) INSERT, 커밋 후 `post:{code}` PUBLISH(실패 무시).
+        레이트리밋 5회/분.
+      parameters:
+        - $ref: '#/components/parameters/StockCode'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title, content]
+              properties:
+                title: { type: string, minLength: 1, example: 2분기 실적 감상 }
+                content:
+                  type: string
+                  minLength: 1
+                  maxLength: 2000
+                  example: 본문 ...
+                quotedEventId:
+                  allOf: [{ $ref: '#/components/schemas/Ulid' }]
+                  description: 인용할 같은 방의 실존 StreamEvent ID (검증됨)
+      responses:
+        '201':
+          description: 작성 완료
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [postId, eventId]
+                properties:
+                  postId: { $ref: '#/components/schemas/Ulid' }
+                  eventId: { $ref: '#/components/schemas/Ulid' }
+        '400': { $ref: '#/components/responses/ValidationFailed' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+    get:
+      tags: [community]
+      operationId: getRoomPosts
+      summary: 방 글 목록 (커서)
+      parameters:
+        - $ref: '#/components/parameters/StockCode'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Direction'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: 글 목록 페이지
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, pageInfo]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/PostSummary' }
+                  pageInfo: { $ref: '#/components/schemas/PageInfo' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /posts/{postId}:
+    get:
+      tags: [community]
+      operationId: getPost
+      summary: 글 상세 (+댓글 1페이지)
+      parameters:
+        - $ref: '#/components/parameters/PostId'
+      responses:
+        '200':
+          description: 글 상세
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PostDetail' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [community]
+      operationId: updatePost
+      summary: 글 수정 (작성자)
+      parameters:
+        - $ref: '#/components/parameters/PostId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title: { type: string, minLength: 1 }
+                content: { type: string, minLength: 1, maxLength: 2000 }
+      responses:
+        '200':
+          description: 수정된 글 상세
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PostDetail' }
+        '400': { $ref: '#/components/responses/ValidationFailed' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [community]
+      operationId: deletePost
+      summary: 글 소프트 삭제 (작성자)
+      description: >
+        `deleted_at` 마킹 + 해당 StreamEvent payload에 `deleted:true` 마킹(재발행 없음).
+      parameters:
+        - $ref: '#/components/parameters/PostId'
+      responses:
+        '204': { description: 삭제 완료 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /posts/{postId}/comments:
+    post:
+      tags: [community]
+      operationId: createComment
+      summary: 댓글 작성 (1뎁스)
+      description: 작성 시 `post:{code}`에 `kind=comment` 발행. 레이트리밋 10회/분.
+      parameters:
+        - $ref: '#/components/parameters/PostId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              properties:
+                content: { type: string, minLength: 1 }
+      responses:
+        '201':
+          description: 작성 완료
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Comment' }
+        '400': { $ref: '#/components/responses/ValidationFailed' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /comments/{commentId}:
+    delete:
+      tags: [community]
+      operationId: deleteComment
+      summary: 댓글 소프트 삭제 (작성자)
+      parameters:
+        - name: commentId
+          in: path
+          required: true
+          schema: { $ref: '#/components/schemas/Ulid' }
+      responses:
+        '204': { description: 삭제 완료 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /posts/{postId}/like:
+    put:
+      tags: [community]
+      operationId: likePost
+      summary: 공감 등록 (멱등)
+      description: '`post_like` upsert + `like_count` 원자 증감. 레이트리밋 60회/분.'
+      parameters:
+        - $ref: '#/components/parameters/PostId'
+      responses:
+        '200':
+          description: 등록 완료 (이미 공감 상태여도 200)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LikeState' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+    delete:
+      tags: [community]
+      operationId: unlikePost
+      summary: 공감 해제 (멱등)
+      parameters:
+        - $ref: '#/components/parameters/PostId'
+      responses:
+        '200':
+          description: 해제 완료
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LikeState' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /posts/{postId}/report:
+    post:
+      tags: [community]
+      operationId: reportPost
+      summary: 글 신고
+      description: 상태(접수/처리)는 운영 도구 범위 — API는 접수만.
+      parameters:
+        - $ref: '#/components/parameters/PostId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason:
+                  type: string
+                  enum: [SPAM, ABUSE, MANIPULATION, ETC]
+                detail: { type: string }
+      responses:
+        '201': { description: 신고 접수 }
+        '400': { $ref: '#/components/responses/ValidationFailed' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /stocks/{code}:
+    get:
+      tags: [stockinfo]
+      operationId: getStock
+      summary: 종목 개요
+      parameters:
+        - $ref: '#/components/parameters/StockCode'
+      responses:
+        '200':
+          description: 종목 개요 (`stock_master`)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [code, name, market, updatedAt]
+                properties:
+                  code: { $ref: '#/components/schemas/Code' }
+                  name: { type: string, example: 삼성전자 }
+                  market: { type: string, example: KOSPI }
+                  sector: { type: string, nullable: true, example: 전기전자 }
+                  sharesOutstanding:
+                    type: integer
+                    format: int64
+                    nullable: true
+                    example: 5969782550
+                  listedAt:
+                    type: string
+                    nullable: true
+                    pattern: '^\d{8}$'
+                    example: '19750611'
+                  updatedAt: { $ref: '#/components/schemas/EpochMs' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /stocks/{code}/candles:
+    get:
+      tags: [stockinfo]
+      operationId: getCandles
+      summary: OHLCV 봉 조회
+      description: >
+        저장은 일봉만(수정주가, `daily_candle`). `W`/`M`은 조회 시 일봉 집계
+        (ADR A8 — 주=ISO주, 월=역월; open=첫날 시가, close=마지막 종가,
+        high/low=극값, volume=합). **오름차순 반환**(차트 라이브러리 관행).
+        미적재 과거 구간은 있는 만큼 반환 + `hasMoreBefore:false`.
+      parameters:
+        - $ref: '#/components/parameters/StockCode'
+        - name: period
+          in: query
+          schema: { type: string, enum: [D, W, M], default: D }
+        - name: count
+          in: query
+          schema: { type: integer, default: 100, minimum: 1, maximum: 500 }
+        - name: to
+          in: query
+          description: 이 일자(포함) 이전 count건. 미지정 시 최신부터.
+          schema: { type: string, pattern: '^\d{8}$' }
+          example: '20260707'
+      responses:
+        '200':
+          description: 봉 목록 (오름차순)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [period, items, pageInfo]
+                properties:
+                  period: { type: string, enum: [D, W, M] }
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Candle' }
+                  pageInfo:
+                    type: object
+                    required: [hasMoreBefore]
+                    properties:
+                      hasMoreBefore: { type: boolean }
+        '400': { $ref: '#/components/responses/ValidationFailed' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /stocks/{code}/valuation:
+    get:
+      tags: [stockinfo]
+      operationId: getValuation
+      summary: 밸류에이션 지표 (PER·PBR 등)
+      parameters:
+        - $ref: '#/components/parameters/StockCode'
+      responses:
+        '200':
+          description: 최신 지표 (`valuation_daily` 최근 일자)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [asOf]
+                properties:
+                  per: { type: number, nullable: true, example: 12.3 }
+                  pbr: { type: number, nullable: true, example: 1.1 }
+                  eps: { type: integer, nullable: true, example: 5800 }
+                  bps: { type: integer, nullable: true, example: 65000 }
+                  marketCap:
+                    type: integer
+                    format: int64
+                    nullable: true
+                    description: 단위 억원 (프론트 합의)
+                    example: 4250000
+                  asOf: { $ref: '#/components/schemas/DateYmd' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /stocks/{code}/financials:
+    get:
+      tags: [stockinfo]
+      operationId: getFinancials
+      summary: 재무 요약 (OpenDART)
+      parameters:
+        - $ref: '#/components/parameters/StockCode'
+        - name: years
+          in: query
+          schema: { type: integer, default: 3, minimum: 1, maximum: 10 }
+      responses:
+        '200':
+          description: 연간·분기 재무 요약 (`financial_summary`)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [annual, quarterly]
+                properties:
+                  annual:
+                    type: array
+                    items: { $ref: '#/components/schemas/FinancialPeriod' }
+                  quarterly:
+                    type: array
+                    items: { $ref: '#/components/schemas/FinancialPeriod' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /stocks/{code}/investors:
+    get:
+      tags: [stockinfo]
+      operationId: getInvestorFlows
+      summary: 투자자별 수급 (순매수)
+      parameters:
+        - $ref: '#/components/parameters/StockCode'
+        - name: days
+          in: query
+          schema: { type: integer, default: 20, minimum: 1, maximum: 120 }
+      responses:
+        '200':
+          description: 일자별 순매수 (`investor_flow_daily`, 단위 백만원)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/InvestorFlow' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: '`Authorization: Bearer {accessToken}` — auth-jwt HS256, 액세스 30분'
+
+  parameters:
+    StockCode:
+      name: code
+      in: path
+      required: true
+      description: 6자리 종목 코드 (선행 0 보존)
+      schema: { $ref: '#/components/schemas/Code' }
+    PostId:
+      name: postId
+      in: path
+      required: true
+      schema: { $ref: '#/components/schemas/Ulid' }
+    Cursor:
+      name: cursor
+      in: query
+      description: 기준 eventId/ULID. 미지정 시 최신부터.
+      schema: { $ref: '#/components/schemas/Ulid' }
+    Direction:
+      name: direction
+      in: query
+      description: '`before`=과거로(내림차순), `after`=cursor 이후(오름차순, 재접속 복구용)'
+      schema: { type: string, enum: [before, after], default: before }
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, default: 50, minimum: 1, maximum: 100 }
+    EventTypes:
+      name: types
+      in: query
+      description: 쉼표 구분 이벤트 타입 필터. 미지정 시 전체.
+      schema:
+        type: string
+        example: news,disclosure,report,ai,post,alert
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      description: 선택(ULID). 10분 내 동일 키 재요청 시 최초 응답 재반환.
+      schema: { $ref: '#/components/schemas/Ulid' }
+
+  responses:
+    ValidationFailed:
+      description: 파라미터/바디 검증 실패 (`VALIDATION_FAILED`)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+          example:
+            error:
+              code: VALIDATION_FAILED
+              message: content는 1~2000자여야 합니다
+              detail: { field: content }
+    Unauthorized:
+      description: 미인증(`UNAUTHORIZED`) 또는 액세스 만료(`TOKEN_EXPIRED` — 클라는 refresh 후 재시도)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Forbidden:
+      description: 타인 리소스 수정 등 (`FORBIDDEN`)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    NotFound:
+      description: 없는 종목/글 (`NOT_FOUND`)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    RateLimited:
+      description: 레이트리밋 초과 (`RATE_LIMITED`)
+      headers:
+        Retry-After:
+          schema: { type: integer }
+          description: 재시도 가능까지 남은 초
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  schemas:
+    Code:
+      type: string
+      pattern: '^\d{6}$'
+      example: '005930'
+      description: 6자리 종목 코드 문자열
+
+    Ulid:
+      type: string
+      pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+      example: 01J9Z8KQ3WMB4X5Y6Z7A8B9C0D
+      description: ULID — 사전순 = 시간순
+
+    EpochMs:
+      type: integer
+      format: int64
+      example: 1719999999999
+      description: epoch milliseconds
+
+    DateYmd:
+      type: string
+      pattern: '^\d{8}$'
+      example: '20260706'
+      description: yyyymmdd
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum:
+                - VALIDATION_FAILED
+                - UNAUTHORIZED
+                - TOKEN_EXPIRED
+                - FORBIDDEN
+                - NOT_FOUND
+                - CONFLICT
+                - DUPLICATE
+                - LIMIT_EXCEEDED
+                - RATE_LIMITED
+                - INTERNAL
+            message: { type: string }
+            detail:
+              type: object
+              additionalProperties: true
+              nullable: true
+
+    TokenPair:
+      type: object
+      required: [accessToken, refreshToken, accessExpiresIn]
+      properties:
+        accessToken: { type: string, example: eyJ... }
+        refreshToken: { type: string, example: eyJ... }
+        accessExpiresIn:
+          type: integer
+          example: 1800
+          description: 액세스 토큰 유효 초
+
+    PageInfo:
+      type: object
+      required: [hasMoreBefore, hasMoreAfter]
+      properties:
+        oldest:
+          allOf: [{ $ref: '#/components/schemas/Ulid' }]
+          nullable: true
+        newest:
+          allOf: [{ $ref: '#/components/schemas/Ulid' }]
+          nullable: true
+        hasMoreBefore: { type: boolean }
+        hasMoreAfter: { type: boolean }
+
+    StockSummary:
+      type: object
+      required: [code, name, market]
+      properties:
+        code: { $ref: '#/components/schemas/Code' }
+        name: { type: string, example: 삼성전자 }
+        market: { type: string, example: KOSPI }
+
+    PriceSnapshot:
+      type: object
+      required: [price, changeRate, ts, delayed]
+      properties:
+        price: { type: integer, example: 71200 }
+        changeRate: { type: number, example: 0.99 }
+        ts: { $ref: '#/components/schemas/EpochMs' }
+        delayed:
+          type: boolean
+          description: Redis 미스로 최신 일봉 종가 대체 시 true
+
+    WatchlistItem:
+      type: object
+      required: [code, name, market, subscribedAt]
+      properties:
+        code: { $ref: '#/components/schemas/Code' }
+        name: { type: string, example: 삼성전자 }
+        market: { type: string, example: KOSPI }
+        subscribedAt: { $ref: '#/components/schemas/EpochMs' }
+        price:
+          allOf: [{ $ref: '#/components/schemas/PriceSnapshot' }]
+          description: '`include=price`일 때만 포함'
+        unreadCount:
+          type: integer
+          description: '`include=unread`일 때만 포함. 종목당 99 캡.'
+          example: 12
+
+    Quote:
+      type: object
+      required: [code, price, prevClose, change, changeRate, open, high, low, volume, ts, delayed]
+      properties:
+        code: { $ref: '#/components/schemas/Code' }
+        price: { type: integer, example: 71200 }
+        prevClose: { type: integer, example: 70500 }
+        change: { type: integer, example: 700 }
+        changeRate: { type: number, example: 0.99 }
+        open: { type: integer, example: 70600 }
+        high: { type: integer, example: 71500 }
+        low: { type: integer, example: 70400 }
+        volume: { type: integer, format: int64, example: 1234567 }
+        ts: { $ref: '#/components/schemas/EpochMs' }
+        delayed: { type: boolean }
+
+    StreamEventType:
+      type: string
+      enum: [NEWS, DISCLOSURE, REPORT, AI_SUMMARY, POST, PRICE_ALERT]
+      description: '`stream_event.type` CHECK 제약과 동일'
+
+    StreamItem:
+      type: object
+      required: [eventId, code, type, occurredAt, source, payload]
+      properties:
+        eventId: { $ref: '#/components/schemas/Ulid' }
+        code: { $ref: '#/components/schemas/Code' }
+        type: { $ref: '#/components/schemas/StreamEventType' }
+        occurredAt: { $ref: '#/components/schemas/EpochMs' }
+        source:
+          type: string
+          description: 발생원 (예 hankyung·dart·user·ai)
+          example: hankyung
+        payload:
+          type: object
+          additionalProperties: true
+          description: >
+            타입별 JSON(기획안 §2.3 매핑). NEWS는 title·summary·sourceUrl,
+            POST는 postId·kind·author·preview·likeCount·commentCount 등.
+            소프트 삭제된 POST는 `deleted:true` 마킹.
+
+    StreamPage:
+      type: object
+      required: [items, pageInfo]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/StreamItem' }
+        pageInfo: { $ref: '#/components/schemas/PageInfo' }
+
+    Author:
+      type: object
+      required: [id, nickname]
+      properties:
+        id: { type: integer, format: int64, example: 123 }
+        nickname: { type: string, example: 민균 }
+
+    PostSummary:
+      type: object
+      required: [postId, code, author, title, preview, likeCount, commentCount, createdAt, deleted]
+      properties:
+        postId: { $ref: '#/components/schemas/Ulid' }
+        code: { $ref: '#/components/schemas/Code' }
+        author: { $ref: '#/components/schemas/Author' }
+        title: { type: string }
+        preview: { type: string, description: 본문 앞부분 발췌 }
+        likeCount: { type: integer, example: 3 }
+        commentCount: { type: integer, example: 1 }
+        createdAt: { $ref: '#/components/schemas/EpochMs' }
+        deleted: { type: boolean }
+
+    QuotedEvent:
+      type: object
+      required: [eventId, type, payload]
+      nullable: true
+      properties:
+        eventId: { $ref: '#/components/schemas/Ulid' }
+        type: { $ref: '#/components/schemas/StreamEventType' }
+        payload:
+          type: object
+          additionalProperties: true
+
+    PostDetail:
+      type: object
+      required: [postId, code, author, title, content, likeCount, likedByMe,
+                 commentCount, comments, createdAt, deleted]
+      properties:
+        postId: { $ref: '#/components/schemas/Ulid' }
+        code: { $ref: '#/components/schemas/Code' }
+        author: { $ref: '#/components/schemas/Author' }
+        title: { type: string }
+        content: { type: string }
+        likeCount: { type: integer }
+        likedByMe: { type: boolean }
+        commentCount: { type: integer }
+        quoted: { $ref: '#/components/schemas/QuotedEvent' }
+        comments:
+          type: object
+          required: [items, pageInfo]
+          properties:
+            items:
+              type: array
+              items: { $ref: '#/components/schemas/Comment' }
+            pageInfo: { $ref: '#/components/schemas/PageInfo' }
+        createdAt: { $ref: '#/components/schemas/EpochMs' }
+        updatedAt:
+          allOf: [{ $ref: '#/components/schemas/EpochMs' }]
+          nullable: true
+        deleted: { type: boolean }
+
+    Comment:
+      type: object
+      required: [commentId, author, content, createdAt]
+      properties:
+        commentId: { $ref: '#/components/schemas/Ulid' }
+        author: { $ref: '#/components/schemas/Author' }
+        content: { type: string }
+        createdAt: { $ref: '#/components/schemas/EpochMs' }
+        deleted: { type: boolean }
+
+    LikeState:
+      type: object
+      required: [likeCount, likedByMe]
+      properties:
+        likeCount: { type: integer, example: 4 }
+        likedByMe: { type: boolean }
+
+    Candle:
+      type: object
+      required: [date, open, high, low, close, volume, value]
+      properties:
+        date: { $ref: '#/components/schemas/DateYmd' }
+        open: { type: integer, example: 70600 }
+        high: { type: integer, example: 71500 }
+        low: { type: integer, example: 70400 }
+        close: { type: integer, example: 71200 }
+        volume: { type: integer, format: int64, example: 12345678 }
+        value: { type: integer, format: int64, example: 876543210000, description: 거래대금(원) }
+
+    FinancialPeriod:
+      type: object
+      required: [period, source, asOf]
+      properties:
+        period:
+          type: string
+          description: 연간 `2025`, 분기 `2026Q1`
+          example: '2025'
+        revenue: { type: integer, format: int64, nullable: true, example: 3020000 }
+        operatingProfit: { type: integer, format: int64, nullable: true, example: 350000 }
+        netIncome: { type: integer, format: int64, nullable: true, example: 280000 }
+        assets: { type: integer, format: int64, nullable: true }
+        liabilities: { type: integer, format: int64, nullable: true }
+        equity: { type: integer, format: int64, nullable: true }
+        source: { type: string, example: DART }
+        asOf: { $ref: '#/components/schemas/DateYmd' }
+
+    InvestorFlow:
+      type: object
+      required: [date, individual, foreign, institution]
+      properties:
+        date: { $ref: '#/components/schemas/DateYmd' }
+        individual:
+          type: integer
+          format: int64
+          example: -12000
+          description: 개인 순매수 (백만원)
+        foreign:
+          type: integer
+          format: int64
+          example: 8000
+          description: 외국인 순매수 (백만원)
+        institution:
+          type: integer
+          format: int64
+          example: 4000
+          description: 기관 순매수 (백만원)
