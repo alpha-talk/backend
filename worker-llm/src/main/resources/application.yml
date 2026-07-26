@@ -9,7 +9,7 @@ spring:
     redis:
       host: ${REDIS_HOST:localhost}
       port: ${REDIS_PORT:6379}
-      timeout: 3s
+      timeout: 10s
   lifecycle:
     timeout-per-shutdown-phase: 20s
 
