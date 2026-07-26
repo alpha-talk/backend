@@ -1,6 +1,5 @@
 -- stream_event: core-api stream 모듈과 공유(core-api 명세 §11). worker-llm은 INSERT/UPDATE만.
--- core-api 소스가 별도 브랜치인 현 상태에서 뉴스 워커 단독 기동을 위해 IF NOT EXISTS로 관리하고,
--- 브랜치 병합 시 Flyway 소유를 core-api와 정합화한다.
+-- 논리적 소유자는 core-api — core-api 착수 시 changelog 상 위치만 정리한다(뉴스 워커 명세 §5).
 CREATE TABLE IF NOT EXISTS stream_event (
     event_id    CHAR(26)    PRIMARY KEY,
     code        CHAR(6)     NOT NULL,

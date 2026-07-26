@@ -160,7 +160,7 @@ KIS 프레임 → 파싱 → 종목별 최신값 버퍼(덮어쓰기)
 - 재무 요약 변환: DART 계정과목 → `revenue/operatingProfit/netIncome/assets/liabilities/equity` 매핑 테이블(연결 우선). 매핑 불가 계정은 raw 보존 없이 스킵+카운트(포트폴리오 범위 단순화).
 ---
 
-## 4. 워커 소유 데이터 스키마 (Flyway 관리)
+## 4. 워커 소유 데이터 스키마 (Liquibase 관리 — `db-migrations` 모듈)
 
 ```
 stock_master(code CHAR(6) PK, name, market, sector_code NULL, shares_outstanding BIGINT,

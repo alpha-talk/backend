@@ -16,6 +16,7 @@ extra["kotlin.version"] = libs.versions.kotlin.get()
 
 dependencies {
     implementation(project(":contracts"))
+    implementation(project(":db-migrations"))
 
     implementation("org.springframework.boot:spring-boot-starter-web")
     implementation("org.springframework.boot:spring-boot-starter-jdbc")
@@ -23,8 +24,6 @@ dependencies {
     implementation("org.springframework.boot:spring-boot-starter-actuator")
     implementation("com.fasterxml.jackson.module:jackson-module-kotlin")
     implementation("org.jetbrains.kotlin:kotlin-reflect")
-    implementation("org.flywaydb:flyway-core")
-    implementation("org.flywaydb:flyway-database-postgresql")
     implementation(libs.jsoup)
     implementation(libs.ulid.creator)
     runtimeOnly("org.postgresql:postgresql")
