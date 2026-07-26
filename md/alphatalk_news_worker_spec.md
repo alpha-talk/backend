@@ -15,7 +15,7 @@
 
 | 워커 | 책임 | 비책임 |
 |---|---|---|
-| **worker-ingest** | 소스 폴링(RSS·네이버 검색 API), 정규화·exact 중복 제거, 종목 후보 매핑, `XADD queue:ingest`, 일일 다이제스트 잡 적재(스케줄러) | LLM 호출, DB 쓰기(읽기는 허용), Pub/Sub 발행 |
+| **worker-ingest** | 소스 폴링(RSS·네이버 검색 API), 정규화·exact 중복 제거, `XADD queue:ingest`, 일일 다이제스트 잡 적재(스케줄러) — 종목 후보는 소스가 아는 것만 전달(텍스트 매칭 없음, §2.4) | LLM 호출, DB 쓰기(읽기는 허용), Pub/Sub 발행 |
 | **worker-llm** | `XREADGROUP g:llm` 소비, 본문 확보, 클러스터 판정, LLM 요약·감성 분류, `stream_event` persist, `PUBLISH stream:{code}`, XACK, 일일 다이제스트 생성 | 수집·폴링, 스케줄(무상태 ×N 유지) |
 
 **핵심 설계 결정** (근거는 각 절):
@@ -38,7 +38,7 @@
 ┌─────────────────────────────┐                    ┌──────────────────────┐
 │ worker-ingest               │                    │ ingest 스케줄러       │
 │  폴링 → 정규화 → seen 체크   │                    │  당일 뉴스 있는 종목별 │
-│  → 종목 후보 매핑(사전)      │                    │  digest 잡 생성       │
+│  → 종목 후보(소스 부여만)    │                    │  digest 잡 생성       │
 └──────────┬──────────────────┘                    └──────────┬───────────┘
            │ XADD (type=news)                                 │ XADD (type=digest)
            ▼                                                  ▼
@@ -64,7 +64,7 @@ persist → publish → ack 순서 불변식(Redis 계약 §2.2)은 모든 분�
 
 | 소스 | 방식 | 종목 매핑 | 비고 |
 |---|---|---|---|
-| 언론사 RSS (경제·사회 섹션) | 주기 폴링(5분), `If-Modified-Since`/ETag 활용 | 사전은 후보 힌트만(§2.4) — 관련성 판정은 LLM | 제목+링크+요약만 제공 — 저작권 안전 |
+| 언론사 RSS (경제·사회 섹션) | 주기 폴링(5분), `If-Modified-Since`/ETag 활용 | 없음 — 관련성·종목 판정은 LLM(§2.4) | 제목+링크+요약만 제공 — 저작권 안전 |
 | 네이버 뉴스 검색 API | 종목명 쿼리, 주기 폴링(10분) | 쿼리 자체가 종목 — 매핑 공짜 | 공식 오픈 API, **25,000건/일** 한도 |
 | OpenDART 공시 *(후속)* | 목록 API 폴링 | 공시 자체에 종목 포함 | `type=disclosure`, 동일 경로 재사용 |
 
@@ -95,12 +95,12 @@ MVP는 **설정 파일의 시드 종목 목록**(worker-price의 41종목과 동
 
 | 단계 | 방법 | 담당 |
 |---|---|---|
-| 1차 | 소스가 종목을 알면 그대로(네이버 쿼리, DART 공시) | ingest |
-| 2차 | `stock_master` 종목명 + 별칭 사전을 제목·발췌에 매칭(Aho-Corasick 또는 단순 contains — 종목 수천 개 수준에서 충분) | ingest |
-| 3차 | LLM 요약 시 관련 종목 확정 — 오탐 제거(예: "삼성" 단독 매칭) 및 후보 외 종목 발견(발견 종목은 `stock_master` 존재 검증 후 채택) | llm |
+| 1차 | 소스가 종목을 알면 그대로(네이버 쿼리, DART 공시) — **텍스트 매칭 없음** | ingest |
+| 2차 | LLM 요약 시 관련 종목 확정 — 후보 오탐 제거 및 후보 외 종목 발견(발견 종목은 `stock_master` 존재 검증 후 채택) | llm |
 
-- 별칭 사전은 `stock_alias(code, alias)` 테이블(§5). 초기엔 정식 종목명 + 수동 등록 별칭("삼전" 등)으로 시작.
-- 1·2차는 **후보 힌트일 뿐 게이트가 아니다** — 후보 0건이어도 **전량 적재**한다(`codes` 공란 허용, Redis 계약 v0.5 §2.1). 관련성 판정은 LLM(3차)이 전담한다: 사회 기사처럼 종목명이 등장하지 않는 뉴스의 간접 영향(정책→수혜 종목)까지 LLM이 판정하며, 후보에 없던 종목은 `stock_master` 존재 검증 후 채택한다(환각 코드 차단). 매크로 키워드 사전(금리·환율·유가 등) 히트는 `macroHint`로 실어 scope 판정 힌트로만 쓴다. LLM이 기사 전체를 `marketRelevant=false`로 판정하면 후보·scope와 무관하게 IRRELEVANT drop(§3.4) — 비용 방어선은 클러스터링(§3.3, 같은 사건 = LLM 1회)이다.
+- **v0.6 결정: 수집 측 텍스트 매칭(종목명 사전·매크로 키워드)을 코드 레벨에서 제거했다.** 종목명 사전은 전 종목 등록·별칭 관리 부담 대비 이득이 없고(판정은 어차피 LLM 전담), 매크로 `macroHint`는 소비 측이 사용한 적이 없다. `stock_alias` 테이블(§5)은 예약으로만 남긴다.
+- 1차는 **후보 힌트일 뿐 게이트가 아니다** — 후보 0건이어도 **전량 적재**한다(`codes` 공란 허용, Redis 계약 v0.6 §2.1). 관련성 판정은 LLM(2차)이 전담한다: 사회 기사처럼 종목명이 등장하지 않는 뉴스의 간접 영향(정책→수혜 종목)까지 LLM이 판정하며, 후보에 없던 종목은 `stock_master` 존재 검증 후 채택한다(환각 코드 차단). LLM이 기사 전체를 `marketRelevant=false`로 판정하면 후보·scope와 무관하게 IRRELEVANT drop(§3.4) — 비용 방어선은 클러스터링(§3.3, 같은 사건 = LLM 1회)이다.
+- 후보가 빈 기사의 클러스터 판정 직렬화는 단일 `lock:cluster:macro` 락으로 수렴한다 — 단일 인스턴스 운용(로컬)에선 무해하나, 운영 ×N 확장 시 병렬성이 필요해지면 이 결정을 재평가한다(§7).
 - `codes` 필드는 큐 스키마(Redis 계약 §2.1) 그대로 콤마 구분 다중.
 
 ### 2.5 큐 적재
@@ -165,7 +165,7 @@ Redis 계약 §2.1 스키마를 그대로 사용한다: `source` · `sourceId` �
 
 - `marketRelevant=false`이면 `scope`·종목·섹터 결과를 보지 않고 클러스터를 `IRRELEVANT`로 마킹해 발행 없이 XACK한다. `MARKET`은 증시 전체에 관련된 기사만 뜻한다.
 - `marketRelevant=true`에서 `scope=STOCK`이면 `sectors` 무시, `SECTOR`/`MARKET` 처리는 §3.6. 프롬프트에 섹터 후보는 §5 `sector` 목록을 제시(자유 서술이 아니라 코드 선택).
-- `relevant=false`인 종목 후보는 제외한다(사전 매칭 오탐 제거). STOCK/SECTOR 판정인데 채택할 종목·섹터가 없으면 방어적으로 `IRRELEVANT` 처리한다.
+- `relevant=false`인 종목 후보는 제외한다(후보 오탐 제거). STOCK/SECTOR 판정인데 채택할 종목·섹터가 없으면 방어적으로 `IRRELEVANT` 처리한다.
 - confidence < 0.6이면 sentiment를 NEUTRAL로 강등 — 애매한 건 호재/악재로 단정하지 않는다.
 - 운영 `anthropic` provider의 기본 모델은 클러스터 요약 **claude-haiku-4-5**(건수 많음·단순), 일일 다이제스트 **claude-sonnet-5**(하루 종목당 1회·종합 판단). `LlmClient` 포트 뒤라 교체 자유.
 - 로컬은 `claude-cli`(기본) 또는 `codex-cli` provider로 로그인된 개인 구독을 사용하며 **단일 worker-llm 인스턴스 운용만 지원**한다. 두 CLI 모두 단발성 비대화형 실행·JSON Schema 강제·세션 비영속·2분 타임아웃이며, API 키 환경변수를 자식 프로세스에서 제거해 구독 인증과 API 과금이 섞이지 않게 한다. Claude는 도구를 전부 끄고 safe mode로 실행하며, Codex는 빈 임시 작업공간과 read-only sandbox에서 실행한다. local 프로파일은 `consumer-batch=1`로 한 번에 PEL에 한 건만 선점하고, 기동 시 CLI timeout이 `claim-idle`보다 짧은지도 검증한다. worker-llm ×N 운용은 운영 `anthropic` provider에만 적용한다.
@@ -200,7 +200,7 @@ stream payload (ws_api_spec §4.3 확장 — ⚠️ §6 증보):
 
 ### 3.6 섹터·매크로 뉴스 — scope 사다리
 
-금리 인상·환율 급변·업종 규제처럼 특정 기업 언급 없이 업종 전반에 작용하는 뉴스는 종목 사전 매칭에 잡히지 않고, 잡더라도 "어느 방에 배달할지"가 별도 문제다. LLM 판정 `scope`(§3.4)에 따라 세 갈래로 처리한다.
+금리 인상·환율 급변·업종 규제처럼 특정 기업 언급 없이 업종 전반에 작용하는 뉴스는 종목 후보가 붙지 않고, "어느 방에 배달할지"가 별도 문제다. LLM 판정 `scope`(§3.4)에 따라 세 갈래로 처리한다.
 
 | scope | 판정 예 | 배달 | 근거 |
 |---|---|---|---|
@@ -290,7 +290,7 @@ news_cluster_stock(
   stream_event_id CHAR(26) NULL,        -- 편입 시 payload 병합 대상
   PK(cluster_id, code)
 )
-stock_alias(code CHAR(6), alias TEXT, PK(code, alias))
+stock_alias(code CHAR(6), alias TEXT, PK(code, alias))   -- 예약: 수집 측 사전 매핑 제거(§2.4 v0.6)로 현재 미적재·미조회
 news_cluster_sector(
   cluster_id FK, sector_code FK,
   sentiment TEXT, confidence NUMERIC(3,2), impact TEXT,   -- HIGH | MEDIUM | LOW
@@ -325,6 +325,7 @@ Liquibase 마이그레이션(`db-migrations` 모듈, `news/` changelog — Flywa
 | redis_contract **v0.4** §2.1·§2.3 | `type="digest"` + digest 엔트리 규약(`sourceId=digest:{code}:{date}`) | ✅ 반영 |
 | redis_contract v0.4 §2.1 | `macroHint` 필드(선택) + `codes` 공란 허용 | ✅ 반영 |
 | redis_contract **v0.5** §2.1 | `codes` 공란 전면 허용(`macroHint` 불요) — 수집 게이트 제거, 전량 LLM 판정 전환 | ✅ 반영 |
+| redis_contract **v0.6** §2.1 | 수집 측 텍스트 매칭 코드 제거 — `codes`=소스 부여 후보만, `macroHint` 예약 필드화(미적재) | ✅ 반영 |
 | redis_contract v0.4 §2·§4 | `queue:ingest:dlq` — poison 격리(delivery count > 5) | ✅ 반영 |
 | redis_contract v0.4 §3·§4 | `lock:cluster:{code}` — 클러스터 판정 직렬화 락(TTL 3s) | ✅ 반영 |
 | redis_contract v0.4 §3·§4 | `rate:article-fetch:{host}` — llm-worker 인스턴스 간 원문 요청 간격 | ✅ 반영 |
@@ -341,7 +342,6 @@ Liquibase 마이그레이션(`db-migrations` 모듈, `news/` changelog — Flywa
 worker-ingest/
 ├─ scheduler/   IngestPoller(소스 폴링 오케스트레이션) · DigestTrigger(§4.1)
 ├─ source/      NewsSource(포트) · RssNewsSource · NaverSearchNewsSource
-├─ mapping/     StockCodeMapper(포트) · DictionaryStockCodeMapper(stock_master+stock_alias)
 ├─ dedup/       SeenMarker(포트) · RedisSeenMarker
 └─ queue/       IngestQueue(포트) · RedisIngestQueue(XADD)
 
@@ -381,12 +381,12 @@ SPRING_PROFILES_ACTIVE=local LLM_PROVIDER=fake ./gradlew :worker-llm:bootRun
 | 단계 | 범위 | DoD |
 |---|---|---|
 | **N0** | 두 모듈 스캐폴딩 · settings.gradle 등록 · :contracts 상수(§6 잔여분) | `./gradlew :worker-ingest:test :worker-llm:test` 통과 |
-| **N1** | ingest: RSS 1소스 → 정규화·seen·사전 매핑 → XADD | 동일 기사 재수집 시 큐 적재 0건(Testcontainers Redis) |
+| **N1** | ingest: RSS 1소스 → 정규화·seen → XADD *(사전 매핑은 구현 후 v0.6에서 제거)* | 동일 기사 재수집 시 큐 적재 0건(Testcontainers Redis) |
 | **N2** | llm: 소비 → 요약·감성 → persist→publish→ack (클러스터링 없이 1기사=1이벤트) | **FR-11**: 동일 sourceId 중복 요약 0건 · XADD→`GET /rooms/{code}/stream` 노출 E2E |
 | **N3** | 클러스터링(pgvector·락·편입 병합) + 네이버 검색 API 소스 | 동일 사건 3개 언론사 기사 → stream_event 1건 · `sources` 3건 · 편입 재발행 0건 |
 | **N4** | 일일 다이제스트 | `digest:{code}:{date}` 멱등 — 잡 2회 적재에도 브리핑 1건 · 호재/악재 리스트 노출 |
 | **N5** | 운영: DLQ·XPENDING/XCLAIM·메트릭·알람 | poison 5회 초과 → DLQ 격리 · PEL 알람 동작 |
-| **N6** | 섹터·매크로(§3.6): 매크로 키워드 사전 · scope 판정 · 섹터 fan-out · 다이제스트 sectorIssues/marketIssues — **선행: `stock_master.sector_code` 적재(worker-batch)** | 금리 인상 기사 1건 → 은행 섹터 커버 종목 각 방에 `scope=SECTOR` 이벤트 1건씩 · MARKET 기사는 방 이벤트 0건 + 다이제스트 반영 |
+| **N6** | 섹터·매크로(§3.6): scope 판정 · 섹터 fan-out · 다이제스트 sectorIssues/marketIssues — **선행: `stock_master.sector_code` 적재(worker-batch)** | 금리 인상 기사 1건 → 은행 섹터 커버 종목 각 방에 `scope=SECTOR` 이벤트 1건씩 · MARKET 기사는 방 이벤트 0건 + 다이제스트 반영 |
 
 각 단계 = PR 1개(git_convention: scope=worker-ingest/worker-llm). `ClusterAssigner` 판정 로직은 refcount 규칙과 동급 — 단위 테스트 없는 변경 금지.
 
@@ -401,5 +401,5 @@ SPRING_PROFILES_ACTIVE=local LLM_PROVIDER=fake ./gradlew :worker-llm:bootRun
 | 5 | RSS 이용조건 확정 | 현재 9개 언론사의 공식 RSS를 사용한다. 상업 출시 전 언론사별 이용조건·제휴 필요 여부를 최종 확인 |
 | 6 | 편입 시 클라 갱신 | 현재 재발행 없음(접속 중 클라는 `sources` 갱신을 못 봄). 필요해지면 갱신 전용 경량 이벤트 검토 — MVP 아님 |
 | 7 | 섹터 분류 체계 | 기본: KIS 마스터 파일 업종 필드(`stock_master_sync`가 이미 파싱하는 소스). 세분화가 부족하면 KRX 업종분류/GICS 검토 — 판단 기준은 LLM 섹터 후보 목록의 품질 |
-| 8 | SECTOR fan-out 파라미터 | 상한 100종목·impact LOW 제외로 시작, 실데이터로 튜닝. 매크로 키워드 사전 목록 확정 |
+| 8 | SECTOR fan-out 파라미터 | 상한 100종목·impact LOW 제외로 시작, 실데이터로 튜닝 |
 | 9 | MARKET 뉴스 실시간 노출면 | MVP는 다이제스트만. 홈 피드/시장 브리핑 방(종목 방 밖 노출면)은 별도 기획 필요 — P3 |

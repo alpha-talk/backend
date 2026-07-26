@@ -4,7 +4,6 @@ import com.alphatalk.contracts.Queues
 import com.alphatalk.contracts.queue.IngestQueueEntry
 import com.alphatalk.worker.ingest.config.IngestProperties
 import com.alphatalk.worker.ingest.dedup.RedisSeenMarker
-import com.alphatalk.worker.ingest.mapping.DictionaryStockCodeMapper
 import com.alphatalk.worker.ingest.queue.RedisIngestQueue
 import com.alphatalk.worker.ingest.scheduler.IngestPoller
 import com.alphatalk.worker.ingest.source.FetchedArticle
@@ -41,10 +40,6 @@ class IngestPipelineIntegrationTest {
         }
     }
 
-    private val mapper = DictionaryStockCodeMapper(
-        stocks = mapOf("005930" to listOf("삼성전자")),
-        macroKeywords = listOf("금리"),
-    )
     private val props = IngestProperties(
         seenTtl = Duration.ofDays(7),
         queueMaxLen = 100,
@@ -93,7 +88,6 @@ class IngestPipelineIntegrationTest {
         }
         val poller = IngestPoller(
             sources = listOf(source),
-            mapper = mapper,
             seen = RedisSeenMarker(template, props),
             queue = RedisIngestQueue(template, props),
             excerptMaxLength = 200,
