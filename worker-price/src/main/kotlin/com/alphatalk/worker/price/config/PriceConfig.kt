@@ -3,15 +3,24 @@ package com.alphatalk.worker.price.config
 import com.alphatalk.kis.auth.KisApprovalClient
 import com.alphatalk.kis.model.KisAccount
 import com.alphatalk.kis.model.KisEnv
-import com.alphatalk.kis.model.KisLimits
+import com.alphatalk.worker.price.calendar.MarketCalendar
 import com.alphatalk.worker.price.conflation.ConflationBuffer
-import com.alphatalk.worker.price.session.FixedSubscriptionRunner
+import com.alphatalk.worker.price.demand.DemandSource
+import com.alphatalk.worker.price.demand.FixedDemandSource
+import com.alphatalk.worker.price.leader.LeaderLock
+import com.alphatalk.worker.price.leader.RedisLeaderLock
+import com.alphatalk.worker.price.session.PriceLifecycle
+import com.alphatalk.worker.price.session.PriceOrchestrator
+import com.alphatalk.worker.price.session.SessionPool
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.fasterxml.jackson.module.kotlin.readValue
 import io.micrometer.core.instrument.MeterRegistry
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
+import org.springframework.data.redis.core.StringRedisTemplate
+import java.lang.management.ManagementFactory
+import java.time.LocalDate
 
 @Configuration
 class PriceConfig {
@@ -20,34 +29,66 @@ class PriceConfig {
 
     @Bean
     @ConditionalOnProperty("alphatalk.price.enabled", havingValue = "true")
-    fun fixedSubscriptionRunner(
+    fun demandSource(props: PriceProperties): DemandSource {
+        check(props.symbols.isNotEmpty()) {
+            "alphatalk.price.enabled=true에는 symbols가 최소 1개 필요하다"
+        }
+        return FixedDemandSource(props.symbols)
+    }
+
+    @Bean
+    @ConditionalOnProperty("alphatalk.price.enabled", havingValue = "true")
+    fun sessionPool(
         props: PriceProperties,
         buffer: ConflationBuffer,
         meters: MeterRegistry,
-    ): FixedSubscriptionRunner {
-        val env = KisEnv.valueOf(props.env.trim().uppercase())
+    ): SessionPool {
+        val env = kisEnv(props)
         val accounts = parseAccounts(props.accountsJson)
         check(accounts.isNotEmpty()) {
             "alphatalk.price.enabled=true에는 KIS_ACCOUNTS 계정이 최소 1개 필요하다"
         }
-        check(props.symbols.isNotEmpty()) {
-            "alphatalk.price.enabled=true에는 symbols가 최소 1개 필요하다"
-        }
-        check(props.symbols.size <= KisLimits.MAX_SYMBOLS_PER_SESSION) {
-            "고정 종목은 세션당 등록 한도 ${KisLimits.MAX_SYMBOLS_PER_SESSION}건을 넘을 수 없다"
-        }
-        val account = accounts.first()
         val approvals = KisApprovalClient(env.restBaseUrl)
-        return FixedSubscriptionRunner(
+        return SessionPool(
+            accounts = accounts,
             wsUrl = env.wsUrl,
-            symbols = props.symbols,
-            approvalKey = { approvals.approvalKey(account) },
+            approvalKeys = { approvals.approvalKey(it) },
             buffer = buffer,
             meters = meters,
+            removalGraceMillis = props.removalGraceMs,
         )
     }
 
-    private fun parseAccounts(accountsJson: String): List<KisAccount> = try {
+    @Bean
+    @ConditionalOnProperty("alphatalk.price.enabled", havingValue = "true")
+    fun marketCalendar(props: PriceProperties): MarketCalendar = MarketCalendar(
+        holidays = props.holidays.map(LocalDate::parse).toSet(),
+        enforced = props.marketHoursEnforced,
+    )
+
+    @Bean
+    @ConditionalOnProperty("alphatalk.price.enabled", havingValue = "true")
+    fun leaderLock(redis: StringRedisTemplate): LeaderLock =
+        RedisLeaderLock(redis, instanceId = ManagementFactory.getRuntimeMXBean().name)
+
+    @Bean
+    @ConditionalOnProperty("alphatalk.price.enabled", havingValue = "true")
+    fun priceOrchestrator(
+        demand: DemandSource,
+        pool: SessionPool,
+        calendar: MarketCalendar,
+        leader: LeaderLock,
+        meters: MeterRegistry,
+    ): PriceOrchestrator = PriceOrchestrator(demand, pool, calendar, leader, meters)
+
+    @Bean
+    @ConditionalOnProperty("alphatalk.price.enabled", havingValue = "true")
+    fun priceLifecycle(orchestrator: PriceOrchestrator, props: PriceProperties): PriceLifecycle =
+        PriceLifecycle(orchestrator, props.maintainIntervalMs)
+
+    internal fun kisEnv(props: PriceProperties): KisEnv = KisEnv.valueOf(props.env.trim().uppercase())
+
+    internal fun parseAccounts(accountsJson: String): List<KisAccount> = try {
         jacksonObjectMapper().readValue(accountsJson)
     } catch (e: Exception) {
         throw IllegalStateException(
