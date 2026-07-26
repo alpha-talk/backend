@@ -21,6 +21,7 @@
 | [md/alphatalk_core_api_spec.md](md/alphatalk_core_api_spec.md) | 클라 ↔ 메인서버 REST 계약 (v0.1 + §12 구현 노트) — core-api 구현 기준 |
 | [md/alphatalk_kis_worker_spec.md](md/alphatalk_kis_worker_spec.md) | KIS/OpenDART 수집 워커 명세 — 워커 적재 테이블 스키마(§4)의 원천 |
 | [md/alphatalk_news_worker_spec.md](md/alphatalk_news_worker_spec.md) | 뉴스 파이프라인 명세 — worker-ingest·worker-llm (수집·클러스터링·일일 호재/악재 브리핑) |
+| [md/local_embedding_setup.md](md/local_embedding_setup.md) | 로컬 무료 임베딩 실행 가이드 — Ollama+BGE-M3 설정·검증·문제 해결 |
 | [md/기획안.md](md/기획안.md) | 전체 서비스 요구사항·아키텍처 (4개 처리 평면) |
 
 문서와 코드가 어긋나면: 코드를 문서에 맞추거나, 문서를 먼저 고치고 나서 코드를 바꾼다. 조용히 어긋난 채 두지 않는다.
@@ -94,4 +95,4 @@ backend/
 - 버전: Spring Boot 3.5.16 · Kotlin 2.2.21 · JDK 21(toolchain 자동 다운로드) · jjwt 0.12.7.
 - 남은 단계: **S6**(graceful shutdown 시나리오 검증, quote 샘플러 여부 판단) · **S7**(41종목×500세션 부하 스모크). 계획서 §5 참조.
 - 미해결 합의 안건은 [md/ws_module_plan.md](md/ws_module_plan.md) §7 (RS256 전환 여부, 관심목록 조회 경로 등). 해당 코드는 포트로 격리된 구현(`:auth-jwt`의 `JwtTokenProvider` HS256, `RedisWatchlistResolver`)을 쓴다.
-- **뉴스 파이프라인 N0~N6 구현 완료**: `:worker-ingest`(RSS·네이버 검색 수집→정규화→매핑→XADD + 다이제스트 트리거, 테스트 35개) + `:worker-llm`(소비→클러스터링(pgvector)→LLM 요약·감성→scope 사다리 fan-out→persist·publish·ack + 일일 브리핑·DLQ, 테스트 71개). 운영 LLM·임베딩은 미구성 시 fail-closed한다. 로컬 LLM은 Claude CLI 구독이 기본이고 Codex CLI 구독을 선택할 수 있으며, fake LLM은 `provider=fake` 명시 opt-in이다(테스트는 fake 사용). 상세·잔여 설정은 [md/alphatalk_news_worker_spec.md](md/alphatalk_news_worker_spec.md) §9.
+- **뉴스 파이프라인 N0~N6 구현 완료**: `:worker-ingest`(RSS·네이버 검색 수집→정규화→매핑→XADD + 다이제스트 트리거, 테스트 35개) + `:worker-llm`(소비→클러스터링(pgvector)→LLM 요약·감성→scope 사다리 fan-out→persist·publish·ack + 일일 브리핑·DLQ, 테스트 72개). 운영 LLM·임베딩은 미구성 시 fail-closed한다. 로컬 LLM은 Claude CLI 구독이 기본이고 Codex CLI 구독을 선택할 수 있으며, fake LLM은 `provider=fake` 명시 opt-in이다(테스트는 fake 사용). 상세·잔여 설정은 [md/alphatalk_news_worker_spec.md](md/alphatalk_news_worker_spec.md) §9.
