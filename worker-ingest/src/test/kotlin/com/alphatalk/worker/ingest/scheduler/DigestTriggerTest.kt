@@ -20,8 +20,8 @@ class DigestTriggerTest {
     }
     private val props = IngestProperties(
         stocks = listOf(
-            IngestProperties.Stock("005930", listOf("삼성전자")),
-            IngestProperties.Stock("000660", listOf("SK하이닉스")),
+            IngestProperties.Stock("005930", "삼성전자"),
+            IngestProperties.Stock("000660", "SK하이닉스"),
         ),
     )
     private val trigger = DigestTrigger(

@@ -10,7 +10,6 @@ data class IngestProperties(
     val excerptMaxLength: Int = 200,
     val fetchConcurrency: Int = 4,
     val feeds: List<Feed> = emptyList(),
-    val macroKeywords: List<String> = emptyList(),
     val stocks: List<Stock> = emptyList(),
     val naver: Naver = Naver(),
     val digest: Digest = Digest(),
@@ -21,7 +20,7 @@ data class IngestProperties(
         val url: String,
     )
 
-    data class Stock(val code: String, val names: List<String>)
+    data class Stock(val code: String, val name: String)
 
     data class Naver(
         val clientId: String = "",
