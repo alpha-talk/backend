@@ -1,14 +1,22 @@
 package com.alphatalk.worker.price.config
 
 import com.alphatalk.kis.auth.KisApprovalClient
+import com.alphatalk.kis.auth.KisTokenManager
+import com.alphatalk.kis.auth.KisTokenStore
 import com.alphatalk.kis.model.KisAccount
 import com.alphatalk.kis.model.KisEnv
+import com.alphatalk.kis.rate.KisRateLimiters
+import com.alphatalk.kis.rest.KisRestClient
 import com.alphatalk.worker.price.calendar.MarketCalendar
 import com.alphatalk.worker.price.conflation.ConflationBuffer
 import com.alphatalk.worker.price.demand.DemandSource
 import com.alphatalk.worker.price.demand.FixedDemandSource
 import com.alphatalk.worker.price.leader.LeaderLock
 import com.alphatalk.worker.price.leader.RedisLeaderLock
+import com.alphatalk.worker.price.poll.QuoteSnapshotFetcher
+import com.alphatalk.worker.price.poll.RestPollingScheduler
+import com.alphatalk.worker.price.poll.WarmupPoller
+import com.alphatalk.worker.price.publish.QuotePublisher
 import com.alphatalk.worker.price.session.PriceLifecycle
 import com.alphatalk.worker.price.session.PriceOrchestrator
 import com.alphatalk.worker.price.session.SessionPool
@@ -85,6 +93,46 @@ class PriceConfig {
     @ConditionalOnProperty("alphatalk.price.enabled", havingValue = "true")
     fun priceLifecycle(orchestrator: PriceOrchestrator, props: PriceProperties): PriceLifecycle =
         PriceLifecycle(orchestrator, props.maintainIntervalMs)
+
+    @Bean
+    @ConditionalOnProperty("alphatalk.price.enabled", havingValue = "true")
+    fun kisTokenManager(props: PriceProperties, store: KisTokenStore): KisTokenManager =
+        KisTokenManager(kisEnv(props).restBaseUrl, store)
+
+    @Bean
+    @ConditionalOnProperty("alphatalk.price.enabled", havingValue = "true")
+    fun quoteSnapshotFetcher(props: PriceProperties, tokens: KisTokenManager): QuoteSnapshotFetcher {
+        val env = kisEnv(props)
+        val accounts = parseAccounts(props.accountsJson)
+        check(accounts.isNotEmpty()) {
+            "alphatalk.price.enabled=true에는 KIS_ACCOUNTS 계정이 최소 1개 필요하다"
+        }
+        val account = accounts.first()
+        val rest = KisRestClient(
+            env.restBaseUrl,
+            tokens,
+            KisRateLimiters(env.restCallsPerSecond, props.rateFactor * props.pollBudgetFactor),
+        )
+        return QuoteSnapshotFetcher { code -> rest.quoteSnapshot(account, code) }
+    }
+
+    @Bean
+    @ConditionalOnProperty("alphatalk.price.enabled", havingValue = "true")
+    fun restPollingScheduler(
+        pool: SessionPool,
+        fetcher: QuoteSnapshotFetcher,
+        publisher: QuotePublisher,
+        calendar: MarketCalendar,
+        meters: MeterRegistry,
+    ): RestPollingScheduler = RestPollingScheduler(pool::degradedSymbols, fetcher, publisher, calendar, meters)
+
+    @Bean
+    @ConditionalOnProperty("alphatalk.price.enabled", havingValue = "true")
+    fun warmupPoller(
+        demand: DemandSource,
+        poller: RestPollingScheduler,
+        calendar: MarketCalendar,
+    ): WarmupPoller = WarmupPoller(demand, poller, calendar)
 
     internal fun kisEnv(props: PriceProperties): KisEnv = KisEnv.valueOf(props.env.trim().uppercase())
 
