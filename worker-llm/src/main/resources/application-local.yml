@@ -3,6 +3,18 @@ alphatalk:
     provider: ${LLM_PROVIDER:claude-cli}
     consumer-batch: 1
     allow-fake: true
+    sector:
+      coverage-stocks:
+        - "005930"
+        - "000660"
+        - "373220"
+        - "005380"
+        - "000270"
+        - "035420"
+        - "035720"
+        - "051910"
+        - "005490"
+        - "105560"
     embedding:
       provider: ${EMBEDDING_PROVIDER:rest}
       base-url: ${EMBEDDING_BASE_URL:http://localhost:11434}
