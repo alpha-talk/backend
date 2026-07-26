@@ -2,3 +2,34 @@ alphatalk:
   ingest:
     poll-delay: 5m
     poll-initial-delay: 5s
+    feeds:
+      - id: yna-economy
+        source: yna
+        url: https://www.yna.co.kr/rss/economy.xml
+      - id: hankyung-economy
+        source: hankyung
+        url: https://www.hankyung.com/feed/economy
+      - id: mk-stock
+        source: mk
+        url: https://www.mk.co.kr/rss/50200011/
+    stocks:
+      - code: "005930"
+        names: [삼성전자, 삼전]
+      - code: "000660"
+        names: [SK하이닉스, 하이닉스]
+      - code: "373220"
+        names: [LG에너지솔루션, LG엔솔]
+      - code: "005380"
+        names: [현대차, 현대자동차]
+      - code: "000270"
+        names: [기아]
+      - code: "035420"
+        names: [NAVER, 네이버]
+      - code: "035720"
+        names: [카카오]
+      - code: "051910"
+        names: [LG화학]
+      - code: "005490"
+        names: [POSCO홀딩스, 포스코]
+      - code: "105560"
+        names: [KB금융, KB국민은행]
