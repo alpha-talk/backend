@@ -10,4 +10,4 @@ dependencyResolutionManagement {
     }
 }
 
-include("contracts", "auth-jwt", "db-migrations", "ws", "worker-ingest", "worker-llm")
+include("contracts", "auth-jwt", "db-migrations", "kis-client", "ws", "worker-price", "worker-ingest", "worker-llm")
