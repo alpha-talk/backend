@@ -1,0 +1,50 @@
+databaseChangeLog:
+  - changeSet:
+      id: 0001-news-pipeline
+      author: worker-llm
+      changes:
+        - sqlFile:
+            path: sql/0001_news_pipeline.sql
+            relativeToChangelogFile: true
+  - changeSet:
+      id: 0002-stream-event
+      author: worker-llm
+      changes:
+        - sqlFile:
+            path: sql/0002_stream_event.sql
+            relativeToChangelogFile: true
+  - changeSet:
+      id: 0003-digest-unique
+      author: worker-llm
+      changes:
+        - sqlFile:
+            path: sql/0003_digest_unique.sql
+            relativeToChangelogFile: true
+  - changeSet:
+      id: 0004-cluster-summarize-lease
+      author: worker-llm
+      changes:
+        - sqlFile:
+            path: sql/0004_cluster_summarize_lease.sql
+            relativeToChangelogFile: true
+  - changeSet:
+      id: 0005-stock-verdict-rejection
+      author: worker-llm
+      changes:
+        - sqlFile:
+            path: sql/0005_stock_verdict_rejection.sql
+            relativeToChangelogFile: true
+  - changeSet:
+      id: 0006-cluster-category
+      author: worker-llm
+      changes:
+        - sqlFile:
+            path: sql/0006_cluster_category.sql
+            relativeToChangelogFile: true
+  - changeSet:
+      id: 0007-article-candidate-boundary
+      author: worker-llm
+      changes:
+        - sqlFile:
+            path: sql/0007_article_candidate_boundary.sql
+            relativeToChangelogFile: true

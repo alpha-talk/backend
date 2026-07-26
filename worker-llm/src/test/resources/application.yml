@@ -1,6 +1,6 @@
 spring:
-  flyway:
-    locations: classpath:db/migration, classpath:db/testdeps
+  liquibase:
+    change-log: classpath:db/changelog/db.changelog-test.yaml
 
 alphatalk:
   llm:
