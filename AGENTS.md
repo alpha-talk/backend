@@ -85,6 +85,7 @@ backend/
 
 - **코딩 컨벤션**: [md/coding_convention.md](md/coding_convention.md). 핵심 — **코드에 주석을 달지 않는다**(self-documenting code). 설계 근거·불변식·포트 계약은 코드가 아니라 `md/` 설계 문서가 소유하고, 코드에서는 테스트로 고정한다.
 - **브랜치·커밋·PR 규칙**: [md/git_convention.md](md/git_convention.md). 핵심 — 브랜치 `type/scope/desc`, 커밋 `type(scope): 제목`, **scope=모듈명**(ws·contracts·auth-jwt·core-api·worker-*). main 직접 커밋 금지.
+- **AI 공동 저자 서명 금지**: 커밋 메시지·PR 본문에 `Co-Authored-By` 등 공동 저자(co-author) 트레일러를 **절대 넣지 않는다** — AI 도구(Claude·Codex 등) 서명 포함.
 - 커밋·PR은 계획서의 단계(S0~S7) 단위. PR 본문에 해당 단계와 DoD 충족 여부를 적는다.
 - 테스트 없는 refcount/인덱스 변경 금지 — `DemandRegistry` 전이 로직은 반드시 단위 테스트 동반.
 - 로그는 구조화(JSON) 지향, `sessionId`/`userId` 태깅. 뜨거운 경로(틱 relay)에 debug 이상 로그 금지.
