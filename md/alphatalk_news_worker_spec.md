@@ -135,7 +135,7 @@ Redis 계약 §2.1 스키마를 그대로 사용한다: `source` · `sourceId` �
 | 항목 | 값 | 근거 |
 |---|---|---|
 | 비교 대상 | 종목 교집합이 있는 최근 **72시간** 클러스터. `codes`가 빈 기사는 SECTOR·MARKET, 아직 종목 후보가 없는 미완료 클러스터, 또는 후보 없이 들어온 기사를 이미 포함한 클러스터끼리 비교 | LLM이 뒤늦게 종목을 발견해 STOCK이 된 클러스터에도 같은 빈 후보 기사가 재합류하게 하면서 다른 종목 기사와의 오합류를 제한 |
-| 검색 | pgvector `embedding <=> :v` 최근접 5건 조회 | PG가 이미 있고 Flyway 단일 관리 원칙에 부합 — 별도 벡터 스토어 불요 |
+| 검색 | pgvector `embedding <=> :v` 최근접 5건 조회 | PG가 이미 있고 마이그레이션 단일 관리 원칙(`db-migrations`)에 부합 — 별도 벡터 스토어 불요 |
 | 판정 | 코사인 유사도 ≥ **0.85** → 최고 유사 클러스터에 편입, 미만 → 신규 클러스터 | 임계값은 실데이터로 튜닝(§10) |
 | 지름길 | 정규화 제목 해시(언론사명·[속보]·특수문자 제거)가 기존 기사와 일치하면 임베딩 생략하고 그 클러스터에 편입 | 통신사 전재 기사(제목 거의 동일)가 다수 — 임베딩 호출 절약 |
 | 동시성 | 판정~INSERT 구간을 `lock:cluster:{primaryCode}` 분산락(SET NX PX 3000, Lua compare-and-delete 해제)으로 직렬화. **임베딩·LLM 호출은 락 밖**. 요약은 `summarizing_token`·`summarizing_at` CAS lease로 한 워커만 소유한다. LLM 응답 뒤 lease 갱신 UPDATE로 클러스터 행을 잠그고 링크·이벤트·최종 상태를 한 DB 트랜잭션에 저장하므로, 만료 재선점 뒤 이전 토큰의 부분 결과도 남지 않는다. `news_cluster_stock.stream_event_id` 원자 클레임도 이벤트 중복을 막는다 | llm-worker ×N이 동일 사건 기사를 동시 처리하면 클러스터·요약·이벤트가 중복 생성됨 |
@@ -260,7 +260,7 @@ stream payload (ws_api_spec §4.3 확장 — ⚠️ §6 증보):
 
 ---
 
-## 5. DB 스키마 (Flyway 신규 마이그레이션, 워커 소유 — core-api는 읽기 전용)
+## 5. DB 스키마 (Liquibase 마이그레이션 — `db-migrations` 모듈 소유, core-api는 읽기 전용)
 
 ```sql
 CREATE EXTENSION IF NOT EXISTS vector;
@@ -302,12 +302,15 @@ news_cluster_sector(
 -- INDEX news_cluster (last_article_at) — 72h 창 후보 조회
 ```
 
-Flyway 마이그레이션(worker-llm 소유): `V1`(news_* + stock_alias) · `V2`(stream_event) · `V3`(다이제스트 부분 유니크 인덱스) · `V4`(news_cluster 요약 lease·fencing token) · `V5`(종목 verdict 기각 상태와 기존 완료 행 백필) · `V6`(클러스터 category와 허용값 제약) · `V7`(기사 수집 시 빈 후보 경계).
+Liquibase 마이그레이션(`db-migrations` 모듈, `news/` changelog — Flyway V1~V7에서 이관): `0001`(news_* + stock_alias) · `0002`(stream_event) · `0003`(다이제스트 부분 유니크 인덱스) · `0004`(news_cluster 요약 lease·fencing token) · `0005`(종목 verdict 기각 상태와 기존 완료 행 백필) · `0006`(클러스터 category와 허용값 제약) · `0007`(기사 수집 시 빈 후보 경계). worker-llm은 `db-migrations` 의존만으로 기동 시 changelog를 적용한다.
 
-**⚠️ `stream_event` 소유 경계** — `stream_event`의 **논리적 소유자는 core-api의 stream 모듈**(core-api 명세 §11, `StreamEventAppender` 경유 INSERT). worker-llm은 이 테이블에 **INSERT/UPDATE하는 별도 프로세스**다(기획안 §3.1: "worker-llm은 별도 프로세스로 같은 테이블에 INSERT"). 현재 저장소는 core-api가 별도 브랜치라 worker-llm의 `V2`가 `CREATE TABLE IF NOT EXISTS`로 **브리징**한다:
-- 통합 배포 시 Flyway는 저장소 단일 관리 — core-api가 `stream_event` DDL을 소유하고, worker-llm의 `V2`는 `IF NOT EXISTS`라 재실행돼도 무해(중복 생성 없음).
-- `V3`(다이제스트 유니크 인덱스)는 뉴스 파이프라인 고유 제약이므로 worker-llm이 소유하되, core-api 브랜치 병합 시 **core-api 마이그레이션 순번으로 이관**한다(병합 체크리스트).
-- 이 브리징은 "코드보다 문서 우선" 원칙의 명시적 예외이며, 병합 전까지 뉴스 워커 단독 기동·테스트를 가능하게 하는 한시적 조치다.
+**Flyway → Liquibase 전환 정책** — 전환은 운영 DB가 생기기 전에 완료했으므로 baseline(`changelog-sync`) 절차를 두지 않는다. `flyway_schema_history`만 있는 기존 로컬 DB는 지원하지 않는다 — `docker compose down -v`로 리셋 후 재기동이 유일한 경로다(Liquibase가 `0001`부터 재실행을 시도해 기동 실패하는 것이 의도된 fail-closed). 리셋 불가한 공유 DB가 전환 전에 생겼다면 그때는 해당 DB에 한해 수동 `changelog-sync`로 이력을 등록한다.
+
+**changeSet 식별자 불변식** — Liquibase 변경셋 식별자는 `filepath::id::author`라 **파일 경로도 식별자의 일부**다. 적용 이력이 생긴 changeSet 파일은 이동·개명하지 않는다(경로 영구 보존). `db-migrations` 안의 디렉토리는 논리적 소유자를 표시할 뿐이며, 소유가 바뀌어도 파일은 제자리에 두고 문서로만 경계를 옮긴다.
+
+**⚠️ `stream_event` 소유 경계** — `stream_event`의 **논리적 소유자는 core-api의 stream 모듈**(core-api 명세 §11, `StreamEventAppender` 경유 INSERT). worker-llm은 이 테이블에 **INSERT/UPDATE하는 별도 프로세스**다(기획안 §3.1: "worker-llm은 별도 프로세스로 같은 테이블에 INSERT"). 마이그레이션 파일은 `db-migrations`가 단일 소유하므로 서버 간 DDL 충돌은 없다:
+- `0002`(stream_event DDL)는 논리적으로 core-api 소유 — 단 changeSet 파일은 위 식별자 불변식에 따라 `news/`에 영구 보존하고, core-api 착수 시 문서·주석으로만 소유 경계를 표시한다.
+- `0003`(다이제스트 유니크 인덱스)은 뉴스 파이프라인 고유 제약이므로 논리적 소유자가 worker-llm이다.
 
 ⚠️ pgvector는 PostgreSQL 확장 — docker-compose 이미지 `pgvector/pgvector:pg16`, Testcontainers도 동일 이미지. `vector(1024)` 차원은 임베딩 제공자 확정 시(§10) 함께 확정.
 
@@ -351,7 +354,7 @@ worker-llm/
 └─ publish/     StreamPublisher(포트) · RedisStreamPublisher
 ```
 
-- 두 워커 모두 `:contracts`에만 의존(서버 → 서버 의존 금지). JWT 불요 — `:auth-jwt` 의존하지 않는다.
+- 서버 → 서버 의존 금지 — worker-ingest는 `:contracts`에만, worker-llm은 `:contracts`·`:db-migrations`에 의존한다. JWT 불요 — `:auth-jwt` 의존하지 않는다.
 - 포트는 도메인 패키지에 구현과 함께 둔다(`port/` 패키지로 몰지 않음). 도메인 클래스는 Lettuce·HTTP 클라이언트·LLM SDK를 직접 import하지 않는다 — `ClusterAssigner`·`ClusterSummarizer` 전이 로직이 인프라 없이 단위 테스트되어야 한다.
 
 ## 8. 설정 · 메트릭

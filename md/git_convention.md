@@ -48,6 +48,7 @@ build/deps/bump-spring-boot
 | `contracts` | `:contracts` |
 | `auth-jwt` | `:auth-jwt` |
 | `kis-client` | `:kis-client` |
+| `db-migrations` | `:db-migrations` |
 | `core-api` | `:core-api` |
 | `ws` | `:ws` |
 | `worker-price` `worker-batch` `worker-ingest` `worker-llm` | 각 워커 |

@@ -7,6 +7,9 @@ jjwt = "0.12.7"
 rome = "2.1.0"
 jsoup = "1.18.3"
 ulid = "5.2.3"
+liquibase = "4.31.1"
+testcontainers = "1.21.4"
+postgresql = "42.7.11"
 
 [libraries]
 jackson-annotations = { module = "com.fasterxml.jackson.core:jackson-annotations", version.ref = "jackson" }
@@ -17,6 +20,9 @@ jjwt-api = { module = "io.jsonwebtoken:jjwt-api", version.ref = "jjwt" }
 rome = { module = "com.rometools:rome", version.ref = "rome" }
 jsoup = { module = "org.jsoup:jsoup", version.ref = "jsoup" }
 ulid-creator = { module = "com.github.f4b6a3:ulid-creator", version.ref = "ulid" }
+liquibase-core = { module = "org.liquibase:liquibase-core", version.ref = "liquibase" }
+testcontainers-postgresql = { module = "org.testcontainers:postgresql", version.ref = "testcontainers" }
+postgresql = { module = "org.postgresql:postgresql", version.ref = "postgresql" }
 jjwt-impl = { module = "io.jsonwebtoken:jjwt-impl", version.ref = "jjwt" }
 jjwt-jackson = { module = "io.jsonwebtoken:jjwt-jackson", version.ref = "jjwt" }
 
