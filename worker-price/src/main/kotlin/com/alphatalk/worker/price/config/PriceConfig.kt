@@ -8,6 +8,9 @@ import com.alphatalk.kis.model.KisEnv
 import com.alphatalk.kis.rate.KisRateLimiters
 import com.alphatalk.kis.rest.KisRestClient
 import com.alphatalk.worker.price.calendar.MarketCalendar
+import com.alphatalk.worker.price.candle.CandleSyncJob
+import com.alphatalk.worker.price.candle.DailyCandleFetcher
+import com.alphatalk.worker.price.candle.DailyCandleStore
 import com.alphatalk.worker.price.conflation.ConflationBuffer
 import com.alphatalk.worker.price.demand.DemandSource
 import com.alphatalk.worker.price.demand.FixedDemandSource
@@ -135,6 +138,45 @@ class PriceConfig {
         calendar: MarketCalendar,
         leader: LeaderLock,
     ): WarmupPoller = WarmupPoller(demand, poller, calendar, leader)
+
+    @Bean
+    @ConditionalOnProperty(
+        name = ["alphatalk.price.enabled", "alphatalk.price.candle-enabled"],
+        havingValue = "true",
+    )
+    fun dailyCandleFetcher(props: PriceProperties, tokens: KisTokenManager): DailyCandleFetcher {
+        val env = kisEnv(props)
+        val accounts = parseAccounts(props.accountsJson)
+        check(accounts.isNotEmpty()) {
+            "alphatalk.price.candle-enabled=true에는 KIS_ACCOUNTS 계정이 최소 1개 필요하다"
+        }
+        val account = accounts.first()
+        val rest = KisRestClient(
+            env.restBaseUrl,
+            tokens,
+            KisRateLimiters(env.restCallsPerSecond, props.rateFactor),
+        )
+        return DailyCandleFetcher { code, from, to -> rest.dailyCandles(account, code, from, to) }
+    }
+
+    @Bean
+    @ConditionalOnProperty(
+        name = ["alphatalk.price.enabled", "alphatalk.price.candle-enabled"],
+        havingValue = "true",
+    )
+    fun candleSyncJob(
+        demand: DemandSource,
+        fetcher: DailyCandleFetcher,
+        store: DailyCandleStore,
+        meters: MeterRegistry,
+        props: PriceProperties,
+    ): CandleSyncJob = CandleSyncJob(
+        symbols = { demand.targetSymbols() },
+        fetcher = fetcher,
+        store = store,
+        backfillDays = props.candleBackfillDays,
+        meters = meters,
+    )
 
     internal fun kisEnv(props: PriceProperties): KisEnv = KisEnv.valueOf(props.env.trim().uppercase())
 
