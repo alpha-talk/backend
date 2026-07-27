@@ -123,8 +123,9 @@ class PriceConfig {
         fetcher: QuoteSnapshotFetcher,
         publisher: QuotePublisher,
         calendar: MarketCalendar,
+        leader: LeaderLock,
         meters: MeterRegistry,
-    ): RestPollingScheduler = RestPollingScheduler(pool::degradedSymbols, fetcher, publisher, calendar, meters)
+    ): RestPollingScheduler = RestPollingScheduler(pool::degradedSymbols, fetcher, publisher, calendar, leader, meters)
 
     @Bean
     @ConditionalOnProperty("alphatalk.price.enabled", havingValue = "true")
@@ -132,7 +133,8 @@ class PriceConfig {
         demand: DemandSource,
         poller: RestPollingScheduler,
         calendar: MarketCalendar,
-    ): WarmupPoller = WarmupPoller(demand, poller, calendar)
+        leader: LeaderLock,
+    ): WarmupPoller = WarmupPoller(demand, poller, calendar, leader)
 
     internal fun kisEnv(props: PriceProperties): KisEnv = KisEnv.valueOf(props.env.trim().uppercase())
 
