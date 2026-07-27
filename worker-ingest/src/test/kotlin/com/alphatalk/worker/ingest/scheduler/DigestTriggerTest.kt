@@ -17,11 +17,6 @@ class DigestTriggerTest {
         override fun enqueue(entry: IngestQueueEntry) {
             entries.add(entry)
         }
-
-        override fun enqueueIfNew(entry: IngestQueueEntry): Boolean {
-            entries.add(entry)
-            return true
-        }
     }
     private val props = IngestProperties(
         stocks = listOf(
