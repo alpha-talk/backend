@@ -1,7 +1,12 @@
 package com.alphatalk.worker.price.candle
 
 import com.alphatalk.kis.rest.KisDailyCandle
-import org.flywaydb.core.Flyway
+import liquibase.Contexts
+import liquibase.LabelExpression
+import liquibase.Liquibase
+import liquibase.database.DatabaseFactory
+import liquibase.database.jvm.JdbcConnection
+import liquibase.resource.ClassLoaderResourceAccessor
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.springframework.jdbc.core.JdbcTemplate
@@ -9,24 +14,32 @@ import org.springframework.jdbc.datasource.DriverManagerDataSource
 import org.testcontainers.containers.PostgreSQLContainer
 import org.testcontainers.junit.jupiter.Container
 import org.testcontainers.junit.jupiter.Testcontainers
+import java.sql.DriverManager
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
 
 @Testcontainers(disabledWithoutDocker = true)
 class JdbcDailyCandleStoreTest {
     companion object {
+        private const val PRICE_CHANGELOG = "db/changelog/price/db.changelog-price.yaml"
+
         @Container
         @JvmStatic
         val postgres = PostgreSQLContainer("postgres:16-alpine")
 
         private val jdbc by lazy {
-            Flyway.configure()
-                .dataSource(postgres.jdbcUrl, postgres.username, postgres.password)
-                .locations("classpath:db/migration/price")
-                .table("flyway_schema_history_price")
-                .load()
-                .migrate()
+            applyPriceChangelog()
             JdbcTemplate(DriverManagerDataSource(postgres.jdbcUrl, postgres.username, postgres.password))
+        }
+
+        @Suppress("DEPRECATION")
+        private fun applyPriceChangelog() {
+            DriverManager.getConnection(postgres.jdbcUrl, postgres.username, postgres.password).use { connection ->
+                val database = DatabaseFactory.getInstance()
+                    .findCorrectDatabaseImplementation(JdbcConnection(connection))
+                Liquibase(PRICE_CHANGELOG, ClassLoaderResourceAccessor(), database)
+                    .update(Contexts(), LabelExpression())
+            }
         }
     }
 
