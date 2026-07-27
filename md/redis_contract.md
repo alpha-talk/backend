@@ -1,7 +1,8 @@
-# Alpha Talk — Redis 계약 (`:contracts`) v0.6
+# Alpha Talk — Redis 계약 (`:contracts`) v0.7
 
-게이트웨이 · 워커(price/ingest/llm) · 메인서버가 공유하는 Redis 키/채널/스트림 규약. 이 문서가 세 서비스 간 단일 진실의 원천이다.
+게이트웨이 · 워커(price/batch/ingest/llm) · 메인서버가 공유하는 Redis 키/채널/스트림 규약. 이 문서가 서비스 간 단일 진실의 원천이다.
 
+> v0.7 (2026-07-27): 증권사 투자의견 직접 발행 반영([KIS 워커 명세](alphatalk_kis_worker_spec.md) §3.3) — **batch-worker를 `stream:{code}` 공동 발행자로 추가**. DB에는 멱등 저장하고 같은 `eventId`로 Pub/Sub 통보를 재시도한다. 실시간 전달은 best-effort이며 REST가 복구를 담당한다. price·batch가 공유하는 KIS 계정의 합산 유량은 `rate:kis-rest:{keyId}`로 제한한다.
 > v0.6 (2026-07-26): 수집 측 텍스트 매칭 완전 제거 — 종목명 사전·매크로 키워드 매핑 코드를 걷어내고 `codes`는 소스가 아는 후보(네이버 쿼리·DART 등)만 싣는다. `macroHint`는 예약 필드로 유지하되 수집기가 더 이상 적재하지 않는다(소비 측은 원래 미사용).
 > v0.5 (2026-07-24): 전량 LLM 판정 전환 — `queue:ingest`의 `codes`를 `macroHint` 없이도 공란 허용(수집 측 종목 매칭 게이트 제거). 관련 종목 판정은 llm-worker LLM 전담([뉴스 워커 명세](alphatalk_news_worker_spec.md) §2.4). `digest` 엔트리만 `codes` 1개 필수 유지(§2.3).
 > v0.4 (2026-07-23): llm-worker 원문 fetch의 인스턴스 간 호스트별 요청 간격을 위한 `rate:article-fetch:{host}` 키 추가. PEL 회수 설명을 실제 구현인 `XPENDING` + `XCLAIM`으로 정정.
@@ -18,7 +19,7 @@ Redis를 세 가지 용도로 쓰며, **이름이 비슷해도 메커니즘이 �
 |---|---|---|---|---|
 | **Pub/Sub** | 실시간 1→N 브로드캐스트 | `quote:{code}` · `stream:{code}` · `post:{code}` · `watchlist:updated` | 구독한 **전원이 사본** · 휘발 · ACK 없음 · best-effort | 게이트웨이가 구독 |
 | **Redis Streams** | 신뢰성 **작업 큐** | `queue:ingest` (+DLQ `queue:ingest:dlq`) | **경쟁 소비**(한 건=한 워커) · ACK · 재시도(PEL) | 워커끼리만 |
-| **자료구조** | 상태/캐시 | `price:{code}` · `presence:{userId}` · `cursor:*` · `seen:ingest:*` · `lock:cluster:*` · `rate:article-fetch:*` | 영속(메모리) · TTL | 워커/메인/게이트웨이 |
+| **자료구조** | 상태/캐시 | `price:{code}` · `presence:{userId}` · `cursor:*` · `seen:ingest:*` · `lock:cluster:*` · `rate:article-fetch:*` · `rate:kis-rest:*` | 영속(메모리) · TTL | 워커/메인/게이트웨이 |
 
 > ⚠️ **`stream:{code}`는 Pub/Sub 채널이다 — Redis Stream(데이터 구조)이 아니다.**
 > 이 시스템에서 진짜 Redis Stream은 **`queue:ingest`(와 그 DLQ `queue:ingest:dlq`)뿐**이다.
@@ -37,7 +38,7 @@ Redis를 세 가지 용도로 쓰며, **이름이 비슷해도 메커니즘이 �
 | 채널 | 발행자 | 구독자 | 범위 | 영속화 | 비고 |
 |---|---|---|---|---|---|
 | `quote:{code}` | price-worker | 게이트웨이 | 종목 | ✗ (휘발) | 100~250ms conflation된 최신가 |
-| `stream:{code}` | llm-worker | 게이트웨이 | 종목 | ✓ (발행 전 저장) | 소식(뉴스/리포트/AI) · `eventId` ULID |
+| `stream:{code}` | llm-worker · **batch-worker**(투자의견 한정, v0.7 — KIS 워커 명세 §3.3) | 게이트웨이 | 종목 | ✓ (발행 전 저장) | 소식(뉴스/리포트/AI/투자의견) · `eventId` ULID |
 | `post:{code}` | 메인서버 | 게이트웨이 | 종목 | ✓ (발행 전 저장) | 글/댓글 · `eventId` ULID |
 | `watchlist:updated` | 메인서버 | **모든** 게이트웨이 | 전역(단일 채널) | — | 관심목록 변경 통보 → 게이트웨이가 세션 구독 조정 |
 | `trade:{code}` *(선택)* | price-worker | 게이트웨이 | 종목 | ✗ | 체결 · 보는 방만 |
@@ -124,6 +125,8 @@ ingest-worker 스케줄러(싱글턴)가 매일 18:00 KST에 적재하고, 같�
 | `source` | `"scheduler"` — `title`/`url`/`body` 공란 |
 
 처리 순서·불변식은 §2.2와 동일(persist → publish → ack). 생성물은 `type=AI` StreamEvent(뉴스 워커 명세 §4).
+
+> 증권사 **투자의견**은 이 큐를 타지 않는다 — batch-worker가 `stream_event` 저장 후 `stream:{code}`를 직접 발행한다(§1.1 공동 발행자, v0.7). DB 멱등 저장·같은 `eventId` 재시도·REST 복구 상세는 [KIS 워커 명세](alphatalk_kis_worker_spec.md) §3.3이 소유.
  
 ---
 
@@ -140,6 +143,7 @@ ingest-worker 스케줄러(싱글턴)가 매일 18:00 KST에 적재하고, 같�
 | `seen:ingest:{sourceId}` | String | 수집 중복 제거 마커 | ingest/llm-worker | ingest/llm-worker | 며칠 |
 | `lock:cluster:{code}` | String (`SET NX PX 3000`) | 뉴스 클러스터 판정 직렬화 락(뉴스 워커 명세 §3.3) | llm-worker | llm-worker | 3초 |
 | `rate:article-fetch:{host}` | String (`SET PX`) | robots.txt·원문 fetch의 호스트별 다음 요청 간격을 llm-worker 인스턴스 간 직렬화 | llm-worker | llm-worker | 요청 간격(기본 1초) |
+| `rate:kis-rest:{keyId}` | Hash(token bucket) | 같은 KIS 계정을 쓰는 price·batch 프로세스의 일반 REST 합산 유량 제한 | price/batch-worker | price/batch-worker | 마지막 소비 후 2분 |
 
 - **현재가 스냅샷**은 REST(메인서버가 `price:{code}` 읽기)로 준다. 게이트웨이는 `quote:{code}` 라이브만 relay하고 캐시를 직접 읽지 않는다(얇은 엣지 유지).
 - 봉(OHLCV)은 KIS에서 받아 캐시하되, 권위 있는 가격 저장소로 쓰지 않는다(틱은 영속화 안 함).
@@ -148,22 +152,23 @@ ingest-worker 스케줄러(싱글턴)가 매일 18:00 KST에 적재하고, 같�
 
 ## 4. 생산자 / 소비자 매트릭스
 
-| 키 · 채널 | price-worker | ingest-worker | llm-worker | 메인서버 | 게이트웨이 |
-|---|---|---|---|---|---|
-| `quote:{code}` (P/S) | **PUBLISH** | — | — | — | **SUBSCRIBE** |
-| `stream:{code}` (P/S) | — | — | **PUBLISH** | — | **SUBSCRIBE** |
-| `post:{code}` (P/S) | — | — | — | **PUBLISH** | **SUBSCRIBE** |
-| `watchlist:updated` (P/S) | — | — | — | **PUBLISH** | **SUBSCRIBE** |
-| `trade/depth:{code}` (P/S) | **PUBLISH** | — | — | — | **SUBSCRIBE** |
-| `queue:ingest` (Stream) | — | **XADD** | **XREADGROUP/XACK** (`g:llm`) | — | — |
-| `queue:ingest:dlq` (Stream) | — | — | **XADD** (poison 격리) | — | — |
-| `price:{code}` (자료구조) | **WRITE** | — | — | READ | — |
-| `presence:{userId}` (자료구조) | — | — | — | — | **WRITE/READ** |
-| `cursor:{userId}:{code}` | — | — | — | **WRITE/READ** | — |
-| `watchlist:{userId}` (자료구조) | — | — | — | **WRITE** | **READ** |
-| `seen:ingest:{sourceId}` | — | WRITE | WRITE/READ | — | — |
-| `lock:cluster:{code}` | — | — | **WRITE/READ** | — | — |
-| `rate:article-fetch:{host}` | — | — | **WRITE/READ** | — | — |
+| 키 · 채널 | price-worker | batch-worker | ingest-worker | llm-worker | 메인서버 | 게이트웨이 |
+|---|---|---|---|---|---|---|
+| `quote:{code}` (P/S) | **PUBLISH** | — | — | — | — | **SUBSCRIBE** |
+| `stream:{code}` (P/S) | — | **PUBLISH**(투자의견) | — | **PUBLISH** | — | **SUBSCRIBE** |
+| `post:{code}` (P/S) | — | — | — | — | **PUBLISH** | **SUBSCRIBE** |
+| `watchlist:updated` (P/S) | — | — | — | — | **PUBLISH** | **SUBSCRIBE** |
+| `trade/depth:{code}` (P/S) | **PUBLISH** | — | — | — | — | **SUBSCRIBE** |
+| `queue:ingest` (Stream) | — | — | **XADD** | **XREADGROUP/XACK** (`g:llm`) | — | — |
+| `queue:ingest:dlq` (Stream) | — | — | — | **XADD** (poison 격리) | — | — |
+| `price:{code}` (자료구조) | **WRITE** | — | — | — | READ | — |
+| `presence:{userId}` (자료구조) | — | — | — | — | — | **WRITE/READ** |
+| `cursor:{userId}:{code}` | — | — | — | — | **WRITE/READ** | — |
+| `watchlist:{userId}` (자료구조) | — | — | — | — | **WRITE** | **READ** |
+| `seen:ingest:{sourceId}` | — | — | WRITE | WRITE/READ | — | — |
+| `lock:cluster:{code}` | — | — | — | **WRITE/READ** | — | — |
+| `rate:article-fetch:{host}` | — | — | — | **WRITE/READ** | — | — |
+| `rate:kis-rest:{keyId}` | **WRITE/READ** | **WRITE/READ** | — | — | — | — |
 
 게이트웨이는 **Pub/Sub SUBSCRIBE만** 한다(+프레즌스). Streams·DB 쓰기는 만지지 않는다.
  
@@ -176,7 +181,7 @@ ingest-worker 스케줄러(싱글턴)가 매일 18:00 KST에 적재하고, 같�
   KIS WS → price-worker → [자료구조] price:{code} 캐시 갱신
                         → PUBLISH [P/S] quote:{code} → 게이트웨이 → /user/queue/quote
  
-소식(stream) ─ ★ 유일하게 Streams를 탐:
+뉴스 기반 소식(stream) ─ Streams 작업 큐 사용:
   뉴스/리포트 → ingest-worker → XADD [STREAM] queue:ingest
                                      │ XREADGROUP (g:llm)
                                      ▼
@@ -187,10 +192,14 @@ ingest-worker 스케줄러(싱글턴)가 매일 18:00 KST에 적재하고, 같�
 글(post) ─ 큐 없음:
   클라 →(REST)→ 메인서버 ── ① 저장 [DB]
                           └─ ② PUBLISH [P/S] post:{code} → 게이트웨이 → /topic/rooms/{code}/posts
+투자의견(opinion) ─ 큐 없음 (v0.7):
+  KIS REST → batch-worker ── ① 저장 [DB] invest_opinion + stream_event
+                           └─ ② PUBLISH [P/S] stream:{code} → 게이트웨이 → /user/queue/stream
+                              (실패 시 published_at 미마킹 → 다음 회차에 같은 eventId로 재시도)
 ```
 
 - `[STREAM]`은 `queue:ingest` 한 곳뿐. `[P/S]`(`quote/stream/post:{code}`)는 전부 Pub/Sub.
-- 소식 경로에서 데이터는 **Streams(입력 큐)를 통과한 뒤 Pub/Sub(`stream:{code}`)으로 빠져나간다.** 앞은 작업 큐, 뒤는 브로드캐스트 채널 — 다른 메커니즘이다.
+- 뉴스 기반 소식은 **Streams(입력 큐)를 통과한 뒤 Pub/Sub(`stream:{code}`)으로 빠져나간다.** 투자의견은 worker-batch가 DB에 영속한 뒤 Pub/Sub으로 직접 발행한다. Streams는 작업 큐, Pub/Sub은 브로드캐스트 채널 — 다른 메커니즘이다.
 ---
 
 ## 6. 멱등성 · 순서 · 복구 규약
@@ -199,15 +208,17 @@ ingest-worker 스케줄러(싱글턴)가 매일 18:00 KST에 적재하고, 같�
 - **멱등성**:
     - 수집: `sourceId`로 중복 제거(같은 뉴스 재처리 흡수).
     - 저장: StreamEvent/post는 자연키 upsert(재시도/중복 발행에도 1건).
+    - 투자의견: `source_key=opinion:{code}:{businessDate}:{brokerCode}:{contentHash}` 부분 유니크. 충돌 시 기존 `eventId`를 읽어 재사용한다.
 - **복구**: 끊긴 동안 놓친 stream·post는 **메인서버 REST로 `cursor`(마지막 eventId) 이후 조회**. WS는 재전송하지 않는다. **틱은 복구 안 함**(다음 틱이 대체).
 - **persist → publish → ack** 순서 불변식(§2.2): 저장이 진실, 발행은 best-effort 통보, ACK는 둘 성공 후. → 워커 장애 시 PEL 재처리로 무유실, 멱등으로 무중복.
+- **투자의견 전달**: DB 저장 후 같은 `eventId`로 PUBLISH를 at-least-once 시도한다. `published_at`은 Redis 명령 수락 여부만 나타내며 클라이언트 전달을 보장하지 않는다. 중복은 `eventId`로 제거하고 유실은 REST로 복구한다.
 ---
 
 ## 7. 합의 필요 항목 (서비스 간)
 
 | 항목 | 게이트웨이 | 워커 | 메인서버 |
 |---|---|---|---|
-| 채널명 `quote/stream/post:{code}` | 구독 | quote=price, stream=llm 발행 | post 발행 |
+| 채널명 `quote/stream/post:{code}` | 구독 | quote=price, stream=llm·batch(투자의견) 발행 | post 발행 |
 | `queue:ingest` 엔트리 스키마(§2.1·§2.3) | — | ingest=생산, llm=소비 | — |
 | 봉투/`eventId`(ULID) 규약 | 파싱 | 생성 | 생성 |
 | `watchlist:updated` payload | 구독·세션조정 | — | 발행 |
