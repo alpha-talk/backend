@@ -2,6 +2,7 @@ package com.alphatalk.kis.auth
 
 import java.time.Duration
 import java.time.Instant
+import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
 class InMemoryKisTokenStore(
@@ -9,8 +10,10 @@ class InMemoryKisTokenStore(
 ) : KisTokenStore {
     private data class Entry(val token: String, val expiresAt: Instant)
 
+    private data class Lock(val lockToken: String, val expiresAt: Instant)
+
     private val tokens = ConcurrentHashMap<String, Entry>()
-    private val locks = ConcurrentHashMap<String, Instant>()
+    private val locks = ConcurrentHashMap<String, Lock>()
     private val issued = ConcurrentHashMap<String, Instant>()
 
     override fun get(keyId: String): String? {
@@ -30,22 +33,25 @@ class InMemoryKisTokenStore(
         tokens.remove(keyId)
     }
 
-    override fun tryLock(keyId: String, ttl: Duration): Boolean {
+    override fun tryLock(keyId: String, ttl: Duration): String? {
         val now = clock()
-        var acquired = false
-        locks.compute(keyId) { _, lockedUntil ->
-            if (lockedUntil == null || now >= lockedUntil) {
-                acquired = true
-                now + ttl
+        val candidate = UUID.randomUUID().toString()
+        var acquired: String? = null
+        locks.compute(keyId) { _, current ->
+            if (current == null || now >= current.expiresAt) {
+                acquired = candidate
+                Lock(candidate, now + ttl)
             } else {
-                lockedUntil
+                current
             }
         }
         return acquired
     }
 
-    override fun unlock(keyId: String) {
-        locks.remove(keyId)
+    override fun unlock(keyId: String, lockToken: String) {
+        locks.computeIfPresent(keyId) { _, current ->
+            if (current.lockToken == lockToken) null else current
+        }
     }
 
     override fun lastIssuedAt(keyId: String): Instant? = issued[keyId]
