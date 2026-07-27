@@ -108,6 +108,9 @@ class SessionPool(
             get() = state == SessionState.CONNECTED && session?.isOpen == true
 
         fun absorbConnectionLoss() {
+            if (state == SessionState.CONNECTED && session?.isOpen != true) {
+                connectionLost.set(true)
+            }
             if (!connectionLost.compareAndSet(true, false)) return
             if (session == null) return
             runCatching { session?.close() }
@@ -190,7 +193,12 @@ class SessionPool(
         }
 
         override fun onError(t: Throwable) {
-            log.warn("kis ws error: keyId={}", pooled.account.keyId, t)
+            log.warn("kis ws frame error: keyId={}", pooled.account.keyId, t)
+        }
+
+        override fun onTransportError(t: Throwable) {
+            log.warn("kis ws transport error: keyId={}", pooled.account.keyId, t)
+            pooled.connectionLost.set(true)
         }
     }
 }
