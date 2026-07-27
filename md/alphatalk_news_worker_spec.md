@@ -86,7 +86,7 @@ MVP는 **설정 파일의 시드 종목 목록**(worker-price의 41종목과 동
 |---|---|
 | URL 정규화 | 추적 파라미터(utm_* 등) 제거, 스킴·호스트 소문자화 |
 | `sourceId` | `{source}:{기사 고유 ID}` — 고유 ID 없으면 정규화 URL의 SHA-256 앞 16자 |
-| exact 중복 | seen 체크 → `XADD` → `seen:ingest:{sourceId}` 기록(TTL 7일)을 **Lua 단일 원자 연산**으로 수행 — 키가 이미 있으면 skip. XADD가 마커 기록보다 앞서므로 어떤 실패도 유실이 아니라 재수집(중복 적재) 쪽으로 떨어지고, 중복은 llm의 sourceId upsert·클러스터링이 흡수한다 |
+| exact 중복 | `SETNX seen:ingest:{sourceId}` (TTL 7일) 실패 시 skip — 같은 기사 재수집 흡수 |
 | 저장 범위 | 제목 + 리드 발췌(≤200자) + 원문 URL만 큐에 싣는다. 전문(全文)은 싣지도 저장하지도 않는다 |
 
 **같은 사건을 다룬 다른 언론사 기사는 여기서 버리지 않는다** — sourceId가 다르므로 통과하고, 묶는 것은 worker-llm의 클러스터링(§3.3) 몫이다. exact 중복 제거는 "같은 기사 재수집"만 거른다.
@@ -345,7 +345,8 @@ Liquibase 마이그레이션(`db-migrations` 모듈, `news/` changelog — Flywa
 worker-ingest/
 ├─ scheduler/   IngestPoller(소스 폴링 오케스트레이션) · DigestTrigger(§4.1)
 ├─ source/      NewsSource(포트) · RssNewsSource · NaverSearchNewsSource
-└─ queue/       IngestQueue(포트) · RedisIngestQueue(seen 체크+XADD+마커 기록 원자 Lua, §2.3)
+├─ dedup/       SeenMarker(포트) · RedisSeenMarker
+└─ queue/       IngestQueue(포트) · RedisIngestQueue(XADD)
 
 worker-llm/
 ├─ consume/     IngestConsumer(XREADGROUP 루프 · XPENDING/XCLAIM · DLQ 격리)

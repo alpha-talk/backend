@@ -1,5 +1,6 @@
 package com.alphatalk.worker.ingest.config
 
+import com.alphatalk.worker.ingest.dedup.SeenMarker
 import com.alphatalk.worker.ingest.queue.IngestQueue
 import com.alphatalk.worker.ingest.scheduler.IngestPoller
 import com.alphatalk.worker.ingest.source.NaverSearchNewsSource
@@ -23,12 +24,14 @@ class IngestConfig {
 
     @Bean
     fun ingestPoller(
+        seen: SeenMarker,
         queue: IngestQueue,
         ingestFetchExecutor: ExecutorService,
         props: IngestProperties,
         rssFeedClient: RssFeedClient,
     ): IngestPoller = IngestPoller(
         sources = newsSources(props, rssFeedClient),
+        seen = seen,
         queue = queue,
         excerptMaxLength = props.excerptMaxLength,
         fetchExecutor = ingestFetchExecutor,

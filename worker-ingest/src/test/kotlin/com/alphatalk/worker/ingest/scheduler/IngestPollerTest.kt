@@ -1,6 +1,7 @@
 package com.alphatalk.worker.ingest.scheduler
 
 import com.alphatalk.contracts.queue.IngestQueueEntry
+import com.alphatalk.worker.ingest.dedup.SeenMarker
 import com.alphatalk.worker.ingest.queue.IngestQueue
 import com.alphatalk.worker.ingest.source.FetchedArticle
 import com.alphatalk.worker.ingest.source.NewsSource
@@ -11,10 +12,11 @@ import java.util.concurrent.TimeUnit
 import kotlin.test.assertEquals
 
 class IngestPollerTest {
+    private val seen = InMemorySeenMarker()
     private val queue = RecordingQueue()
 
     private fun poller(vararg sources: NewsSource) =
-        IngestPoller(sources.toList(), queue, excerptMaxLength = 200, clock = { 1719500000000 })
+        IngestPoller(sources.toList(), seen, queue, excerptMaxLength = 200, clock = { 1719500000000 })
 
     @Test
     fun `같은 기사를 두 번 폴링해도 큐 적재는 한 번`() {
@@ -90,7 +92,7 @@ class IngestPollerTest {
     }
 
     @Test
-    fun `적재 실패 시 마커가 남지 않는다 - 다음 폴링에서 재시도`() {
+    fun `적재 실패 시 seen 마커 롤백 - 다음 폴링에서 재시도`() {
         val article = FetchedArticle(title = "삼성전자 수주", url = "https://example.com/1")
         val poller = poller(FakeSource("hankyung", listOf(article)))
 
@@ -128,7 +130,7 @@ class IngestPollerTest {
         }
         val pool = Executors.newFixedThreadPool(2)
         try {
-            val poller = IngestPoller(sources, queue, excerptMaxLength = 200, fetchExecutor = pool)
+            val poller = IngestPoller(sources, seen, queue, excerptMaxLength = 200, fetchExecutor = pool)
             val stats = poller.pollOnce()
             assertEquals(0, stats.sourceErrors)
             assertEquals(2, stats.fetched)
@@ -148,7 +150,7 @@ class IngestPollerTest {
                     FakeSource("b", listOf(FetchedArticle(title = "오늘의 날씨", url = "https://example.com/w"))),
                     FailingSource("c"),
                 ),
-                queue, excerptMaxLength = 200, fetchExecutor = pool,
+                seen, queue, excerptMaxLength = 200, fetchExecutor = pool,
             )
             val stats = poller.pollOnce()
             assertEquals(2, stats.enqueued)
@@ -179,25 +181,29 @@ class IngestPollerTest {
         override fun fetchLatest(): List<FetchedArticle> = throw IllegalStateException("boom")
     }
 
+    private class InMemorySeenMarker : SeenMarker {
+        val marked = mutableSetOf<String>()
+
+        @Synchronized
+        override fun markIfNew(sourceId: String) = marked.add(sourceId)
+
+        @Synchronized
+        override fun clear(sourceId: String) {
+            marked.remove(sourceId)
+        }
+    }
+
     private class RecordingQueue : IngestQueue {
         val entries = mutableListOf<IngestQueueEntry>()
-        private val seen = mutableSetOf<String>()
         var failNext = false
 
         @Synchronized
         override fun enqueue(entry: IngestQueueEntry) {
-            entries.add(entry)
-        }
-
-        @Synchronized
-        override fun enqueueIfNew(entry: IngestQueueEntry): Boolean {
             if (failNext) {
                 failNext = false
                 throw IllegalStateException("redis down")
             }
-            if (!seen.add(entry.sourceId)) return false
             entries.add(entry)
-            return true
         }
     }
 }

@@ -2,6 +2,7 @@ package com.alphatalk.worker.ingest.scheduler
 
 import com.alphatalk.contracts.queue.IngestQueueEntry
 import com.alphatalk.contracts.queue.IngestType
+import com.alphatalk.worker.ingest.dedup.SeenMarker
 import com.alphatalk.worker.ingest.normalize.ArticleNormalizer
 import com.alphatalk.worker.ingest.queue.IngestQueue
 import com.alphatalk.worker.ingest.source.FetchedArticle
@@ -12,6 +13,7 @@ import java.util.concurrent.Executor
 
 class IngestPoller(
     private val sources: List<NewsSource>,
+    private val seen: SeenMarker,
     private val queue: IngestQueue,
     private val excerptMaxLength: Int,
     private val fetchExecutor: Executor = Executor { it.run() },
@@ -43,6 +45,10 @@ class IngestPoller(
         val codes = article.codes.distinct().sorted()
         val url = ArticleNormalizer.normalizeUrl(article.url)
         val sourceId = ArticleNormalizer.sourceId(sourceName, article.sourceId, url)
+        if (!seen.markIfNew(sourceId)) {
+            stats.duplicateSkipped++
+            return
+        }
         val entry = IngestQueueEntry(
             source = sourceName,
             sourceId = sourceId,
@@ -53,10 +59,11 @@ class IngestPoller(
             body = article.excerpt?.take(excerptMaxLength),
             fetchedAt = article.publishedAt ?: clock(),
         )
-        runCatching { queue.enqueueIfNew(entry) }
-            .onSuccess { enqueued -> if (enqueued) stats.enqueued++ else stats.duplicateSkipped++ }
+        runCatching { queue.enqueue(entry) }
+            .onSuccess { stats.enqueued++ }
             .onFailure {
                 log.warn("enqueue failed: sourceId={}", sourceId, it)
+                seen.clear(sourceId)
                 stats.enqueueErrors++
             }
     }

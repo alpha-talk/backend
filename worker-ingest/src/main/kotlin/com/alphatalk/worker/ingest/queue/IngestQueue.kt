@@ -4,5 +4,4 @@ import com.alphatalk.contracts.queue.IngestQueueEntry
 
 interface IngestQueue {
     fun enqueue(entry: IngestQueueEntry)
-    fun enqueueIfNew(entry: IngestQueueEntry): Boolean
 }
