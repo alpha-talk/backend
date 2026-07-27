@@ -286,7 +286,7 @@ stream/stockinfo ──(읽기)──► Redis price:{code} / 워커 적재 테�
 auth ◄── 전 모듈 (SecurityContext)
 ```
 
-- `stream_event` 테이블 소유자는 **stream 모듈**. community는 직접 INSERT하지 않고 노출된 `StreamEventAppender`를 호출(경계 테스트로 강제). worker-llm은 별도 프로세스로 같은 테이블에 INSERT — 스키마는 `db-migrations` 모듈(Liquibase)이 단일 관리.
+- `stream_event` 테이블의 논리 소유자는 **stream 모듈**. community는 직접 INSERT하지 않고 노출된 `StreamEventAppender`를 호출(경계 테스트로 강제). worker-llm과 worker-batch(투자의견)는 별도 프로세스로 같은 테이블에 INSERT한다. 스키마는 `db-migrations` 모듈(Liquibase)이 단일 관리하고, 외부 생산자는 `source_key` 멱등 계약을 지킨다.
 - 채널명·봉투는 `:contracts` 상수만 사용(문자열 하드코딩 금지).
 ## 10. 보안 체크리스트
 
@@ -298,7 +298,8 @@ bcrypt(cost 10+) · JWT HS256(단일 키 공유, 게이트웨이 동일 모듈) 
 users(id BIGSERIAL PK, email UQ, password_hash, nickname UQ, created_at)
 refresh_tokens(id, user_id FK, token_hash, expires_at, rotated_from NULL)
 watchlist(user_id, code, created_at, PK(user_id, code))
-stream_event(event_id CHAR(26) PK, code, type, occurred_at, source, payload JSONB, created_at)
+stream_event(event_id CHAR(26) PK, code, type, occurred_at, source, source_key TEXT NULL, payload JSONB, created_at)
+  -- UNIQUE(source_key) WHERE source_key IS NOT NULL (외부 워커 자연키 멱등)
   -- PARTITION BY RANGE (created_at) 월 단위 · INDEX (code, event_id DESC) · INDEX (code, type, event_id DESC)
 post(id CHAR(26) PK, code, author_id FK, title, content, quoted_event_id NULL,
      like_count INT, comment_count INT, created_at, updated_at, deleted_at NULL)
