@@ -102,6 +102,21 @@ class SessionPoolTest {
     }
 
     @Test
+    fun `전송 계층 오류로만 끊겨도 재접속해 재구독한다`() {
+        val pool = pool()
+        pool.maintain(setOf("005930"), subscribeAllowed = true)
+        server.awaitMessages(1)
+
+        server.abortAllConnections()
+
+        await().atMost(Duration.ofSeconds(10)).until {
+            now += 200
+            pool.maintain(setOf("005930"), subscribeAllowed = true)
+            subscribesOf(server.receivedMessages).size >= 2
+        }
+    }
+
+    @Test
     fun `해지는 유예가 지난 뒤에만 전송된다`() {
         val pool = pool(graceMillis = 1_000)
         pool.maintain(linkedSetOf("000001", "000002"), subscribeAllowed = true)
