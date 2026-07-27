@@ -27,12 +27,13 @@ class KisTokenManager(
     fun accessToken(account: KisAccount): String {
         store.get(account.keyId)?.let { return it }
         repeat(lockRetries) {
-            if (store.tryLock(account.keyId, lockTtl)) {
+            val lockToken = store.tryLock(account.keyId, lockTtl)
+            if (lockToken != null) {
                 try {
                     store.get(account.keyId)?.let { return it }
                     return issue(account)
                 } finally {
-                    store.unlock(account.keyId)
+                    store.unlock(account.keyId, lockToken)
                 }
             }
             Thread.sleep(lockWaitMillis)

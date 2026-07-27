@@ -4,9 +4,8 @@ import java.time.Duration
 import java.time.Instant
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
-import kotlin.test.assertTrue
 
 class InMemoryKisTokenStoreTest {
     @Test
@@ -26,19 +25,38 @@ class InMemoryKisTokenStoreTest {
         var now = Instant.parse("2026-07-27T00:00:00Z")
         val store = InMemoryKisTokenStore { now }
 
-        assertTrue(store.tryLock("k", Duration.ofSeconds(5)))
-        assertFalse(store.tryLock("k", Duration.ofSeconds(5)))
+        assertNotNull(store.tryLock("k", Duration.ofSeconds(5)))
+        assertNull(store.tryLock("k", Duration.ofSeconds(5)))
 
         now += Duration.ofSeconds(6)
-        assertTrue(store.tryLock("k", Duration.ofSeconds(5)))
+        assertNotNull(store.tryLock("k", Duration.ofSeconds(5)))
     }
 
     @Test
     fun `unlock 후 즉시 재획득된다`() {
         val store = InMemoryKisTokenStore()
 
-        assertTrue(store.tryLock("k", Duration.ofSeconds(5)))
-        store.unlock("k")
-        assertTrue(store.tryLock("k", Duration.ofSeconds(5)))
+        val lockToken = store.tryLock("k", Duration.ofSeconds(5))
+        assertNotNull(lockToken)
+        store.unlock("k", lockToken)
+        assertNotNull(store.tryLock("k", Duration.ofSeconds(5)))
+    }
+
+    @Test
+    fun `만료 후 넘어간 락은 이전 소유자가 해제하지 못한다`() {
+        var now = Instant.parse("2026-07-27T00:00:00Z")
+        val store = InMemoryKisTokenStore { now }
+
+        val first = store.tryLock("k", Duration.ofSeconds(5))
+        assertNotNull(first)
+        now += Duration.ofSeconds(6)
+        val second = store.tryLock("k", Duration.ofSeconds(60))
+        assertNotNull(second)
+
+        store.unlock("k", first)
+
+        assertNull(store.tryLock("k", Duration.ofSeconds(5)))
+        store.unlock("k", second)
+        assertNotNull(store.tryLock("k", Duration.ofSeconds(5)))
     }
 }
