@@ -3,7 +3,6 @@ package com.alphatalk.worker.ingest
 import com.alphatalk.contracts.Queues
 import com.alphatalk.contracts.queue.IngestQueueEntry
 import com.alphatalk.worker.ingest.config.IngestProperties
-import com.alphatalk.worker.ingest.dedup.RedisSeenMarker
 import com.alphatalk.worker.ingest.queue.RedisIngestQueue
 import com.alphatalk.worker.ingest.scheduler.IngestPoller
 import com.alphatalk.worker.ingest.source.FetchedArticle
@@ -18,6 +17,9 @@ import org.testcontainers.containers.GenericContainer
 import org.testcontainers.junit.jupiter.Container
 import org.testcontainers.junit.jupiter.Testcontainers
 import java.time.Duration
+import java.util.concurrent.CyclicBarrier
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
@@ -51,12 +53,57 @@ class IngestPipelineIntegrationTest {
     }
 
     @Test
-    fun `seen 마커 - SETNX와 TTL`() {
-        val marker = RedisSeenMarker(template, props)
-        assertTrue(marker.markIfNew("hankyung:a1"))
-        assertEquals(false, marker.markIfNew("hankyung:a1"))
+    fun `enqueueIfNew - 첫 호출은 XADD와 seen 마커를 함께, 중복 호출은 둘 다 스킵`() {
+        val queue = RedisIngestQueue(template, props)
+        val entry = IngestQueueEntry(
+            source = "hankyung",
+            sourceId = "hankyung:a1",
+            type = com.alphatalk.contracts.queue.IngestType.NEWS,
+            codes = listOf("005930"),
+            title = "삼성전자 수주",
+            url = "https://example.com/1",
+            body = "발췌",
+            fetchedAt = 1719500000000,
+        )
+
+        assertTrue(queue.enqueueIfNew(entry))
+        assertEquals(false, queue.enqueueIfNew(entry))
+
+        val records = template.opsForStream<String, String>().range(Queues.INGEST, Range.unbounded())!!
+        assertEquals(1, records.size)
+        assertEquals(entry, IngestQueueEntry.fromFields(records.single().value))
         val ttl = template.getExpire("seen:ingest:hankyung:a1")
         assertTrue(ttl > 0)
+    }
+
+    @Test
+    fun `동시 enqueueIfNew - 같은 sourceId 경쟁에도 성공 1회·Stream 1건`() {
+        val queue = RedisIngestQueue(template, props)
+        val entry = IngestQueueEntry(
+            source = "hankyung",
+            sourceId = "hankyung:race",
+            type = com.alphatalk.contracts.queue.IngestType.NEWS,
+            codes = listOf("005930"),
+            title = "삼성전자 수주",
+            url = "https://example.com/race",
+            fetchedAt = 1719500000000,
+        )
+        val workers = 8
+        val barrier = CyclicBarrier(workers)
+        val pool = Executors.newFixedThreadPool(workers)
+        try {
+            val results = (1..workers).map {
+                pool.submit<Boolean> {
+                    barrier.await(5, TimeUnit.SECONDS)
+                    queue.enqueueIfNew(entry)
+                }
+            }.map { it.get(10, TimeUnit.SECONDS) }
+
+            assertEquals(1, results.count { it })
+            assertEquals(1L, template.opsForStream<String, String>().size(Queues.INGEST))
+        } finally {
+            pool.shutdown()
+        }
     }
 
     @Test
@@ -88,7 +135,6 @@ class IngestPipelineIntegrationTest {
         }
         val poller = IngestPoller(
             sources = listOf(source),
-            seen = RedisSeenMarker(template, props),
             queue = RedisIngestQueue(template, props),
             excerptMaxLength = 200,
         )
