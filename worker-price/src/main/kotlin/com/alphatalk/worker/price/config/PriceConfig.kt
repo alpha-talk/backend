@@ -168,6 +168,8 @@ class PriceConfig {
         demand: DemandSource,
         fetcher: DailyCandleFetcher,
         store: DailyCandleStore,
+        calendar: MarketCalendar,
+        leader: LeaderLock,
         meters: MeterRegistry,
         props: PriceProperties,
     ): CandleSyncJob = CandleSyncJob(
@@ -175,6 +177,8 @@ class PriceConfig {
         fetcher = fetcher,
         store = store,
         backfillDays = props.candleBackfillDays,
+        calendar = calendar,
+        leader = leader,
         meters = meters,
     )
 

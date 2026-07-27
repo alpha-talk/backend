@@ -1,8 +1,13 @@
 package com.alphatalk.worker.price.candle
 
 import com.alphatalk.kis.rest.KisDailyCandle
+import com.alphatalk.worker.price.calendar.MarketCalendar
+import com.alphatalk.worker.price.leader.LeaderLock
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
+import java.time.Instant
 import java.time.LocalDate
+import java.time.ZoneId
+import java.time.ZonedDateTime
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -44,15 +49,34 @@ class CandleSyncJobTest {
             rows.keys.filter { it.first == code }.maxOfOrNull { it.second }
     }
 
-    private fun job(fetcher: DailyCandleFetcher, store: DailyCandleStore, symbols: Set<String> = setOf("005930")) =
-        CandleSyncJob(
-            symbols = { symbols },
-            fetcher = fetcher,
-            store = store,
-            backfillDays = 90,
-            meters = SimpleMeterRegistry(),
-            today = { today },
-        )
+    private class ToggleLeaderLock(var leader: Boolean) : LeaderLock {
+        override fun tryAcquire(): Boolean = leader
+
+        override fun release() {
+        }
+    }
+
+    private fun calendarAt(day: Int): MarketCalendar {
+        val clock = { ZonedDateTime.of(2026, 7, day, 16, 30, 0, 0, ZoneId.of("Asia/Seoul")).toInstant() }
+        return MarketCalendar(clock = clock)
+    }
+
+    private fun job(
+        fetcher: DailyCandleFetcher,
+        store: DailyCandleStore,
+        symbols: Set<String> = setOf("005930"),
+        calendar: MarketCalendar = MarketCalendar(enforced = false, clock = Instant::now),
+        leader: LeaderLock = ToggleLeaderLock(leader = true),
+    ) = CandleSyncJob(
+        symbols = { symbols },
+        fetcher = fetcher,
+        store = store,
+        backfillDays = 90,
+        calendar = calendar,
+        leader = leader,
+        meters = SimpleMeterRegistry(),
+        today = { today },
+    )
 
     @Test
     fun `첫 동기화는 백필 구간부터 조회해 적재한다`() {
@@ -101,5 +125,35 @@ class CandleSyncJobTest {
 
         assertEquals(1, synced)
         assertEquals(setOf("000660" to "20260724"), store.rows.keys)
+    }
+
+    @Test
+    fun `거래일의 리더는 예약 동기화를 수행한다`() {
+        val fetcher = RecordingFetcher { code -> listOf(candle(code, "20260724")) }
+        val store = InMemoryCandleStore()
+
+        job(fetcher, store, calendar = calendarAt(27)).syncDaily()
+
+        assertEquals(1, fetcher.requested.size)
+    }
+
+    @Test
+    fun `휴장일에는 예약 동기화를 건너뛴다`() {
+        val fetcher = RecordingFetcher { code -> listOf(candle(code, "20260724")) }
+        val store = InMemoryCandleStore()
+
+        job(fetcher, store, calendar = calendarAt(26)).syncDaily()
+
+        assertTrue(fetcher.requested.isEmpty())
+    }
+
+    @Test
+    fun `스탠바이 인스턴스는 예약 동기화를 건너뛴다`() {
+        val fetcher = RecordingFetcher { code -> listOf(candle(code, "20260724")) }
+        val store = InMemoryCandleStore()
+
+        job(fetcher, store, calendar = calendarAt(27), leader = ToggleLeaderLock(leader = false)).syncDaily()
+
+        assertTrue(fetcher.requested.isEmpty())
     }
 }

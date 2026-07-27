@@ -42,4 +42,18 @@ class MarketCalendarTest {
         val calendar = MarketCalendar(enforced = false, clock = at(2026, 7, 26, 3, 0))
         assertEquals(MarketPhase.OPEN, calendar.phase())
     }
+
+    @Test
+    fun `거래일 여부는 주말·휴장일만 거른다`() {
+        assertEquals(true, MarketCalendar(clock = at(2026, 7, 27, 16, 30)).isTradingDay())
+        assertEquals(false, MarketCalendar(clock = at(2026, 7, 26, 16, 30)).isTradingDay())
+        assertEquals(
+            false,
+            MarketCalendar(
+                holidays = setOf(java.time.LocalDate.of(2026, 7, 27)),
+                clock = at(2026, 7, 27, 16, 30),
+            ).isTradingDay(),
+        )
+        assertEquals(true, MarketCalendar(enforced = false, clock = at(2026, 7, 26, 16, 30)).isTradingDay())
+    }
 }

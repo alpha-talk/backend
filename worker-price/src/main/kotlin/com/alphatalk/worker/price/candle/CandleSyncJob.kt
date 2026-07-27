@@ -1,5 +1,7 @@
 package com.alphatalk.worker.price.candle
 
+import com.alphatalk.worker.price.calendar.MarketCalendar
+import com.alphatalk.worker.price.leader.LeaderLock
 import io.micrometer.core.instrument.MeterRegistry
 import org.slf4j.LoggerFactory
 import org.springframework.scheduling.annotation.Scheduled
@@ -12,6 +14,8 @@ class CandleSyncJob(
     private val fetcher: DailyCandleFetcher,
     private val store: DailyCandleStore,
     private val backfillDays: Long,
+    private val calendar: MarketCalendar,
+    private val leader: LeaderLock,
     private val meters: MeterRegistry,
     private val today: () -> LocalDate = { LocalDate.now(ZoneId.of("Asia/Seoul")) },
 ) {
@@ -19,6 +23,8 @@ class CandleSyncJob(
 
     @Scheduled(cron = "0 30 16 * * MON-FRI", zone = "Asia/Seoul")
     fun syncDaily() {
+        if (!calendar.isTradingDay()) return
+        if (!leader.tryAcquire()) return
         syncOnce()
     }
 
