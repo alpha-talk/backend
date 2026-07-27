@@ -1,7 +1,7 @@
 # Alpha Talk — 뉴스 파이프라인 명세 v0.1
 **worker-ingest · worker-llm · 담당: 민균**
 
-뉴스를 수집해 관련 종목 방으로 배달하고, 같은 사건을 다룬 여러 언론사 기사를 하나로 묶고, 매일 종목별 호재·악재 브리핑을 생성하는 파이프라인의 설계 기준. [redis_contract.md](redis_contract.md) §2(`queue:ingest`)와 [ws_api_spec.md](ws_api_spec.md) §4.3(stream payload)을 전제로 하며, 이 설계가 요구한 계약 확장은 **각 계약 문서에 반영 완료**(redis_contract v0.5 · ws_api_spec v0.5 · KIS 워커 명세 §4) — 내역은 §6.
+뉴스를 수집해 관련 종목 방으로 배달하고, 같은 사건을 다룬 여러 언론사 기사를 하나로 묶고, 매일 종목별 호재·악재 브리핑을 생성하는 파이프라인의 설계 기준. [redis_contract.md](redis_contract.md) §2(`queue:ingest`)와 [ws_api_spec.md](ws_api_spec.md) §4.3(stream payload)을 전제로 하며, 이 설계가 요구한 계약 확장은 **각 계약 문서에 반영 완료**(redis_contract v0.7 · ws_api_spec v0.6 · KIS 워커 명세 v0.2) — 내역은 §6.
 
 ---
 
@@ -99,7 +99,7 @@ MVP는 **설정 파일의 시드 종목 목록**(worker-price의 41종목과 동
 | 2차 | LLM 요약 시 관련 종목 확정 — 후보 오탐 제거 및 후보 외 종목 발견(발견 종목은 `stock_master` 존재 검증 후 채택) | llm |
 
 - **v0.6 결정: 수집 측 텍스트 매칭(종목명 사전·매크로 키워드)을 코드 레벨에서 제거했다.** 종목명 사전은 전 종목 등록·별칭 관리 부담 대비 이득이 없고(판정은 어차피 LLM 전담), 매크로 `macroHint`는 소비 측이 사용한 적이 없다. `stock_alias` 테이블(§5)은 예약으로만 남긴다.
-- 1차는 **후보 힌트일 뿐 게이트가 아니다** — 후보 0건이어도 **전량 적재**한다(`codes` 공란 허용, Redis 계약 v0.6 §2.1). 관련성 판정은 LLM(2차)이 전담한다: 사회 기사처럼 종목명이 등장하지 않는 뉴스의 간접 영향(정책→수혜 종목)까지 LLM이 판정하며, 후보에 없던 종목은 `stock_master` 존재 검증 후 채택한다(환각 코드 차단). LLM이 기사 전체를 `marketRelevant=false`로 판정하면 후보·scope와 무관하게 IRRELEVANT drop(§3.4) — 비용 방어선은 클러스터링(§3.3, 같은 사건 = LLM 1회)이다.
+- 1차는 **후보 힌트일 뿐 게이트가 아니다** — 후보 0건이어도 **전량 적재**한다(`codes` 공란 허용, Redis 계약 v0.7 §2.1). 관련성 판정은 LLM(2차)이 전담한다: 사회 기사처럼 종목명이 등장하지 않는 뉴스의 간접 영향(정책→수혜 종목)까지 LLM이 판정하며, 후보에 없던 종목은 `stock_master` 존재 검증 후 채택한다(환각 코드 차단). LLM이 기사 전체를 `marketRelevant=false`로 판정하면 후보·scope와 무관하게 IRRELEVANT drop(§3.4) — 비용 방어선은 클러스터링(§3.3, 같은 사건 = LLM 1회)이다.
 - 후보가 빈 기사의 클러스터 판정 직렬화는 단일 `lock:cluster:macro` 락으로 수렴한다 — 단일 인스턴스 운용(로컬)에선 무해하나, 운영 ×N 확장 시 병렬성이 필요해지면 이 결정을 재평가한다(§7).
 - `codes` 필드는 큐 스키마(Redis 계약 §2.1) 그대로 콤마 구분 다중.
 
@@ -220,6 +220,8 @@ stream payload (ws_api_spec §4.3 확장 — ⚠️ §6 증보):
   "title": "한은, 기준금리 25bp 인상", "summary": "…", "sentiment": "POSITIVE", "sources": [ … ], "occurredAt": … }
 ```
 
+> 증권사 **투자의견**은 이 파이프라인을 타지 않는다 — worker-batch가 `stream_event` 저장 후 `stream:{code}`를 직접 발행한다(llm-worker와 공동 생산자, [KIS 워커 명세](alphatalk_kis_worker_spec.md) §3.3 · Redis 계약 v0.7). 라우팅은 같지만 payload는 WS v0.6의 `kind=opinion`·`opinion{}` 하위 호환 확장을 사용한다. `queue:ingest`·llm-worker는 관여하지 않는다.
+
 ---
 
 ## 4. 일일 다이제스트 — 호재/악재 브리핑
@@ -302,13 +304,13 @@ news_cluster_sector(
 -- INDEX news_cluster (last_article_at) — 72h 창 후보 조회
 ```
 
-Liquibase 마이그레이션(`db-migrations` 모듈, `news/` changelog — Flyway V1~V7에서 이관): `0001`(news_* + stock_alias) · `0002`(stream_event) · `0003`(다이제스트 부분 유니크 인덱스) · `0004`(news_cluster 요약 lease·fencing token) · `0005`(종목 verdict 기각 상태와 기존 완료 행 백필) · `0006`(클러스터 category와 허용값 제약) · `0007`(기사 수집 시 빈 후보 경계). worker-llm은 `db-migrations` 의존만으로 기동 시 changelog를 적용한다.
+Liquibase 마이그레이션(`db-migrations` 모듈, `news/` changelog — Flyway V1~V7에서 이관): `0001`(news_* + stock_alias) · `0002`(stream_event) · `0003`(다이제스트 부분 유니크 인덱스) · `0004`(news_cluster 요약 lease·fencing token) · `0005`(종목 verdict 기각 상태와 기존 완료 행 백필) · `0006`(클러스터 category와 허용값 제약) · `0007`(기사 수집 시 빈 후보 경계). worker-llm은 `db-migrations` 의존만으로 기동 시 changelog를 적용한다. 투자의견용 nullable `source_key`와 부분 유니크 인덱스는 core-api stream 모듈이 논리 소유하고, worker-batch 착수 시 `db-migrations`에 후속 changeSet으로 추가한다.
 
 **Flyway → Liquibase 전환 정책** — 전환은 운영 DB가 생기기 전에 완료했으므로 baseline(`changelog-sync`) 절차를 두지 않는다. `flyway_schema_history`만 있는 기존 로컬 DB는 지원하지 않는다 — `docker compose down -v`로 리셋 후 재기동이 유일한 경로다(Liquibase가 `0001`부터 재실행을 시도해 기동 실패하는 것이 의도된 fail-closed). 리셋 불가한 공유 DB가 전환 전에 생겼다면 그때는 해당 DB에 한해 수동 `changelog-sync`로 이력을 등록한다.
 
 **changeSet 식별자 불변식** — Liquibase 변경셋 식별자는 `filepath::id::author`라 **파일 경로도 식별자의 일부**다. 적용 이력이 생긴 changeSet 파일은 이동·개명하지 않는다(경로 영구 보존). `db-migrations` 안의 디렉토리는 논리적 소유자를 표시할 뿐이며, 소유가 바뀌어도 파일은 제자리에 두고 문서로만 경계를 옮긴다.
 
-**⚠️ `stream_event` 소유 경계** — `stream_event`의 **논리적 소유자는 core-api의 stream 모듈**(core-api 명세 §11, `StreamEventAppender` 경유 INSERT). worker-llm은 이 테이블에 **INSERT/UPDATE하는 별도 프로세스**다(기획안 §3.1: "worker-llm은 별도 프로세스로 같은 테이블에 INSERT"). 마이그레이션 파일은 `db-migrations`가 단일 소유하므로 서버 간 DDL 충돌은 없다:
+**⚠️ `stream_event` 소유 경계** — `stream_event`의 **논리적 소유자는 core-api의 stream 모듈**(core-api 명세 §11, `StreamEventAppender` 경유 INSERT). worker-llm과 worker-batch(투자의견)는 이 테이블에 INSERT하는 별도 프로세스다. 마이그레이션 파일은 `db-migrations`가 단일 소유하므로 서버 간 DDL 충돌은 없다:
 - `0002`(stream_event DDL)는 논리적으로 core-api 소유 — 단 changeSet 파일은 위 식별자 불변식에 따라 `news/`에 영구 보존하고, core-api 착수 시 문서·주석으로만 소유 경계를 표시한다.
 - `0003`(다이제스트 유니크 인덱스)은 뉴스 파이프라인 고유 제약이므로 논리적 소유자가 worker-llm이다.
 
@@ -333,6 +335,7 @@ Liquibase 마이그레이션(`db-migrations` 모듈, `news/` changelog — Flywa
 | KIS 워커 명세 §4 | `sector` 테이블 + `stock_master.sector_code`(마스터 파일 업종 필드 파싱, `stock_master_sync` 적재) | ✅ 반영 |
 | :contracts | `Queues`·`Keys.seenIngest/clusterLock`·`IngestQueueEntry`·`StreamData` v0.5 확장 | ✅ 반영 (N0) |
 | :contracts | `StreamCategory` + `IngestType.streamCategory()` — 수집 type→발행 category·이벤트 type 관통 매핑 | ✅ 반영 |
+| redis_contract **v0.7** §1.1 | `stream:{code}` 공동 발행자 batch-worker(투자의견 직접 발행 — KIS 명세 §3.3, llm-worker 비관여) | ✅ 반영 |
 
 ---
 

@@ -1,6 +1,7 @@
-# Alpha Talk — WebSocket(STOMP) API 명세 v0.5
+# Alpha Talk — WebSocket(STOMP) API 명세 v0.6
 **WS Gateway · 실시간 푸시 전용**
 
+> **v0.5 → v0.6**: `stream`의 `category=report`에 증권사 투자의견 subtype 추가 — optional `kind=opinion`·`opinion{}` 필드. STOMP 목적지·봉투·기존 필드는 변경 없음([KIS 워커 명세](alphatalk_kis_worker_spec.md) §3.3).
 > **v0.4 → v0.5**: `stream` payload 확장(§4.3) — `sentiment`·`scope`·`sector`·`sources[]`(news) · `digest{}`(ai) **optional** 필드 추가([뉴스 파이프라인 명세](alphatalk_news_worker_spec.md) §3.5·§3.6·§4.2). 기존 필드 변경 없음 — 모르는 필드는 무시하면 된다(비파괴).
 > **v0.3 → v0.4**: 게이트웨이 구현 스택을 WebFlux → **Spring MVC + STOMP 브로커**로 변경 (하단 구현 노트만 수정, 클라이언트 노출 프로토콜 §1~§9는 변경 없음)
  
@@ -12,7 +13,7 @@
 
 - 게이트웨이는 **푸시 전용 얇은 엣지**다: 서버→클라 실시간 전달 + 구독 제어만 한다.
 - **클라이언트가 콘텐츠를 보내는 SEND 프레임은 없다.** 글/댓글 작성·관심목록 편집·로그인·과거 조회는 전부 **메인서버 REST**가 담당한다(§8).
-- 전달 데이터 3종: **① 주식 틱(현재가) · ② 소식(뉴스/리포트/AI) · ③ 글/댓글 — 게시판(post·comment)**
+- 전달 데이터 3종: **① 주식 틱(현재가) · ② 소식(뉴스/리포트/투자의견/AI) · ③ 글/댓글 — 게시판(post·comment)**
 - 프로토콜: **STOMP 1.2 over WebSocket**
 > 설계 원칙: DB가 진실의 원천이고 WS 푸시는 best-effort다. 끊기면 재연결 + REST로 복구한다(§6).
  
@@ -123,11 +124,29 @@ accept-version:1.2
   "scope": "STOCK | SECTOR | MARKET",
   "sector": { "code": "27", "name": "은행" },
   "sources": [ { "name": "한국경제", "url": "https://..." } ],
-  "digest": { "date": "2026-07-16", "positives": [], "negatives": [], "sectorIssues": [], "marketIssues": [], "neutralCount": 0, "newsCount": 0 }
+  "digest": { "date": "2026-07-16", "positives": [], "negatives": [], "sectorIssues": [], "marketIssues": [], "neutralCount": 0, "newsCount": 0 },
+
+  "kind": "opinion",
+  "opinion": {
+    "brokerCode": "0000",
+    "brokerName": "미래에셋증권",
+    "ratingCode": "1",
+    "rating": "매수",
+    "previousRatingCode": "2",
+    "previousRating": "중립",
+    "targetPrice": 95000,
+    "businessDate": "20260727"
+  }
 }
 ```
 
-- 빈 줄 아래 5개 필드는 **전부 optional**: `sentiment`·`scope`·`sector`·`sources`는 `category=news`에서, `digest`는 `category=ai`(일일 브리핑)에서만 온다. 상세 구조·생성 규칙은 [뉴스 파이프라인 명세](alphatalk_news_worker_spec.md) §3.5·§3.6·§4.2.
+- 빈 줄 아래 필드는 **전부 optional**이다.
+  - `sentiment`·`scope`·`sector`·`sources`: 뉴스·공시·일반 리포트
+  - `digest`: `category=ai` 일일 브리핑
+  - `kind=opinion`·`opinion`: `category=report`인 증권사 투자의견
+- 투자의견은 `summary`·`sourceUrl`·`sentiment`를 싣지 않는다. `occurredAt`은 최초 수집 시각이고, KIS가 제공한 영업일자는 `opinion.businessDate`에 원문 그대로 둔다.
+- `opinion.brokerName`·`previousRatingCode`·`previousRating`·`targetPrice`는 원천 값이 없으면 `null`일 수 있다. `brokerCode`·`ratingCode`·`rating`·`businessDate`는 필수다.
+- 뉴스 상세 구조·생성 규칙은 [뉴스 파이프라인 명세](alphatalk_news_worker_spec.md) §3.5·§3.6·§4.2, 투자의견 수집·멱등 규칙은 [KIS 워커 명세](alphatalk_kis_worker_spec.md) §3.3이 소유한다.
 
 ### 4.4 `post` (글/댓글)
 
@@ -204,7 +223,7 @@ WS 게이트웨이가 하지 않는 것(같은 클라가 REST로 별도 호출):
 | 클라 목적지 | Redis 채널 (구독 대상) | 발행 주체 |
 |---|---|---|
 | `/user/queue/quote` (해당 종목) | `quote:{code}` | price-worker |
-| `/user/queue/stream` (해당 종목) | `stream:{code}` | llm-worker |
+| `/user/queue/stream` (해당 종목) | `stream:{code}` | llm-worker · batch-worker(투자의견) |
 | `/topic/rooms/{code}/posts` | `post:{code}` | 메인서버(글 작성 시 발행) |
 | `/topic/rooms/{code}/trade` *(선택)* | `trade:{code}` | price-worker |
 | `/topic/rooms/{code}/depth` *(선택)* | `depth:{code}` | price-worker |
