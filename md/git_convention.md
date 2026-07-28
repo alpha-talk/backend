@@ -176,6 +176,19 @@ ci: PR·main push에 gradle build 워크플로 추가
   3. 계약 변경 시 영향 모듈
 - **머지 조건**: `./gradlew build` 통과 + 리뷰 승인. `DemandRegistry` 등 refcount/인덱스 변경은 단위 테스트를 동반한다(CLAUDE.md 불변 규칙).
 
+### 5.1 PR의 base는 언제나 `main`이다
+
+여러 단계를 잇달아 올릴 때도 **각 PR의 base를 main으로 둔다.** 앞 PR의 브랜치를 base로 삼는 "스택 PR"은 만들지 않는다.
+
+앞 브랜치를 base로 두면 GitHub이 그 브랜치로 머지한다. PR 목록에는 전부 "Merged"로 뜨지만 코드는 중간 브랜치에 갇히고 main에는 첫 단계만 들어간다. 실제로 이 저장소에서 worker-price P4~P7이 이렇게 유실돼 회수 PR을 따로 열어야 했다.
+
+단계가 여러 개면 둘 중 하나로 한다.
+
+- **한 PR로 합친다** — 리뷰 단위가 커도 되면 이쪽이 가장 안전하다. 브랜치 안에서 단계별 커밋을 유지하면 리뷰어가 커밋 단위로 읽을 수 있다.
+- **앞 PR을 머지한 뒤 다음 브랜치를 main 위로 rebase해서 연다** — 리뷰를 단계별로 쪼개야 할 때. 앞 PR이 머지되기 전에는 다음 PR을 열지 않는다.
+
+앞 단계에 의존하는 코드를 미리 작업해야 한다면 로컬에서 그 브랜치 위에 쌓되, **PR은 앞 단계가 main에 들어간 뒤에 연다.**
+
 ---
 
 ## 6. 빠른 참조
@@ -184,6 +197,7 @@ ci: PR·main push에 gradle build 워크플로 추가
 브랜치   type/scope/desc            feat/ws/s4-redis-relay
 커밋     type(scope): 제목          feat(ws): Redis relay 구현
 PR 제목  = 커밋 형식               feat(ws): S4 Redis relay end-to-end
+PR base  = 항상 main (§5.1)        스택 PR 금지 — 앞 PR 머지 후 rebase
 머지     Squash → 브랜치 삭제
 scope    = 모듈명 (표 §2.3)        ws · contracts · auth-jwt · core-api · worker-* · deps · build · infra · ci
 ```

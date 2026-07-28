@@ -2,7 +2,9 @@ package com.alphatalk.worker.batch.master
 
 import com.alphatalk.kis.master.KisMarket
 import com.alphatalk.kis.master.KisMasterParser
+import com.alphatalk.kis.master.KisSectorParser
 import com.alphatalk.kis.master.KisStockMaster
+import com.alphatalk.kis.master.ParsedStockMaster
 import com.alphatalk.worker.batch.job.BatchJobRunStore
 import io.micrometer.core.instrument.MeterRegistry
 import net.javacrumbs.shedlock.spring.annotation.SchedulerLock
@@ -15,7 +17,8 @@ import java.time.format.DateTimeFormatter
 
 open class StockMasterSyncJob(
     private val files: MasterFileFetcher,
-    private val store: StockMasterStore,
+    private val stocks: StockMasterStore,
+    private val sectors: SectorStore,
     private val runs: BatchJobRunStore,
     private val meters: MeterRegistry,
     private val clock: () -> Instant = Instant::now,
@@ -38,22 +41,23 @@ open class StockMasterSyncJob(
         }
         val collected = mutableListOf<KisStockMaster>()
         val failedMarkets = mutableListOf<KisMarket>()
+        var incompleteMarkets = 0
         try {
+            syncSectors()
             KisMarket.entries.forEach { market ->
-                runCatching { collect(market) }
-                    .onSuccess { collected += it }
-                    .onFailure {
-                        failedMarkets += market
-                        log.warn("stock master fetch failed: market={}", market, it)
+                val parsed = withOneRetry(market)
+                if (parsed == null) {
+                    failedMarkets += market
+                } else {
+                    collected += parsed.stocks
+                    if (!parsed.isComplete) {
+                        incompleteMarkets += 1
+                        log.warn("master file had unreadable rows: market={} skipped={}", market, parsed.skippedLines)
                     }
+                }
             }
-            val stored = store.upsertAll(collected)
-            if (failedMarkets.isEmpty()) {
-                val retired = store.deactivateMissing(collected.map(KisStockMaster::code))
-                if (retired > 0) log.info("stock master retired: count={}", retired)
-            } else {
-                log.warn("skipping retirement sweep, markets failed: {}", failedMarkets)
-            }
+            val stored = stocks.upsertAll(collected)
+            retireMissing(collected, failedMarkets, incompleteMarkets)
             runs.succeed(runId, stored, failedMarkets.size, clock())
             meters.counter("batch.stock.master.synced").increment(stored.toDouble())
             log.info("stock master sync done: stored={} failedMarkets={}", stored, failedMarkets.size)
@@ -64,11 +68,45 @@ open class StockMasterSyncJob(
         }
     }
 
-    private fun collect(market: KisMarket): List<KisStockMaster> {
-        val stocks = KisMasterParser.parseAll(market, files.fetch(market))
-            .filter(KisStockMaster::isCommonStock)
-        check(stocks.isNotEmpty()) { "master file has no common stock: market=$market" }
-        return stocks
+    private fun syncSectors() {
+        val parsed = KisSectorParser.parse(files.fetchSectors())
+        check(parsed.isNotEmpty()) { "sector master file has no entry" }
+        val stored = sectors.upsertAll(parsed)
+        meters.counter("batch.sector.synced").increment(stored.toDouble())
+        log.info("sector master synced: count={}", stored)
+    }
+
+    private fun retireMissing(
+        collected: List<KisStockMaster>,
+        failedMarkets: List<KisMarket>,
+        incompleteMarkets: Int,
+    ) {
+        if (failedMarkets.isNotEmpty()) {
+            log.warn("skipping retirement sweep, markets failed: {}", failedMarkets)
+            return
+        }
+        if (incompleteMarkets > 0) {
+            log.warn("skipping retirement sweep, {} market file(s) had unreadable rows", incompleteMarkets)
+            return
+        }
+        val retired = stocks.deactivateMissing(collected.map(KisStockMaster::code))
+        if (retired > 0) log.info("stock master retired: count={}", retired)
+    }
+
+    private fun withOneRetry(market: KisMarket): ParsedStockMaster? {
+        val first = runCatching { collect(market) }
+        first.getOrNull()?.let { return it }
+        log.warn("stock master fetch failed, retrying once: market={}", market, first.exceptionOrNull())
+        return runCatching { collect(market) }
+            .onFailure { log.warn("stock master fetch failed after retry: market={}", market, it) }
+            .getOrNull()
+    }
+
+    private fun collect(market: KisMarket): ParsedStockMaster {
+        val parsed = KisMasterParser.parse(market, files.fetch(market))
+        val commonStocks = parsed.stocks.filter(KisStockMaster::isCommonStock)
+        check(commonStocks.isNotEmpty()) { "master file has no common stock: market=$market" }
+        return ParsedStockMaster(commonStocks, parsed.skippedLines)
     }
 
     companion object {
