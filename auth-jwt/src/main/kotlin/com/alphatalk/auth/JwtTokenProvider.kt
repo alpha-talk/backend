@@ -1,5 +1,6 @@
 package com.alphatalk.auth
 
+import io.jsonwebtoken.ExpiredJwtException
 import io.jsonwebtoken.JwtException
 import io.jsonwebtoken.Jwts
 import io.jsonwebtoken.security.Keys
@@ -37,6 +38,8 @@ class JwtTokenProvider(
         claims.subject?.toLongOrNull() ?: throw InvalidTokenException("subject is not a user id")
     } catch (e: InvalidTokenException) {
         throw e
+    } catch (e: ExpiredJwtException) {
+        throw ExpiredTokenException("token expired", e)
     } catch (e: JwtException) {
         throw InvalidTokenException("token rejected", e)
     } catch (e: IllegalArgumentException) {

@@ -1,5 +1,8 @@
 databaseChangeLog:
   - include:
+      file: core/db.changelog-core.yaml
+      relativeToChangelogFile: true
+  - include:
       file: news/db.changelog-news.yaml
       relativeToChangelogFile: true
   - include:
