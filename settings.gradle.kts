@@ -15,6 +15,7 @@ include(
     "auth-jwt",
     "db-migrations",
     "kis-client",
+    "core-api",
     "ws",
     "worker-price",
     "worker-batch",

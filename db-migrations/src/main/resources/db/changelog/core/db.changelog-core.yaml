@@ -1,0 +1,8 @@
+databaseChangeLog:
+  - changeSet:
+      id: 0001-users
+      author: core-api
+      changes:
+        - sqlFile:
+            path: sql/0001_users.sql
+            relativeToChangelogFile: true

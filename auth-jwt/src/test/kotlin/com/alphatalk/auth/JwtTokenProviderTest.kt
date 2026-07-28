@@ -26,6 +26,19 @@ class JwtTokenProviderTest {
     }
 
     @Test
+    fun `만료는 별도 예외로 구분된다 - 클라가 재발급할지 재로그인할지 안다`() {
+        val past = Clock.fixed(Instant.now().minus(Duration.ofHours(1)), ZoneOffset.UTC)
+        val expired = JwtTokenProvider(secret, past).issue(42L, Duration.ofMinutes(5))
+
+        assertFailsWith<ExpiredTokenException> { provider.verify(expired) }
+        assertFailsWith<InvalidTokenException> { provider.verify("not-a-jwt") }
+        assertEquals(
+            false,
+            runCatching { provider.verify("not-a-jwt") }.exceptionOrNull() is ExpiredTokenException,
+        )
+    }
+
+    @Test
     fun `다른 시크릿으로 서명된 토큰 - 거부`() {
         val other = JwtTokenProvider("another-secret-also-32-bytes-long!!!!!")
         val token = other.issue(42L, Duration.ofMinutes(5))

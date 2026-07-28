@@ -10,5 +10,8 @@ interface TokenIssuer {
     fun issue(userId: Long, ttl: Duration): String
 }
 
-class InvalidTokenException(message: String, cause: Throwable? = null) :
+open class InvalidTokenException(message: String, cause: Throwable? = null) :
     RuntimeException(message, cause)
+
+class ExpiredTokenException(message: String, cause: Throwable? = null) :
+    InvalidTokenException(message, cause)
