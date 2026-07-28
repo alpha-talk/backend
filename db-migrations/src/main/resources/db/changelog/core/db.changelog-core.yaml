@@ -6,3 +6,10 @@ databaseChangeLog:
         - sqlFile:
             path: sql/0001_users.sql
             relativeToChangelogFile: true
+  - changeSet:
+      id: 0002-stock-search
+      author: core-api
+      changes:
+        - sqlFile:
+            path: sql/0002_stock_search.sql
+            relativeToChangelogFile: true
