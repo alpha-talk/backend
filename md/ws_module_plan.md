@@ -1,14 +1,18 @@
 # Alpha Talk — `ws` 모듈(게이트웨이) 구현 계획 v0.3
 
+`ws` 게이트웨이를 어떤 순서로 어디까지 만들지 정하는 계획서다. **컴포넌트 구조·책임의 단일 진실은 [아키텍처 문서](ws_architecture.md)**이고, 이 문서는 단계(S0~S7)별 범위·완료 정의(DoD)와 팀 합의가 필요한 열린 안건(§7)을 소유한다. 각 단계에 착수하기 전에 그 단계의 범위와 DoD를 여기서 확인한다.
+
 > 기준 문서: [기획안 v2](기획안.md) · [WS API 명세 v0.6](ws_api_spec.md) · [Redis 계약 v0.7](redis_contract.md) · [아키텍처 설계 v0.7](ws_architecture.md)
 > 담당 범위: **클라 ↔ WS 게이트웨이** 경계. 문서상 명칭은 `gateway`, 본 저장소 모듈명은 `ws`로 한다.
 
-> **v0.2 → v0.3 변경**: 컴포넌트 경계에 SOLID 반영(포트/인터페이스 도입). 클래스 이름·패키지 구조를 [아키텍처 v0.2](ws_architecture.md)와 일치시킴 — **컴포넌트 구조의 단일 진실은 아키텍처 문서**이고, 계획서는 단계·범위·DoD를 담당한다.
+> **v0.2 → v0.3 변경**: 컴포넌트 경계에 SOLID 반영(포트/인터페이스 도입). 클래스 이름·패키지 구조를 [아키텍처 v0.2](ws_architecture.md)와 일치시킴.
 > **v0.1 → v0.2 변경**: 구현 스택을 **WebFlux(STOMP 자작) → Spring MVC + `@EnableWebSocketMessageBroker`** 로 전환. 클라이언트 노출 프로토콜(WS 명세)은 변경 없음.
 
 ---
 
 ## 1. 목표 & 범위
+
+게이트웨이는 실시간 푸시 전용 엣지다. 클라에게 받는 것은 제어 프레임뿐이고 콘텐츠·상태의 진실은 전부 core-api와 워커에 있다.
 
 ### 1.1 이 모듈이 하는 것 (WS 명세 §1, §3, §9)
 
@@ -32,6 +36,8 @@
 
 ## 2. 기술 스택 & 버전
 
+핵심 선택은 **MVC 스택 + SimpleBroker**다. STOMP 파싱·하트비트·구독 수명 관리를 프레임워크에 맡기면 우리는 도메인 로직만 만들면 된다 — 경계는 §2.1에 정리했다.
+
 | 영역 | 선택 | 비고 |
 |---|---|---|
 | 언어 | **Kotlin 2.x** (JVM 21 toolchain) | |
@@ -39,7 +45,7 @@
 | 빌드 | Gradle Kotlin DSL + `libs.versions.toml` 버전 카탈로그 | 멀티모듈 모노레포 |
 | Redis 클라이언트 | Spring Data Redis (Lettuce) | `RedisMessageListenerContainer`로 Pub/Sub 동적 구독 |
 | JSON | Jackson (kotlin-module) | 봉투 DTO 직렬화 |
-| JWT | jjwt 또는 Nimbus(spring-security-oauth2-jose) | core-api와 서명키/클레임 합의 필요 (§7-2) |
+| JWT | jjwt 또는 Nimbus(spring-security-oauth2-jose) | core-api와 서명키/클레임 합의 필요 (§7-1) |
 | 테스트 | JUnit5, **Testcontainers(Redis)**, `WebSocketStompClient`(테스트 클라이언트) | |
 
 ### 2.1 프레임워크가 대신 해주는 것 / 우리가 만드는 것
@@ -78,7 +84,7 @@ backend/
 | watchlist 이벤트 | `WatchlistUpdated(userId, added, removed, ts)` |
 | 상태 키 빌더 | `Keys.presence(userId)`, `Keys.price(code)` 등 |
 
-> 원칙: **채널명·키 문자열 하드코딩 금지** (기획안 §2.5-6). 게이트웨이 코드는 전부 `:contracts` 상수만 참조한다.
+> 원칙: **채널명·키 문자열 하드코딩 금지** (기획안 §2.5-6). 게이트웨이 코드는 전부 `:contracts` 상수만 참조한다 — 채널명이 바뀌어도(§7-4 리네임 안건) 상수 한 곳만 고치면 된다.
 
 ### 3.2 `:ws` 패키지 구조
 
@@ -152,7 +158,7 @@ class WebSocketConfig : WebSocketMessageBrokerConfigurer {
 - `SUBSCRIBE`: ① Principal 없으면 거부(CONNECTED 이전 구독 차단 — 명세 §2.1) ② 목적지 화이트리스트 검증: `/user/queue/quote|stream`, `/topic/rooms/{code}/posts` (+확장 `trade`/`depth`)만 허용.
 - `SEND`: 무조건 거부.
 - 토큰을 URL 쿼리파라미터로 받지 않는다. 토큰 원문 로그 금지 (NFR-07).
-- 연결 중 토큰 만료: v1은 연결 유지 (재연결 시 재검증). §7-4.
+- 연결 중 토큰 만료: v1은 연결 유지 (재연결 시 재검증). §7-3.
 
 ### 4.4 라우팅 인덱스 & 수요 카운트 (DemandRegistry)
 
@@ -170,16 +176,16 @@ class WebSocketConfig : WebSocketMessageBrokerConfigurer {
 ### 4.5 관심목록 해소 & `watchlist:updated`
 
 - `SessionConnectedEvent`에서 `WatchlistResolver.resolve(userId): Set<code>` 호출 → 유저 인덱스 등록.
-- **문제**: core-api가 아직 없어 관심목록의 진실 소스(DB)에 접근 불가 → 인터페이스로 격리하고 단계적 구현:
+- **문제**: 관심목록의 진실 소스(DB)는 core-api 몫인데 core-api가 아직 없다. 그래서 인터페이스로 격리하고 단계적으로 구현한다:
   1. *지금*: `RedisWatchlistResolver` — `watchlist:{userId}` Set을 읽는 임시 구현 (개발·테스트용 시드 가능)
-  2. *core-api 생기면*: REST 호출 또는 공유 DB 읽기로 교체 — 팀 합의 필요 (§7-3)
+  2. *core-api 생기면*: REST 호출 또는 공유 DB 읽기로 교체 — 팀 합의 필요 (§7-2)
 - `watchlist:updated` (전역 단일 채널, Redis 계약 §1.1): 상시 구독. `{userId, added, removed}` 수신 시 **자기 인스턴스에 그 유저 세션이 있으면** 인덱스 갱신 + refcount 증감 (broadcast-and-filter). 세션 없으면 무시.
 
 ### 4.6 Redis 구독 관리 (ChannelSubscriber + MessageRouter)
 
 - `ChannelSubscriber`(포트) 구현이 `RedisMessageListenerContainer` 하나로 채널 동적 `addMessageListener`/`removeMessageListener`. `DemandRegistry`는 이 포트만 호출하고 Redis를 모른다(DIP).
 - 상시 구독: `watchlist:updated` 1개. 동적 구독: 수요 있는 code의 `quote:`/`stream:`/`post:`만.
-- 수신 콜백(`MessageRouter`)은 컨테이너 스레드 → 채널 파싱 후 종류별 `RedisChannelHandler`에 위임 → 핸들러가 `ClientMessageSink`로 발행. 무거운 작업 금지(병목 지점), 파싱 실패는 카운터 후 드랍.
+- 수신 콜백(`MessageRouter`)은 컨테이너 스레드에서 돈다 — 채널을 파싱해 종류별 `RedisChannelHandler`에 위임하고 핸들러가 `ClientMessageSink`로 발행한다. 여기가 병목 지점이라 무거운 작업을 금지한다. 파싱 실패는 카운터만 올리고 드랍한다.
 - 구조·포트 근거: [아키텍처 §4.4·§3.5](ws_architecture.md).
 
 ### 4.7 느린 클라 보호 & quote conflation
@@ -202,6 +208,8 @@ Micrometer: `ws_connected_clients` · `ws_sessions_per_user` · `redis_subscribe
 
 ## 5. 구현 순서 (단계별 DoD)
 
+순서는 앞 단계 산출물이 다음 단계의 전제가 되게 잡았다. 인증 인터셉터(S2)는 S1이 세운 브로커의 인바운드 채널에 끼운다. refcount 구독(S4)은 S3이 만든 수요 인덱스를 그대로 쓴다 — 인덱스가 곧 refcount이기 때문이다(§4.4). 관심목록 라우팅(S5)은 S4의 relay 위에 얹는다. S6~S7은 기능 추가가 아니라 운영 품질 단계다. quote 샘플러처럼 측정이 필요한 결정은 S7 스모크 결과를 보고 내린다(§4.7).
+
 | 단계 | 내용 | 완료 정의 |
 |---|---|---|
 | **S0** 골격 | 모노레포 Gradle 세팅, `:contracts` + `:ws` 빈 앱, docker-compose(Redis), CI 스켈레톤 | `./gradlew build` 전 모듈 통과 |
@@ -213,11 +221,13 @@ Micrometer: `ws_connected_clients` · `ws_sessions_per_user` · `redis_subscribe
 | **S6** 경화 | 프레즌스, graceful shutdown, 메트릭, (필요시) quote 샘플러 | 느린 클라·재기동 시나리오 테스트 |
 | **S7** 통합 검증 | 가짜 price-worker 스크립트로 41종목 틱 fan-out 스모크 | p95 지연 측정, 동접 수백 세션 스모크, outbound 큐 깊이 확인 |
 
-각 단계는 독립 PR 단위. S4까지 가면 팀원(워커) 없이도 `redis-cli PUBLISH`만으로 데모 가능.
+각 단계는 독립 PR 단위다. S4를 전반부에 둔 이유이기도 하다 — S4까지 가면 팀원(워커) 없이도 `redis-cli PUBLISH`만으로 데모할 수 있다.
 
 ---
 
 ## 6. 테스트 전략 (기획안 §4 중 게이트웨이 몫)
+
+기본은 단위 계층이다 — 포트에 페이크를 꽂으면 인프라 없이 도메인을 검증할 수 있다. 실제 Redis·브로커가 붙는 검증만 Testcontainers 통합 계층에 맡긴다.
 
 | 계층 | 대상 | 방법 |
 |---|---|---|
@@ -230,6 +240,8 @@ Micrometer: `ws_connected_clients` · `ws_sessions_per_user` · `redis_subscribe
 ---
 
 ## 7. 결정 필요 / 열린 질문 (팀 합의 안건)
+
+결정 전까지는 아래 표의 "현재 가정"대로 구현한다. 각 항목은 포트나 `:contracts` 상수 뒤에 격리돼 있어 결정이 바뀌어도 교체 범위가 구현 하나로 좁혀진다.
 
 | # | 항목 | 현재 가정 | 결정 주체 |
 |---|---|---|---|

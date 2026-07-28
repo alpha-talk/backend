@@ -1,17 +1,21 @@
 # Alpha Talk — 뉴스 파이프라인 명세 v0.1
 **worker-ingest · worker-llm · 담당: 민균**
 
-뉴스를 수집해 관련 종목 방으로 배달하고, 같은 사건을 다룬 여러 언론사 기사를 하나로 묶고, 매일 종목별 호재·악재 브리핑을 생성하는 파이프라인의 설계 기준. [redis_contract.md](redis_contract.md) §2(`queue:ingest`)와 [ws_api_spec.md](ws_api_spec.md) §4.3(stream payload)을 전제로 하며, 이 설계가 요구한 계약 확장은 **각 계약 문서에 반영 완료**(redis_contract v0.7 · ws_api_spec v0.6 · KIS 워커 명세 v0.2) — 내역은 §6.
+worker-ingest·worker-llm을 구현하거나 리뷰하기 전에 여는 문서다. 뉴스를 수집해 관련 종목 방으로 배달하고, 같은 사건을 다룬 여러 언론사 기사를 하나로 묶고, 매일 종목별 호재·악재 브리핑을 만드는 파이프라인의 설계 기준을 정한다. 서비스 사이의 계약 자체는 [redis_contract.md](redis_contract.md) §2(`queue:ingest`)와 [ws_api_spec.md](ws_api_spec.md) §4.3(stream payload)이 소유하고, 이 문서는 그 계약 위에서 두 워커가 무엇을 어떤 순서로 하는지를 다룬다. 이 설계가 요구한 계약 확장은 **각 계약 문서에 반영 완료**(redis_contract v0.7 · ws_api_spec v0.6 · KIS 워커 명세 v0.2) — 내역은 §6.
 
 ---
 
 ## 0. 개요 & 책임 경계
+
+파이프라인은 세 가지 요구에서 출발했다.
 
 | 요구 | 대응 | 근거 FR |
 |---|---|---|
 | ① 신문사 크롤링 → 관련 종목 방 배달 | worker-ingest 수집·종목 매핑 → `queue:ingest` → worker-llm 요약 → `stream:{code}` | FR-11 (M1) |
 | ② 유사 내용의 타 언론사 기사 묶기 | worker-llm 임베딩 클러스터링 — 클러스터당 스트림 이벤트 1건 | FR-04/05 노이즈 감소 |
 | ③ 매일 호재·악재 AI 요약 | 일일 다이제스트 — `queue:ingest`에 digest 잡 적재 → worker-llm 생성 | 기획안 AI_SUMMARY(P3)의 뉴스 기반 조기 구체화 |
+
+수집과 가공은 서버를 나누고, 둘은 `queue:ingest` 하나로만 잇는다. 큐를 사이에 두면 스케줄은 싱글턴(ingest), 실행은 무상태 ×N(llm)으로 갈라져 리더 선출이 필요 없다.
 
 | 워커 | 책임 | 비책임 |
 |---|---|---|
@@ -30,6 +34,8 @@
 ---
 
 ## 1. 전체 파이프라인
+
+두 워커 사이에 직접 호출은 없다. 모든 연결은 `queue:ingest` 한 곳을 지나고, 기사는 수집 → 큐 → 가공 → 발행 한 방향으로만 흐른다.
 
 ```
 [RSS 피드들]  [네이버 뉴스검색 API]                        (매일 18:00 KST)
@@ -60,7 +66,11 @@ persist → publish → ack 순서 불변식(Redis 계약 §2.2)은 모든 분�
 
 ## 2. worker-ingest — 수집
 
+worker-ingest는 외부 소스를 큐 엔트리로 바꾸는 일만 한다. 관련성 판정도 요약도 하지 않고, 판단이 필요한 것은 전부 worker-llm으로 넘긴다.
+
 ### 2.1 소스 전략
+
+소스마다 저작권 부담과 종목 매핑 비용이 달라 셋을 다르게 다룬다.
 
 | 소스 | 방식 | 종목 매핑 | 비고 |
 |---|---|---|---|
@@ -68,19 +78,21 @@ persist → publish → ack 순서 불변식(Redis 계약 §2.2)은 모든 분�
 | 네이버 뉴스 검색 API | 종목명 쿼리, 주기 폴링(10분) | 쿼리 자체가 종목 — 매핑 공짜 | 공식 오픈 API, **25,000건/일** 한도 |
 | OpenDART 공시 *(후속)* | 목록 API 폴링 | 공시 자체에 종목 포함 | `type=disclosure`, 동일 경로 재사용 |
 
-- RSS 설정은 기본 `application.yml`이 소유해 실행 프로필과 무관하게 같은 목록을 사용한다. 피드의 `id`는 섹션별 로그·메트릭 식별자이고, `source`는 언론사 단위 표시값이자 `sourceId` 네임스페이스다. 같은 언론사의 여러 섹션에서 동일 기사가 노출되어도 하나로 제거되어야 한다.
-- MVP RSS는 연합뉴스·한국경제·매일경제·동아일보·경향신문·한겨레·조선일보·뉴시스·서울경제의 경제·산업·금융·증권·사회 섹션을 사용하고 정치 섹션은 수집하지 않는다.
-- 피드별 ETag와 Last-Modified는 해당 `NewsSource` 인스턴스가 메모리에 보관한다. `304 Not Modified`는 빈 결과로 처리하며, 재기동 후 첫 요청은 조건 없이 수행한다.
-- 소스는 `NewsSource` 포트 뒤의 어댑터로 추가한다 — 소스 추가가 파이프라인 코드에 영향 없어야 한다.
-- **크롤링 준법**: robots.txt 준수, 식별 가능한 User-Agent, 사이트별 요청 간격 제한. robots.txt와 본문 요청은 `rate:article-fetch:{host}` TTL 게이트로 모든 llm-worker 인스턴스가 기본 1초 간격을 공유한다. 본문 페이지 fetch는 worker-llm이 신규 클러스터를 요약하기 직전에만 수행한다(수집 단계 대량 fetch 금지).
-- **폴링 병렬화**: 소스별 fetch·처리는 고정 크기 스레드 풀(`fetch-concurrency`, 기본 4)에서 소스 단위 태스크로 병렬 실행 — 느리거나 죽은 소스(타임아웃 최대 ~15s)가 전체 폴링 주기를 지연시키지 않는다. 같은 소스 안의 기사 처리는 순차이므로 사이트별 요청 예절은 유지되고, 통계는 소스별 집계 후 합산한다(공유 가변 상태 없음).
-- 네이버 API 예산: 쿼리 대상 종목 × 폴링 횟수가 한도를 넘지 않게 설계. 시드 41종목 × 6회/시간 × 24h ≈ 5,900건/일로 여유. 전 종목(~2,600) 확장 시 수요 기반 선별 필요(§10 오픈 이슈).
+- RSS 설정은 기본 `application.yml`이 소유해 실행 프로필과 무관하게 같은 목록을 쓴다. 피드의 `id`는 섹션별 로그·메트릭 식별자이고, `source`는 언론사 단위 표시값이자 `sourceId` 네임스페이스다. 같은 언론사의 여러 섹션에 같은 기사가 걸려도 하나만 남긴다.
+- MVP RSS는 연합뉴스·한국경제·매일경제·동아일보·경향신문·한겨레·조선일보·뉴시스·서울경제의 경제·산업·금융·증권·사회 섹션을 쓰고 정치 섹션은 수집하지 않는다.
+- 피드별 ETag와 Last-Modified는 해당 `NewsSource` 인스턴스가 메모리에 들고 있다. `304 Not Modified`는 빈 결과로 처리하며, 재기동 후 첫 요청은 조건 없이 보낸다.
+- 소스는 `NewsSource` 포트 뒤의 어댑터로 추가한다 — 소스가 늘어도 파이프라인 코드는 그대로여야 한다.
+- **크롤링 준법**: robots.txt 준수, 식별 가능한 User-Agent, 사이트별 요청 간격 제한. robots.txt와 본문 요청은 `rate:article-fetch:{host}` TTL 게이트로 모든 llm-worker 인스턴스가 기본 1초 간격을 공유한다. 본문 페이지 fetch는 worker-llm이 신규 클러스터를 요약하기 직전에만 한다(수집 단계 대량 fetch 금지).
+- **폴링 병렬화**: 소스별 fetch·처리는 고정 크기 스레드 풀(`fetch-concurrency`, 기본 4)에서 소스 단위 태스크로 병렬 실행한다. 느리거나 죽은 소스(타임아웃 최대 ~15s) 하나가 전체 폴링 주기를 끌지 않게 하려는 것이다. 같은 소스 안의 기사 처리는 순차라 사이트별 요청 예절은 그대로 지켜지고, 통계는 소스별로 모은 뒤 합산한다(공유 가변 상태 없음).
+- 네이버 API 예산: 쿼리 대상 종목 × 폴링 횟수가 한도를 넘지 않게 설계한다. 시드 41종목 × 6회/시간 × 24h ≈ 5,900건/일로 여유. 전 종목(~2,600) 확장 시 수요 기반 선별이 필요하다(§10 오픈 이슈).
 
 ### 2.2 폴링 대상 종목
 
-MVP는 **설정 파일의 시드 종목 목록**(worker-price의 41종목과 동일 세트)으로 시작한다. 확장 시 후보: `watchlist` distinct 코드 합집합(워커의 core-api 테이블 읽기는 core-api의 워커 테이블 읽기와 대칭으로 허용) ∪ 거래대금 상위 N(`daily_candle`). RSS는 종목 무관 전체 수집이므로 이 목록과 무관하다.
+MVP 폴링 대상은 **설정 파일의 시드 종목 목록**이다(worker-price의 41종목과 같은 세트). 이 목록은 네이버 검색 API 쿼리에만 쓴다 — RSS는 종목과 무관하게 전체를 수집하므로 목록의 영향을 받지 않는다. 확장 후보는 `watchlist` distinct 코드 합집합 ∪ 거래대금 상위 N(`daily_candle`)이며, 워커가 core-api 테이블을 읽는 것은 core-api가 워커 테이블을 읽는 것과 대칭이라 허용한다.
 
 ### 2.3 정규화 · exact 중복 제거
+
+중복 제거는 두 층으로 나눈다. 이 단계는 **같은 기사를 다시 받은 경우만** 거른다. 같은 사건을 다룬 다른 언론사 기사는 sourceId가 다르므로 그대로 통과하고, 묶는 일은 worker-llm의 클러스터링(§3.3) 몫이다.
 
 | 단계 | 규칙 |
 |---|---|
@@ -89,35 +101,41 @@ MVP는 **설정 파일의 시드 종목 목록**(worker-price의 41종목과 동
 | exact 중복 | `SETNX seen:ingest:{sourceId}` (TTL 7일) 실패 시 skip — 같은 기사 재수집 흡수 |
 | 저장 범위 | 제목 + 리드 발췌(≤200자) + 원문 URL만 큐에 싣는다. 전문(全文)은 싣지도 저장하지도 않는다 |
 
-**같은 사건을 다룬 다른 언론사 기사는 여기서 버리지 않는다** — sourceId가 다르므로 통과하고, 묶는 것은 worker-llm의 클러스터링(§3.3) 몫이다. exact 중복 제거는 "같은 기사 재수집"만 거른다.
-
 ### 2.4 종목 후보 매핑
+
+관련성·종목 판정은 LLM(2차)이 전담한다. 수집 단계는 소스가 이미 아는 종목만 힌트로 붙이고, 한 종목도 못 붙인 기사라도 버리지 않는다.
 
 | 단계 | 방법 | 담당 |
 |---|---|---|
 | 1차 | 소스가 종목을 알면 그대로(네이버 쿼리, DART 공시) — **텍스트 매칭 없음** | ingest |
 | 2차 | LLM 요약 시 관련 종목 확정 — 후보 오탐 제거 및 후보 외 종목 발견(발견 종목은 `stock_master` 존재 검증 후 채택) | llm |
 
-- **v0.6 결정: 수집 측 텍스트 매칭(종목명 사전·매크로 키워드)을 코드 레벨에서 제거했다.** 종목명 사전은 전 종목 등록·별칭 관리 부담 대비 이득이 없고(판정은 어차피 LLM 전담), 매크로 `macroHint`는 소비 측이 사용한 적이 없다. `stock_alias` 테이블(§5)은 예약으로만 남긴다.
-- 1차는 **후보 힌트일 뿐 게이트가 아니다** — 후보 0건이어도 **전량 적재**한다(`codes` 공란 허용, Redis 계약 v0.7 §2.1). 관련성 판정은 LLM(2차)이 전담한다: 사회 기사처럼 종목명이 등장하지 않는 뉴스의 간접 영향(정책→수혜 종목)까지 LLM이 판정하며, 후보에 없던 종목은 `stock_master` 존재 검증 후 채택한다(환각 코드 차단). LLM이 기사 전체를 `marketRelevant=false`로 판정하면 후보·scope와 무관하게 IRRELEVANT drop(§3.4) — 비용 방어선은 클러스터링(§3.3, 같은 사건 = LLM 1회)이다.
-- 후보가 빈 기사의 클러스터 판정 직렬화는 단일 `lock:cluster:macro` 락으로 수렴한다 — 단일 인스턴스 운용(로컬)에선 무해하나, 운영 ×N 확장 시 병렬성이 필요해지면 이 결정을 재평가한다(§7).
-- `codes` 필드는 큐 스키마(Redis 계약 §2.1) 그대로 콤마 구분 다중.
+- **v0.6 결정: 수집 측 텍스트 매칭(종목명 사전·매크로 키워드)을 코드 레벨에서 제거했다.** 종목명 사전은 전 종목 등록·별칭 관리 부담에 비해 이득이 없고(판정은 어차피 LLM 전담), 매크로 `macroHint`는 소비 측이 쓴 적이 없다. `stock_alias` 테이블(§5)은 예약으로만 남긴다.
+- 1차는 **후보 힌트일 뿐 게이트가 아니다** — 후보 0건이어도 **전량 적재**한다(`codes` 공란 허용, Redis 계약 v0.7 §2.1). 종목명이 한 번도 안 나오는 사회 기사도 정책→수혜 종목 같은 간접 영향을 가지므로, 수집 단계에서 걸러버리면 그런 기사를 통째로 잃는다. 후보에 없던 종목은 `stock_master` 존재 검증 후 채택하고(환각 코드 차단), LLM이 기사 전체를 `marketRelevant=false`로 판정하면 후보·scope와 무관하게 IRRELEVANT로 버린다(§3.4). 전량 적재의 비용 방어선은 클러스터링이다 — 같은 사건이면 LLM 호출 1회로 끝난다(§3.3).
+- 후보가 빈 기사의 클러스터 판정 직렬화는 단일 `lock:cluster:macro` 락으로 수렴한다. 단일 인스턴스 운용(로컬)에선 무해하나, 운영 ×N 확장으로 병렬성이 필요해지면 이 결정을 재평가한다(§7).
+- `codes` 필드는 큐 스키마(Redis 계약 §2.1) 그대로 콤마 구분 다중이다.
 
 ### 2.5 큐 적재
 
-Redis 계약 §2.1 스키마를 그대로 사용한다: `source` · `sourceId` · `type` · `codes` · `title` · `url` · `body`(발췌) · `fetchedAt`. `XADD queue:ingest MAXLEN ~ 10000`.
+Redis 계약 §2.1 스키마를 그대로 쓴다: `source` · `sourceId` · `type` · `codes` · `title` · `url` · `body`(발췌) · `fetchedAt`. `XADD queue:ingest MAXLEN ~ 10000`.
 
 ---
 
 ## 3. worker-llm — 가공
 
+worker-llm은 큐 엔트리를 방에 뜨는 이벤트로 바꾼다. 인스턴스는 상태를 들고 있지 않아 ×N으로 늘려도 되고, 중복·유실 방어는 스트림 그룹(PEL·ACK)과 DB 자연키 upsert가 맡는다.
+
 ### 3.1 소비 루프
+
+인스턴스 여럿이 컨슈머 그룹 `g:llm` 하나로 경쟁 소비한다.
 
 - `XREADGROUP GROUP g:llm {consumerName} COUNT {batch} BLOCK 5000 STREAMS queue:ingest >` — consumerName은 PID@호스트명, batch 기본 8.
 - 유휴 회수: 주기적으로 `XPENDING`에서 min-idle-time을 넘긴 엔트리를 찾고 `XCLAIM queue:ingest g:llm {me} min-idle-time ...`으로 인계한다.
 - **poison 엔트리**: delivery count > 5면 `queue:ingest:dlq`로 XADD 후 원큐 XACK + 알람 메트릭. (⚠️ §6 증보)
 
 ### 3.2 type=news 처리 순서
+
+순서는 아래로 고정한다. XACK는 언제나 맨 뒤다.
 
 ```
 1. 멱등 체크와 클러스터 판정(§3.3): 제목 + 큐 발췌 300자를 임베딩하고 신규 생성 or 기존 편입, news_article INSERT(발췌만). 기존 sourceId는 해당 클러스터를 그대로 사용하고 누락된 후보 종목만 복구
@@ -128,9 +146,11 @@ Redis 계약 §2.1 스키마를 그대로 사용한다: `source` · `sourceId` �
      단, 편입 기사가 새 종목을 추가하면 그 종목에만 신규 INSERT+PUBLISH
 ```
 
-중간 단계에서 죽으면 XACK 전이므로 PEL 재처리된다. 각 쓰기는 자연키 upsert(`sourceId`, `(cluster_id, code)`)라 재처리해도 중복이 없다 — FR-11 DoD(동일 sourceId 중복 요약 0건)를 이 구조가 보장한다.
+중간 단계에서 죽으면 XACK 전이므로 PEL이 재처리한다. 각 쓰기는 자연키 upsert(`sourceId`, `(cluster_id, code)`)라 재처리해도 중복이 생기지 않는다 — FR-11 DoD(동일 sourceId 중복 요약 0건)를 이 구조가 보장한다.
 
 ### 3.3 클러스터링 — "비슷한 기사 하나로 묶기"
+
+같은 사건을 다룬 기사 N건을 클러스터 1건으로 접는다. 그래야 LLM 호출이 사건당 1회로 줄고(§3.4), 같은 소식이 방 스트림에 여러 번 뜨지 않는다.
 
 | 항목 | 값 | 근거 |
 |---|---|---|
@@ -140,11 +160,11 @@ Redis 계약 §2.1 스키마를 그대로 사용한다: `source` · `sourceId` �
 | 지름길 | 정규화 제목 해시(언론사명·[속보]·특수문자 제거)가 기존 기사와 일치하면 임베딩 생략하고 그 클러스터에 편입 | 통신사 전재 기사(제목 거의 동일)가 다수 — 임베딩 호출 절약 |
 | 동시성 | 판정~INSERT 구간을 `lock:cluster:{primaryCode}` 분산락(SET NX PX 3000, Lua compare-and-delete 해제)으로 직렬화. **임베딩·LLM 호출은 락 밖**. 요약은 `summarizing_token`·`summarizing_at` CAS lease로 한 워커만 소유한다. LLM 응답 뒤 lease 갱신 UPDATE로 클러스터 행을 잠그고 링크·이벤트·최종 상태를 한 DB 트랜잭션에 저장하므로, 만료 재선점 뒤 이전 토큰의 부분 결과도 남지 않는다. `news_cluster_stock.stream_event_id` 원자 클레임도 이벤트 중복을 막는다 | llm-worker ×N이 동일 사건 기사를 동시 처리하면 클러스터·요약·이벤트가 중복 생성됨 |
 
-클러스터 상태: `NEW`(생성 직후) → `SUMMARIZING`(토큰 lease 선점) → `SUMMARIZED`(요약·발행 완료). 전부 무관하면 `IRRELEVANT`로 끝난다. 요약 중 워커가 죽으면 lease 만료 뒤 다른 워커가 새 토큰으로 재선점하며, 이전 토큰은 결과를 저장할 수 없다.
+클러스터 상태는 `NEW`(생성 직후) → `SUMMARIZING`(토큰 lease 선점) → `SUMMARIZED`(요약·발행 완료)로 간다. 전부 무관하면 `IRRELEVANT`로 끝난다. 요약 중 워커가 죽으면 lease 만료 뒤 다른 워커가 새 토큰으로 재선점하며, 이전 토큰은 결과를 저장할 수 없다.
 
 ### 3.4 LLM 요약 · 호재/악재 분류
 
-한 클러스터당 LLM 1회 호출(묶인 기사 N건이어도 1회 — 클러스터링이 곧 비용 절감). 구조화 출력(tool use)으로 스키마를 강제한다.
+한 클러스터당 LLM 1회 호출로 끝낸다(묶인 기사 N건이어도 1회 — 클러스터링이 곧 비용 절감). 구조화 출력(tool use)으로 스키마를 강제한다.
 
 **입력**: 대표 기사 본문(확보 시) + 클러스터 내 기사 제목들 + 후보 종목 목록(코드·종목명)
 **출력 스키마**:
@@ -164,15 +184,17 @@ Redis 계약 §2.1 스키마를 그대로 사용한다: `source` · `sourceId` �
 ```
 
 - `marketRelevant=false`이면 `scope`·종목·섹터 결과를 보지 않고 클러스터를 `IRRELEVANT`로 마킹해 발행 없이 XACK한다. `MARKET`은 증시 전체에 관련된 기사만 뜻한다.
-- `marketRelevant=true`에서 `scope=STOCK`이면 `sectors` 무시, `SECTOR`/`MARKET` 처리는 §3.6. 프롬프트에 섹터 후보는 §5 `sector` 목록을 제시(자유 서술이 아니라 코드 선택).
+- `marketRelevant=true`에서 `scope=STOCK`이면 `sectors`는 무시하고, `SECTOR`/`MARKET` 처리는 §3.6을 따른다. 프롬프트에는 §5 `sector` 목록을 섹터 후보로 제시한다(자유 서술이 아니라 코드 선택).
 - `relevant=false`인 종목 후보는 제외한다(후보 오탐 제거). STOCK/SECTOR 판정인데 채택할 종목·섹터가 없으면 방어적으로 `IRRELEVANT` 처리한다.
-- confidence < 0.6이면 sentiment를 NEUTRAL로 강등 — 애매한 건 호재/악재로 단정하지 않는다.
-- 운영 `anthropic` provider의 기본 모델은 클러스터 요약 **claude-haiku-4-5**(건수 많음·단순), 일일 다이제스트 **claude-sonnet-5**(하루 종목당 1회·종합 판단). `LlmClient` 포트 뒤라 교체 자유.
-- 로컬은 `claude-cli`(기본) 또는 `codex-cli` provider로 로그인된 개인 구독을 사용하며 **단일 worker-llm 인스턴스 운용만 지원**한다. 두 CLI 모두 단발성 비대화형 실행·JSON Schema 강제·세션 비영속·2분 타임아웃이며, API 키 환경변수를 자식 프로세스에서 제거해 구독 인증과 API 과금이 섞이지 않게 한다. Claude는 도구를 전부 끄고 safe mode로 실행하며, Codex는 빈 임시 작업공간과 read-only sandbox에서 실행한다. local 프로파일은 `consumer-batch=1`로 한 번에 PEL에 한 건만 선점하고, 기동 시 CLI timeout이 `claim-idle`보다 짧은지도 검증한다. worker-llm ×N 운용은 운영 `anthropic` provider에만 적용한다.
+- confidence < 0.6이면 sentiment를 NEUTRAL로 강등한다 — 애매한 건을 호재/악재로 단정하지 않는다.
+- 운영 `anthropic` provider의 기본 모델은 클러스터 요약 **claude-haiku-4-5**(건수 많음·단순), 일일 다이제스트 **claude-sonnet-5**(하루 종목당 1회·종합 판단)다. `LlmClient` 포트 뒤라 교체는 자유롭다.
+- 로컬은 `claude-cli`(기본) 또는 `codex-cli` provider로 로그인된 개인 구독을 쓰며 **단일 worker-llm 인스턴스 운용만 지원**한다. 두 CLI 모두 단발성 비대화형 실행·JSON Schema 강제·세션 비영속·2분 타임아웃이고, 자식 프로세스에서 API 키 환경변수를 제거해 구독 인증과 API 과금이 섞이지 않게 한다. Claude는 도구를 전부 끄고 safe mode로, Codex는 빈 임시 작업공간과 read-only sandbox에서 실행한다. local 프로파일은 `consumer-batch=1`로 한 번에 PEL에 한 건만 선점하고, 기동 시 CLI timeout이 `claim-idle`보다 짧은지 검증한다. worker-llm ×N 운용은 운영 `anthropic` provider에만 적용한다.
 - 비용 추정: 시드 41종목 기준 일 ~500기사 → ~150클러스터 × ~2K tokens(Haiku) + 41다이제스트 × ~3K tokens(Sonnet) — 월 수 달러 수준.
-- 워커 내 재시도는 백오프 1회만 — 그 이상은 PEL 재처리에 맡긴다(이중 재시도 루프 금지).
+- 워커 내 재시도는 백오프 1회까지다. 그 이상은 PEL 재처리에 맡긴다(이중 재시도 루프 금지).
 
 ### 3.5 발행 정책
+
+발행은 클러스터당 종목별 이벤트 1건으로 끝난다. 뒤늦게 편입되는 기사는 기존 이벤트의 payload만 병합하고 다시 발행하지 않는다 — 같은 소식이 방 스트림에 두 번 뜨는 것을 막기 위해서다.
 
 | 상황 | stream_event | PUBLISH |
 |---|---|---|
@@ -194,13 +216,13 @@ stream payload (ws_api_spec §4.3 확장 — ⚠️ §6 증보):
 }
 ```
 
-`stream_event.payload`는 JSONB라 core-api 스키마 변경 없이 그대로 조회에 노출된다(`GET /rooms/{code}/stream`).
+`stream_event.payload`는 JSONB라 core-api 스키마를 건드리지 않고 그대로 조회에 노출된다(`GET /rooms/{code}/stream`).
 
-**수집 type의 관통(정형화)**: 큐 `type`(news/report/disclosure)은 `:contracts`의 `StreamCategory` 매핑으로 발행까지 관통한다 — `IngestType → StreamCategory(payload, eventType)` → payload `category`와 `stream_event.type`이 함께 결정된다(digest→ai). 클러스터는 **첫 기사 type으로 카테고리를 보유**하며(V6 `news_cluster.category`), 이후 편입 기사 type이 달라도 유지된다. 새 소식 종류를 추가할 때는 `IngestType`·`StreamCategory`에 값을 더하는 것으로 끝난다 — 워커 코드에 카테고리 리터럴을 두지 않는다.
+**수집 type의 관통(정형화)**: 큐 `type`(news/report/disclosure)은 `:contracts`의 `StreamCategory` 매핑을 타고 발행까지 관통한다 — `IngestType → StreamCategory(payload, eventType)` → payload `category`와 `stream_event.type`이 함께 결정된다(digest→ai). 클러스터는 **첫 기사 type으로 카테고리를 보유**하며(V6 `news_cluster.category`), 이후 편입 기사 type이 달라도 유지한다. 새 소식 종류를 추가할 때는 `IngestType`·`StreamCategory`에 값을 더하는 것으로 끝난다 — 워커 코드에 카테고리 리터럴을 두지 않는다.
 
 ### 3.6 섹터·매크로 뉴스 — scope 사다리
 
-금리 인상·환율 급변·업종 규제처럼 특정 기업 언급 없이 업종 전반에 작용하는 뉴스는 종목 후보가 붙지 않고, "어느 방에 배달할지"가 별도 문제다. LLM 판정 `scope`(§3.4)에 따라 세 갈래로 처리한다.
+금리 인상·환율 급변·업종 규제처럼 특정 기업 언급 없이 업종 전반에 작용하는 뉴스는 종목 후보가 붙지 않아, 어느 방에 배달할지가 별도 문제가 된다. LLM 판정 `scope`(§3.4)에 따라 세 갈래로 처리한다.
 
 | scope | 판정 예 | 배달 | 근거 |
 |---|---|---|---|
@@ -208,11 +230,11 @@ stream payload (ws_api_spec §4.3 확장 — ⚠️ §6 증보):
 | `SECTOR` | 기준금리 인상 → 은행·증권·건설 | 섹터를 구성 종목으로 해소해 종목별 stream_event INSERT + PUBLISH. payload에 `scope`·`sector` 표기 | 섹터 방이 없으므로("종목 하나=방 하나") 구성 종목 방이 유일한 노출면 — 방에서 "섹터 이슈" 배지로 구분 |
 | `MARKET` | 코스피 전체 급락, 거시 지표 | 방 fan-out **없음** — 일일 다이제스트 '시장 이슈'로만 반영(§4.2) | 전 방 동보(~2,600방)는 노이즈·비용만 크고 종목 방의 정보가치가 없다 |
 
-- **섹터 해소**: `stock_master.sector_code`(§5)로 구성 종목을 조회하되 **수집 커버리지 종목(`alphatalk.llm.sector.coverage-stocks`)과의 교집합**만 배달한다. **커버리지 미설정 시 fan-out하지 않는다**(명세의 "커버리지 교집합" 위반 방지 — 전 구성 종목 방에 무차별 배달 금지). 해소 결과가 상한(기본 100종목) 초과면 MARKET으로 강등 — fan-out 폭주 방지.
+- **섹터 해소**: `stock_master.sector_code`(§5)로 구성 종목을 조회하되 **수집 커버리지 종목(`alphatalk.llm.sector.coverage-stocks`)과의 교집합**만 배달한다. **커버리지 미설정 시 fan-out하지 않는다**(명세의 "커버리지 교집합" 위반 방지 — 전 구성 종목 방에 무차별 배달 금지). 해소 결과가 상한(기본 100종목)을 넘으면 MARKET으로 강등한다 — fan-out 폭주 방지.
 - **직접 관련 종목**도 SECTOR scope 클러스터에서는 `scope=SECTOR` + 자기 섹터(`sectorOf`)를 payload에 표기한다(클라 배지 일관성).
-- **섹터 스키마는 N6 선행 조건**: `sector`·`stock_master.sector_code` 조회 예외는 삼키지 않고 전파해 PEL 재시도한다(빈 결과를 성공으로 오인해 영구 미발행되는 것 방지). 워커 배치가 이 테이블을 적재하지 않았으면 뉴스 처리가 진행되지 않는 게 정상(fail-closed).
+- **섹터 스키마는 N6 선행 조건**: `sector`·`stock_master.sector_code` 조회 예외는 삼키지 않고 전파해 PEL이 재시도하게 한다(빈 결과를 성공으로 오인해 영구 미발행되는 것 방지). 워커 배치가 이 테이블을 적재하지 않았으면 뉴스 처리가 진행되지 않는 게 정상이다(fail-closed).
 - **감성은 섹터별로 반대일 수 있다** — 금리 인상은 은행 POSITIVE·건설 NEGATIVE. `news_cluster_sector`에 섹터 단위로 저장하고, fan-out된 각 stream_event에는 **그 종목이 속한 섹터의 감성**을 싣는다.
-- **노이즈 가드 2중**: ① 매크로 기사는 물량이 많지만 클러스터링(§3.3)이 선행 방어선 — 금리 기사 수십 건도 1클러스터 1이벤트. ② `impact=LOW` 판정은 실시간 fan-out 없이 다이제스트에만 반영(방 스트림은 HIGH·MEDIUM만).
+- **노이즈 가드 2중**: ① 매크로 기사는 물량이 많지만 클러스터링(§3.3)이 선행 방어선이다 — 금리 기사 수십 건도 1클러스터 1이벤트. ② `impact=LOW` 판정은 실시간 fan-out 없이 다이제스트에만 반영한다(방 스트림은 HIGH·MEDIUM만).
 - SECTOR 이벤트 payload 예:
 
 ```json
@@ -220,17 +242,21 @@ stream payload (ws_api_spec §4.3 확장 — ⚠️ §6 증보):
   "title": "한은, 기준금리 25bp 인상", "summary": "…", "sentiment": "POSITIVE", "sources": [ … ], "occurredAt": … }
 ```
 
-> 증권사 **투자의견**은 이 파이프라인을 타지 않는다 — worker-batch가 `stream_event` 저장 후 `stream:{code}`를 직접 발행한다(llm-worker와 공동 생산자, [KIS 워커 명세](alphatalk_kis_worker_spec.md) §3.3 · Redis 계약 v0.7). 라우팅은 같지만 payload는 WS v0.6의 `kind=opinion`·`opinion{}` 하위 호환 확장을 사용한다. `queue:ingest`·llm-worker는 관여하지 않는다.
+> 증권사 **투자의견**은 이 파이프라인을 타지 않는다 — worker-batch가 `stream_event` 저장 후 `stream:{code}`를 직접 발행한다(llm-worker와 공동 생산자, [KIS 워커 명세](alphatalk_kis_worker_spec.md) §3.3 · Redis 계약 v0.7). 라우팅은 같지만 payload는 WS v0.6의 `kind=opinion`·`opinion{}` 하위 호환 확장을 쓴다. `queue:ingest`·llm-worker는 관여하지 않는다.
 
 ---
 
 ## 4. 일일 다이제스트 — 호재/악재 브리핑
 
+다이제스트는 하루치 클러스터 요약을 종목당 브리핑 1건으로 접는다. 이미 요약해 둔 것을 취합하는 단계라 원문을 다시 읽지 않는다.
+
 ### 4.1 트리거와 멱등
 
-- **ingest 스케줄러**가 매일 **18:00 KST**(장 마감 후)에 **시드 종목 전체**에 대해 `XADD queue:ingest type=digest codes={code} sourceId=digest:{code}:{yyyy-MM-dd}` — ingest는 어떤 종목에 클러스터가 쌓였는지 모르므로(DB 비접근) 잡은 전 종목에 적재하고, llm-worker가 윈도 `[전일 18:00, 당일 18:00)`에 소식(STOCK·SECTOR)이 없는 종목 잡은 브리핑 없이 ACK한다(시장 이슈만으로는 브리핑을 만들지 않는다).
-- llm-worker가 같은 그룹(`g:llm`)으로 경쟁 소비 — 스케줄은 싱글턴(ingest), 실행은 ×N(llm)으로 분리돼 리더 선출이 필요 없다.
-- 멱등 키 `digest:{code}:{date}` → `stream_event` upsert. 재처리·중복 적재에도 브리핑은 하루 1건 — 동시 처리 경쟁은 `stream_event (code, digest date)` 부분 유니크 인덱스(V3)가 최종 차단.
+다이제스트도 뉴스와 같은 큐를 탄다. 그래야 PEL·ACK·멱등 같은 신뢰성 장치를 새로 만들지 않고 그대로 쓴다(§0 결정 4).
+
+- **ingest 스케줄러**가 매일 **18:00 KST**(장 마감 후)에 **시드 종목 전체**를 대상으로 `XADD queue:ingest type=digest codes={code} sourceId=digest:{code}:{yyyy-MM-dd}`를 실행한다. ingest는 DB를 보지 않아 어떤 종목에 클러스터가 쌓였는지 모르므로 잡을 전 종목에 적재하고, 윈도 `[전일 18:00, 당일 18:00)`에 소식(STOCK·SECTOR)이 없는 종목 잡은 llm-worker가 브리핑 없이 ACK한다(시장 이슈만으로는 브리핑을 만들지 않는다).
+- llm-worker가 같은 그룹(`g:llm`)으로 경쟁 소비한다 — 스케줄은 싱글턴(ingest), 실행은 ×N(llm)으로 갈라져 리더 선출이 필요 없다.
+- 멱등 키 `digest:{code}:{date}` → `stream_event` upsert. 재처리·중복 적재에도 브리핑은 하루 1건이고, 동시 처리 경쟁은 `stream_event (code, digest date)` 부분 유니크 인덱스(V3)가 최종 차단한다.
 
 ### 4.2 생성
 
@@ -255,14 +281,16 @@ stream payload (ws_api_spec §4.3 확장 — ⚠️ §6 증보):
 }
 ```
 
-- **입력에 세 층을 모두 취합한다**: 종목 직접 클러스터(STOCK) + 그 종목 섹터의 SECTOR 클러스터(impact LOW 포함 — 실시간에서 걸렀어도 여기엔 반영) + MARKET 클러스터. 단 `positives/negatives`는 종목 직접 뉴스만 담고, 섹터·시장 요인은 `sectorIssues`/`marketIssues` 버킷으로 분리한다 — 전 종목 브리핑에 같은 매크로 문구가 반복돼 종목 고유 정보가 희석되는 것을 막는다.
-- `eventId` 참조로 클라가 브리핑에서 원 뉴스 이벤트로 점프할 수 있다(MARKET 클러스터는 방 이벤트가 없으므로 eventId 없이 제목·한 줄만).
-- 프롬프트에 면책 고정: 투자 판단의 근거가 아니라 정보 요약임을 명시(기획안 FR-17 면책 방침과 동일 기조). 클라 노출 문구는 클라 몫.
-- persist → publish(`stream:{code}`) → XACK — 뉴스와 동일 불변식.
+- **입력에 세 층을 모두 취합한다**: 종목 직접 클러스터(STOCK) + 그 종목 섹터의 SECTOR 클러스터(impact LOW 포함 — 실시간에서 걸렀어도 여기엔 반영) + MARKET 클러스터. 단 `positives/negatives`에는 종목 직접 뉴스만 담고, 섹터·시장 요인은 `sectorIssues`/`marketIssues` 버킷으로 분리한다 — 전 종목 브리핑에 같은 매크로 문구가 반복돼 종목 고유 정보가 희석되는 것을 막는다.
+- `eventId` 참조 덕분에 클라가 브리핑에서 원 뉴스 이벤트로 점프한다(MARKET 클러스터는 방 이벤트가 없으므로 eventId 없이 제목·한 줄만).
+- 프롬프트에 면책을 고정한다: 투자 판단의 근거가 아니라 정보 요약임을 명시(기획안 FR-17 면책 방침과 같은 기조). 클라 노출 문구는 클라 몫이다.
+- persist → publish(`stream:{code}`) → XACK — 뉴스와 같은 불변식이다.
 
 ---
 
 ## 5. DB 스키마 (Liquibase 마이그레이션 — `db-migrations` 모듈 소유, core-api는 읽기 전용)
+
+테이블은 클러스터(사건) · 기사 · (클러스터, 종목) · (클러스터, 섹터) 네 축이다. 감성이 종목·섹터 쪽 테이블에 붙는 이유는 같은 사건이라도 대상마다 호재·악재가 갈리기 때문이다(§0 결정 3, §3.6).
 
 ```sql
 CREATE EXTENSION IF NOT EXISTS vector;
@@ -306,15 +334,15 @@ news_cluster_sector(
 
 Liquibase 마이그레이션(`db-migrations` 모듈, `news/` changelog — Flyway V1~V7에서 이관): `0001`(news_* + stock_alias) · `0002`(stream_event) · `0003`(다이제스트 부분 유니크 인덱스) · `0004`(news_cluster 요약 lease·fencing token) · `0005`(종목 verdict 기각 상태와 기존 완료 행 백필) · `0006`(클러스터 category와 허용값 제약) · `0007`(기사 수집 시 빈 후보 경계). worker-llm은 `db-migrations` 의존만으로 기동 시 changelog를 적용한다. 투자의견용 nullable `source_key`와 부분 유니크 인덱스는 core-api stream 모듈이 논리 소유하고, worker-batch 착수 시 `db-migrations`에 후속 changeSet으로 추가한다.
 
-**Flyway → Liquibase 전환 정책** — 전환은 운영 DB가 생기기 전에 완료했으므로 baseline(`changelog-sync`) 절차를 두지 않는다. `flyway_schema_history`만 있는 기존 로컬 DB는 지원하지 않는다 — `docker compose down -v`로 리셋 후 재기동이 유일한 경로다(Liquibase가 `0001`부터 재실행을 시도해 기동 실패하는 것이 의도된 fail-closed). 리셋 불가한 공유 DB가 전환 전에 생겼다면 그때는 해당 DB에 한해 수동 `changelog-sync`로 이력을 등록한다.
+**Flyway → Liquibase 전환 정책** — 전환은 운영 DB가 생기기 전에 끝냈으므로 baseline(`changelog-sync`) 절차를 두지 않는다. `flyway_schema_history`만 있는 기존 로컬 DB는 지원하지 않는다 — `docker compose down -v`로 리셋 후 재기동이 유일한 경로다(Liquibase가 `0001`부터 재실행을 시도해 기동에 실패하는 것이 의도된 fail-closed다). 리셋 불가한 공유 DB가 전환 전에 생겼다면 그때는 해당 DB에 한해 수동 `changelog-sync`로 이력을 등록한다.
 
 **changeSet 식별자 불변식** — Liquibase 변경셋 식별자는 `filepath::id::author`라 **파일 경로도 식별자의 일부**다. 적용 이력이 생긴 changeSet 파일은 이동·개명하지 않는다(경로 영구 보존). `db-migrations` 안의 디렉토리는 논리적 소유자를 표시할 뿐이며, 소유가 바뀌어도 파일은 제자리에 두고 문서로만 경계를 옮긴다.
 
-**⚠️ `stream_event` 소유 경계** — `stream_event`의 **논리적 소유자는 core-api의 stream 모듈**(core-api 명세 §11, `StreamEventAppender` 경유 INSERT). worker-llm과 worker-batch(투자의견)는 이 테이블에 INSERT하는 별도 프로세스다. 마이그레이션 파일은 `db-migrations`가 단일 소유하므로 서버 간 DDL 충돌은 없다:
+**⚠️ `stream_event` 소유 경계** — `stream_event`의 **논리적 소유자는 core-api의 stream 모듈**이다(core-api 명세 §11, `StreamEventAppender` 경유 INSERT). worker-llm과 worker-batch(투자의견)는 이 테이블에 INSERT하는 별도 프로세스다. 마이그레이션 파일은 `db-migrations`가 단일 소유하므로 서버 간 DDL 충돌은 없다:
 - `0002`(stream_event DDL)는 논리적으로 core-api 소유 — 단 changeSet 파일은 위 식별자 불변식에 따라 `news/`에 영구 보존하고, core-api 착수 시 문서·주석으로만 소유 경계를 표시한다.
 - `0003`(다이제스트 유니크 인덱스)은 뉴스 파이프라인 고유 제약이므로 논리적 소유자가 worker-llm이다.
 
-⚠️ pgvector는 PostgreSQL 확장 — docker-compose 이미지 `pgvector/pgvector:pg16`, Testcontainers도 동일 이미지. `vector(1024)` 차원은 임베딩 제공자 확정 시(§10) 함께 확정.
+⚠️ pgvector는 PostgreSQL 확장이다 — docker-compose 이미지 `pgvector/pgvector:pg16`, Testcontainers도 같은 이미지를 쓴다. `vector(1024)` 차원은 임베딩 제공자 확정 시(§10) 함께 확정한다.
 
 ---
 
@@ -357,17 +385,19 @@ worker-llm/
 └─ publish/     StreamPublisher(포트) · RedisStreamPublisher
 ```
 
-- 서버 → 서버 의존 금지 — worker-ingest는 `:contracts`에만, worker-llm은 `:contracts`·`:db-migrations`에 의존한다. JWT 불요 — `:auth-jwt` 의존하지 않는다.
+- 서버 → 서버 의존 금지 — worker-ingest는 `:contracts`에만, worker-llm은 `:contracts`·`:db-migrations`에 의존한다. JWT가 필요 없으므로 `:auth-jwt`는 의존하지 않는다.
 - 포트는 도메인 패키지에 구현과 함께 둔다(`port/` 패키지로 몰지 않음). 도메인 클래스는 Lettuce·HTTP 클라이언트·LLM SDK를 직접 import하지 않는다 — `ClusterAssigner`·`ClusterSummarizer` 전이 로직이 인프라 없이 단위 테스트되어야 한다.
 
 ## 8. 설정 · 메트릭
 
+provider는 명시 설정이고 자동 fallback이 없다. 엉뚱한 경로로 조용히 돌아가느니 기동에 실패하는 쪽을 택한다.
+
 - LLM provider는 `anthropic|claude-cli|codex-cli|fake` 중 하나를 명시한다. 기본 프로파일은 `anthropic`, local 프로파일은 `claude-cli`이며 `LLM_PROVIDER=codex-cli`로 전환한다. provider 사이 자동 fallback은 없다.
-- 로컬 무료 임베딩은 Ollama+BGE-M3를 기본 사용한다. 설치·환경변수·Docker 연결·문제 해결은 [로컬 임베딩 설정](local_embedding_setup.md)을 따른다.
-- `anthropic`은 `ANTHROPIC_API_KEY`가 없으면 기동 실패한다. `claude-cli`·`codex-cli`는 각각 로그인된 로컬 CLI가 필요하고 실행 실패·타임아웃은 PEL 재처리 경로로 전파한다. `fake`는 `alphatalk.llm.allow-fake=true`일 때만 허용한다.
-- CLI provider는 개인 구독 로컬 단일 인스턴스 전용이다. `consumer-batch=1`이 아니거나 CLI timeout이 `claim-idle` 이상이면 기동 실패해, 긴 CLI 호출 중 다른 consumer가 아직 처리하지 않은 배치 레코드를 회수하는 구성을 막는다.
+- 로컬 무료 임베딩은 Ollama+BGE-M3를 기본으로 쓴다. 설치·환경변수·Docker 연결·문제 해결은 [로컬 임베딩 설정](local_embedding_setup.md)을 따른다.
+- `anthropic`은 `ANTHROPIC_API_KEY`가 없으면 기동에 실패한다. `claude-cli`·`codex-cli`는 각각 로그인된 로컬 CLI가 필요하고, 실행 실패·타임아웃은 PEL 재처리 경로로 전파한다. `fake`는 `alphatalk.llm.allow-fake=true`일 때만 허용한다.
+- CLI provider는 개인 구독 로컬 단일 인스턴스 전용이다. `consumer-batch=1`이 아니거나 CLI timeout이 `claim-idle` 이상이면 기동에 실패해, 긴 CLI 호출 중 다른 consumer가 아직 처리하지 않은 배치 레코드를 회수하는 구성을 막는다.
 - 시크릿(환경변수): `ANTHROPIC_API_KEY` · `NAVER_CLIENT_ID/SECRET` · 임베딩 API 키. 로그 출력 금지. 임베딩 키는 `provider=rest`에서 fail-closed한다.
-- 설정: 시드 종목 목록, 소스별 폴링 주기, 유사도 임계값(0.85), 클러스터 창(72h), 원문 허용 호스트·호스트별 요청 간격(기본 1초), digest 시각(18:00) — 전부 프로퍼티로 외부화(임계값 튜닝 대비).
+- 설정: 시드 종목 목록, 소스별 폴링 주기, 유사도 임계값(0.85), 클러스터 창(72h), 원문 허용 호스트·호스트별 요청 간격(기본 1초), digest 시각(18:00) — 임계값 튜닝에 대비해 전부 프로퍼티로 외부화한다.
 - 메트릭: `ingest_fetched_total{source}` · `ingest_dup_skipped_total` · `queue_ingest_pending`(PEL, 기획안 §10 알람 항목) · `llm_processed_total{type}` · `llm_failed_total` · `cluster_merged_total` · `dlq_total` · `llm_tokens_total{model}`(비용 감시, NFR-09).
 - 알람: PEL 적체 > N(기존 합의), DLQ 유입 > 0, 일 LLM 토큰 예산 초과.
 
@@ -379,7 +409,7 @@ SPRING_PROFILES_ACTIVE=local LLM_PROVIDER=fake ./gradlew :worker-llm:bootRun
 
 ## 9. 구현 단계 & DoD
 
-> **상태(2026-07-24): N0~N6 전 단계 구현 완료.** LLM·임베딩은 포트 뒤에 있고 기본 프로파일은 API 키 미설정 시 fail-closed한다. local은 Claude/Codex CLI 구독을 선택하고 test는 명시적 fake를 쓴다. 실서비스 투입 전 남은 것: 키 주입, RSS 소스 목록·시드 종목 설정(§10-5·§2.2), 임베딩 제공자 확정(§10-1).
+> **상태(2026-07-24): N0~N6 전 단계 구현 완료.** LLM·임베딩은 포트 뒤에 있고 기본 프로파일은 API 키 미설정 시 fail-closed한다. local은 Claude/Codex CLI 구독을 고르고 test는 명시적 fake를 쓴다. 실서비스 투입 전 남은 것: 키 주입, RSS 소스 목록·시드 종목 설정(§10-5·§2.2), 임베딩 제공자 확정(§10-1).
 
 | 단계 | 범위 | DoD |
 |---|---|---|
@@ -391,9 +421,11 @@ SPRING_PROFILES_ACTIVE=local LLM_PROVIDER=fake ./gradlew :worker-llm:bootRun
 | **N5** | 운영: DLQ·XPENDING/XCLAIM·메트릭·알람 | poison 5회 초과 → DLQ 격리 · PEL 알람 동작 |
 | **N6** | 섹터·매크로(§3.6): scope 판정 · 섹터 fan-out · 다이제스트 sectorIssues/marketIssues — **선행: `stock_master.sector_code` 적재(worker-batch)** | 금리 인상 기사 1건 → 은행 섹터 커버 종목 각 방에 `scope=SECTOR` 이벤트 1건씩 · MARKET 기사는 방 이벤트 0건 + 다이제스트 반영 |
 
-각 단계 = PR 1개(git_convention: scope=worker-ingest/worker-llm). `ClusterAssigner` 판정 로직은 refcount 규칙과 동급 — 단위 테스트 없는 변경 금지.
+각 단계 = PR 1개(git_convention: scope=worker-ingest/worker-llm). `ClusterAssigner` 판정 로직은 refcount 규칙과 동급이다 — 단위 테스트 없는 변경 금지.
 
 ## 10. 오픈 이슈
+
+아래는 아직 결정하지 않은 항목이다. 기본값으로 돌려두었을 뿐이므로, 실데이터가 쌓이면 재평가한다.
 
 | # | 항목 | 선택지 · 기본값 |
 |---|---|---|
