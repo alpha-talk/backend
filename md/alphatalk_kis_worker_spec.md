@@ -2,7 +2,9 @@
 **worker-price · worker-batch · `:kis-client` 공유 라이브러리 · 담당: 민균**
 
 > **v0.2 (2026-07-27)**: 증권사별 투자의견 수집·소식 발행 추가. 회원사 코드별 `FHKST663400C0` 조회 → immutable observation 적재 → 기존 `eventId`를 재사용하는 at-least-once Pub/Sub 통보로 확정. WS payload는 v0.6의 하위 호환 확장을 사용한다.
- 
+
+worker-price·worker-batch와 두 워커가 공유하는 `:kis-client`의 구현 기준 문서다. KIS 인증·유량 정책(§1), 실시간 구독·conflation(§2), 배치 잡 카탈로그(§3), 워커 적재 테이블 스키마(§4)를 여기서 결정한다. 서비스 간 Redis 채널·키는 [redis_contract.md](redis_contract.md)가 단일 진실이고, 클라이언트가 받는 payload 구조는 [ws_api_spec.md](ws_api_spec.md)가 소유한다 — 이 문서는 워커 내부 동작과 KIS 연동 세부를 다룬다. 두 워커를 구현·수정하기 전에 해당 절부터 확인한다.
+
 ---
 
 ## 0. 개요 & 책임 경계
@@ -13,8 +15,8 @@
 | **worker-batch** | 종목마스터·수급·밸류에이션·투자의견 (KIS), 재무 (OpenDART) 스케줄 적재. 신규 투자의견 observation은 `stream_event` 저장 후 `stream:{code}`로 직접 통보(§3.3) | 실시간 시세 처리, 투자의견 전달 보장(Redis Pub/Sub은 best-effort) |
 | **`:kis-client`** | 두 워커가 공유: 토큰/Approval 관리, 레이트리미터, REST/WS 클라이언트, 프레임 파서 | 비즈니스 로직 |
 
-설계 원칙: **틱은 영속화하지 않는다**(Redis 스냅샷 + 봉으로 대체). 시세 계열(실시간·봉)은 price, 비시세(마스터·재무·수급)는 batch로 응집.
- 
+설계 원칙은 둘이다. 첫째, **틱은 영속화하지 않는다** — 클라이언트는 최신 스냅샷을 덮어쓰며 소비하고 과거 시세는 봉으로 조회하므로, 틱 원본 저장은 Redis 스냅샷 + 봉(OHLCV)으로 대체한다. 둘째, 시세 계열(실시간·봉)은 price로, 비시세(마스터·재무·수급)는 batch로 응집한다.
+
 ---
 
 ## 1. KIS OpenAPI 공통 (`:kis-client`)
@@ -26,9 +28,11 @@
 | 실전 (prod) | `https://openapi.koreainvestment.com:9443` | `ws://ops.koreainvestment.com:21000` |
 | 모의 (vts) | `https://openapivts.koreainvestment.com:29443` | `ws://ops.koreainvestment.com:31000` |
 
-`KIS_ENV=vts|prod`로 전환. 개발·스테이징은 모의 고정.
+`KIS_ENV=vts|prod`로 전환한다. 개발·스테이징은 모의 고정.
 
 ### 1.2 인증 수명주기
+
+토큰 발급 자체에 유량 제한(1분당 1회)이 있어 여러 인스턴스가 동시에 발급을 시도하면 안 된다. 그래서 발급은 분산락 안에서만 하고, 발급된 토큰은 Redis에 캐시해 공유한다.
 
 | 항목 | 값 | 대응 설계 |
 |---|---|---|
@@ -37,31 +41,33 @@
 | WS 접속키 | `POST /oauth2/Approval` `{grant_type:"client_credentials", appkey, secretkey}` → `approval_key` | 세션 연결 시 발급, 계정별 보관 |
 | 토큰 만료 응답 | REST 401/토큰 오류 코드 수신 시 | 캐시 무효화 → 재발급(락) → **1회만** 재시도 |
 
-`keyId` = appkey 해시 앞 8자(로그·키에 appkey 원문 금지).
+`keyId` = appkey 해시 앞 8자. 로그·키에 appkey 원문을 쓰지 않는다.
 
 ### 1.3 유량 제한 & 레이트리미터
 
+KIS 유량은 슬라이딩 윈도로 측정되는 것으로 알려져 있다. 공식 한도에 딱 맞춰 호출하면 윈도 경계에 호출이 몰릴 때 초과가 난다. 그래서 내부 한도는 **공식의 75%**(실전 15/s, 모의 1.5/s)로 잡는다.
+
 | 구분 | 한도 | 비고 |
 |---|---|---|
-| REST | **실전 20건/초 · 모의 2건/초 (계좌 단위)** | 슬라이딩 윈도로 측정되는 것으로 알려짐 → 경계 몰림 방지 위해 내부 한도는 **공식의 75%** (실전 15/s, 모의 1.5/s)로 설정 |
+| REST | **실전 20건/초 · 모의 2건/초 (계좌 단위)** | 내부 한도는 공식의 75% — 실전 15/s, 모의 1.5/s (근거는 위) |
 | WS 등록 | **1세션 합산 41건, 계좌(앱키)당 1세션** | 국내/해외·체결가/호가 등 전 실시간 합산 41 |
 | ⚠️ 정책 변동 | 포털 공지 "신규 고객 초당 호출 제한 안내(2026-03-20)" | **구현 착수 전 원문 확인** 후 본 표 갱신 (§9 오픈 이슈) |
 
-구현: Resilience4j `RateLimiter`를 **계정(keyId) 단위**로 생성, 모든 REST 호출이 통과. 429/유량 오류 수신 시 지수 백오프 + 메트릭 `rest_throttled` 증가.
+구현: Resilience4j `RateLimiter`를 **계정(keyId) 단위**로 생성하고 모든 REST 호출이 이를 통과한다. 429/유량 오류를 받으면 지수 백오프 후 재시도하고 메트릭 `rest_throttled`를 올린다.
 
-`worker-price`와 `worker-batch`가 같은 계정을 공유할 때 프로세스별 limiter만 두면 합산 유량을 초과한다. `:kis-client`에는 `KisRateGate` 포트를 두고, 서버는 Redis 토큰 버킷 `rate:kis-rest:{keyId}` 구현을 주입한다. 모든 일반 REST 시세·배치 호출은 **로컬 smoothing limiter → 공용 Redis gate** 순서로 통과한다. 토큰 버킷은 Lua로 `{tokens, updatedAt}` 계산·차감을 원자화하고 실전 `capacity=15, refill=15/s`, 모의 `capacity=2, refill=1.5/s`, 마지막 소비 후 TTL 2분을 사용한다. permit이 없으면 다음 충전 시각까지 대기하되 호출별 타임아웃을 넘으면 실패 처리한다. 토큰 발급의 1분 가드와 Approval 발급은 §1.2의 별도 제한을 적용한다.
+프로세스별 limiter만으로는 부족하다. `worker-price`와 `worker-batch`가 같은 계정을 공유하면 각자 한도를 지켜도 합산 유량이 한도를 넘는다. 그래서 `:kis-client`에 `KisRateGate` 포트를 두고, 서버는 Redis 토큰 버킷 `rate:kis-rest:{keyId}` 구현을 주입한다. 모든 일반 REST 시세·배치 호출은 **로컬 smoothing limiter → 공용 Redis gate** 순서로 통과한다. 토큰 버킷은 Lua로 `{tokens, updatedAt}` 계산·차감을 원자화한다. 파라미터는 실전 `capacity=15, refill=15/s`, 모의 `capacity=2, refill=1.5/s`, 마지막 소비 후 TTL 2분. permit이 없으면 다음 충전 시각까지 기다리고, 호출별 타임아웃을 넘으면 실패 처리한다. 토큰 발급의 1분 가드와 Approval 발급은 §1.2의 별도 제한을 따른다.
 
 ### 1.4 REST 공통 헤더
 
 `content-type: application/json` · `authorization: Bearer {token}` · `appkey` · `appsecret` · `tr_id: {TR}` · `custtype: P`
- 
+
 ---
 
 ## 2. worker-price (실시간)
 
 ### 2.1 수요(demand) 정의와 신호 — ★ Redis 계약 v0.2 증보 제안
 
-**수요 = ⋃(접속 중 유저의 관심목록) ∪ (입장 중인 방)** (기획안 §2.5 검증 #2). 수요를 아는 것은 게이트웨이(세션·관심목록 해소·방 토픽 구독을 모두 앎)이므로, 게이트웨이가 카운트를 유지하고 worker-price가 소비한다.
+WS 구독 용량이 유한하므로(§1.3) 전 종목이 아니라 수요가 있는 종목만 구독한다. **수요 = ⋃(접속 중 유저의 관심목록) ∪ (입장 중인 방)** (기획안 §2.5 검증 #2). 세션·관심목록 해소·방 토픽 구독을 모두 아는 쪽은 게이트웨이다. 그래서 카운트는 게이트웨이가 유지하고 worker-price는 소비만 한다.
 
 > ⚠️ **아래는 Redis 계약 v0.1에 없는 신규 제안이다. 게이트웨이 담당자와 합의 후 계약 문서 v0.2에 병합할 것.**
 
@@ -73,14 +79,16 @@
 | `gw:alive:{gwId}` | String TTL 15s | 게이트웨이(하트비트) | worker-price | 살아있는 게이트웨이 식별. 죽은 gwId의 해시는 수요 합산에서 제외(스테일 정리) |
 
 - 게이트웨이 증감 시점: CONNECT 시 관심목록 해소분 +1씩 / DISCONNECT −1씩 / `watchlist:updated` 반영 시 ± / 방 토픽 SUBSCRIBE·UNSUBSCRIBE 시 room ±.
-- worker-price 소비: ① `demand:updated` 구독으로 즉시 반영 ② **60초마다 전체 리컨실**(`gw:alive` 스캔 → 살아있는 gw들의 해시 HGETALL 합산 → 목표 구독 집합 재계산) — 메시지 유실·스테일 자기치유.
+- worker-price 소비는 두 경로다. ① `demand:updated` 구독으로 즉시 반영한다. ② **60초마다 전체 리컨실**(`gw:alive` 스캔 → 살아있는 gw들의 해시 HGETALL 합산 → 목표 구독 집합 재계산)로 메시지 유실·스테일을 자기치유한다.
 - **MVP 단순화(게이트웨이 1대)**: `{gwId}` 생략한 단일 해시 + 게이트웨이 기동 시 `DEL` 후 재구축. 다중화 시 위 형태로 확장.
+
 ### 2.2 세션 풀 & 구독 배정
 
-- 용량 `C = 41 × 계정 수`. 계정 목록은 `KIS_ACCOUNTS`(JSON 배열: keyId·appkey·appsecret) 주입.
-- 목표 집합 산출(리컨실마다): `rooms ∪ topN(quote)`이 C를 넘으면 **우선순위: ① 입장 방 ② quote refCount 내림차순**. 탈락분은 REST 폴링 강등(§2.7).
-- 배정: `종목 → (세션, 슬롯)` 맵 + 역인덱스. 신규는 빈 슬롯 최다 세션에, 해지는 슬롯 반납. 잦은 재배정(플래핑) 방지 위해 **해지는 30초 유예**(그 사이 재수요 시 취소).
-- 세션 상태머신: `DISCONNECTED → CONNECTING(Approval 발급) → CONNECTED(구독 리플레이) → DEGRADED(오류 누적)`. 재접속은 지수 백오프+지터, 성공 시 그 세션 배정분 전체 재구독.
+- 용량 `C = 41 × 계정 수`. 계정 목록은 `KIS_ACCOUNTS`(JSON 배열: keyId·appkey·appsecret)로 주입한다.
+- 목표 집합은 리컨실마다 산출한다. `rooms ∪ topN(quote)`이 C를 넘으면 **우선순위: ① 입장 방 ② quote refCount 내림차순**으로 자른다. 탈락분은 REST 폴링으로 강등한다(§2.5).
+- 배정: `종목 → (세션, 슬롯)` 맵 + 역인덱스. 신규는 빈 슬롯 최다 세션에 배정하고 해지는 슬롯을 반납한다. 잦은 재배정(플래핑)을 막으려고 **해지는 30초 유예**한다 — 그 사이 재수요가 오면 취소.
+- 세션 상태머신: `DISCONNECTED → CONNECTING(Approval 발급) → CONNECTED(구독 리플레이) → DEGRADED(오류 누적)`. 재접속은 지수 백오프+지터. 성공하면 그 세션 배정분 전체를 재구독한다.
+
 ### 2.3 KIS WS 프로토콜
 
 **구독/해지 요청 (JSON 텍스트 프레임)** — `tr_type` 1=등록, 2=해제:
@@ -91,7 +99,7 @@
 ```
 
 **수신 프레임 2종**
-1. **제어(JSON)**: 구독 성공/실패 응답, `PINGPONG` — PINGPONG 수신 시 **동일 프레임 그대로 에코**. 미에코 시 서버가 세션 종료.
+1. **제어(JSON)**: 구독 성공/실패 응답, `PINGPONG` — PINGPONG 수신 시 **동일 프레임 그대로 에코**한다. 에코하지 않으면 서버가 세션을 끊는다.
 2. **데이터(파이프 구분 텍스트)**: `암호화유무|TR_ID|데이터건수|응답데이터`
     - 첫 필드 `0`=평문, `1`=AES 암호화(체결통보 등 — 본 서비스 미사용 TR. 파서는 플래그 분기만 두고 `1`은 드랍+경고).
     - 응답데이터는 `^` 구분 필드, 건수>1이면 레코드가 이어 붙음(필드 수로 분할).
@@ -108,9 +116,11 @@
 
 > 전체 필드(40여 개)의 확정 순서는 KIS 포털 「실시간 체결가」 문서 기준으로 구현 시 상수화하고, **실 수신 프레임 캡처를 단위 테스트 픽스처**로 고정한다. `prevClose`는 틱에 없음 → `price − PRDY_VRSS`로 산출.
 
-H0STASP0(실시간 호가)는 P3 `depth` 확장 시 동일 구조로 추가.
+H0STASP0(실시간 호가)는 P3 `depth` 확장 시 동일 구조로 추가한다.
 
 ### 2.4 Conflation & 발행 (Redis 계약 §1.1 이행)
+
+클라이언트는 최신 스냅샷을 덮어쓰며 소비하므로 모든 틱을 그대로 중계할 필요가 없다. 종목별 최신값만 버퍼에 남기고 주기마다 변경분을 묶어 발행한다(conflation). 중간 틱 누락은 정상이다.
 
 ```
 KIS 프레임 → 파싱 → 종목별 최신값 버퍼(덮어쓰기)
@@ -120,26 +130,30 @@ KIS 프레임 → 파싱 → 종목별 최신값 버퍼(덮어쓰기)
 ```
 
 - 봉투·필드는 `:contracts` DTO 사용. `eventId` 없음(스냅샷성 — 계약 §1.2).
-- 중간 틱 누락은 정상(클라는 최신 스냅샷 덮어쓰기). 발행 실패(Redis 순단)는 드랍 허용 — 다음 틱이 대체.
+- 발행 실패(Redis 순단)는 드랍을 허용한다 — 다음 틱이 대체한다.
+
 ### 2.5 REST 스냅샷 폴링 (강등 경로 + 장전 워밍)
 
 - **주식현재가 시세**: `GET /uapi/domestic-stock/v1/quotations/inquire-price` · TR `FHKST01010100` · `FID_COND_MRKT_DIV_CODE=J`, `FID_INPUT_ISCD={code}` → `stck_prpr, prdy_vrss, prdy_ctrt, stck_oprc/hgpr/lwpr, acml_vol` (+`per, pbr, eps, bps` — batch가 활용).
-- 결과를 §2.4와 **동일한 캐시+발행 경로**로 흘림(`ts` 간격만 큼). 클라·게이트웨이는 차이를 모름.
-- 폴링 대상: 강등 심볼. 예산: 계정 유량의 50%를 폴링에 배정 → 실전 1계정 기준 7.5콜/s ≈ 심볼 225개를 30s 주기로 커버. 강등조차 초과하면 refCount 하위는 60s 주기로.
-- 장 시작 직전(08:55) 수요 심볼 1회 워밍 폴링 → 입장 스냅샷 공백 방지.
+- 결과는 §2.4와 **동일한 캐시+발행 경로**로 흘린다(`ts` 간격만 큼). 클라·게이트웨이는 WS 수신과 폴링을 구분하지 못한다.
+- 폴링 대상은 강등 심볼. 예산은 계정 유량의 50% → 실전 1계정 기준 7.5콜/s ≈ 심볼 225개를 30s 주기로 커버한다. 강등조차 초과하면 refCount 하위는 60s 주기로 늦춘다.
+- 장 시작 직전(08:55) 수요 심볼을 1회 워밍 폴링해 입장 스냅샷 공백을 막는다.
+
 ### 2.6 봉(OHLCV) 수집·백필
 
 - **기간별 시세**: `GET /uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice` · TR `FHKST03010100` · `FID_INPUT_DATE_1/2`(범위), `FID_PERIOD_DIV_CODE=D`, `FID_ORG_ADJ_PRC=0`(수정주가) → **1콜 최대 100봉**.
-- 정기: 매 영업일 16:30 전 상장 종목 최신 일봉 upsert (~2,600콜 → 실전 15/s 페이싱으로 약 3분, 모의 1.5/s로 약 29분 — 모의에선 관심 유니버스만).
-- 백필: 신규 종목/초기 구축 시 종목당 `(영업일수/100)`콜, 야간 슬롯에서 수행. 액면분할 등으로 마스터의 상장주식수 급변 감지 시 해당 종목 **전 구간 재적재**(수정주가 재계산 반영).
+- 정기: 매 영업일 16:30 전 상장 종목 최신 일봉 upsert. ~2,600콜 → 실전 15/s 페이싱으로 약 3분, 모의 1.5/s로 약 29분 — 모의에선 관심 유니버스만.
+- 백필: 신규 종목/초기 구축 시 종목당 `(영업일수/100)`콜을 야간 슬롯에서 수행한다. 액면분할 등으로 마스터의 상장주식수 급변을 감지하면 해당 종목을 **전 구간 재적재**한다(수정주가 재계산 반영).
+
 ### 2.7 장 운영 캘린더
 
-정규장 09:00–15:30 KST(동시호가 08:30–09:00). 08:50 세션 준비(토큰·Approval·연결) → 09:00 구독 → 15:40 구독 해제·유휴. 주말·KRX 휴장일은 스킵(MVP: 휴장일 YAML 수동 관리, P3: 캘린더 소스 자동화). KIS 새벽 점검 시간대 재접속 억제.
+정규장 09:00–15:30 KST(동시호가 08:30–09:00). 08:50 세션 준비(토큰·Approval·연결) → 09:00 구독 → 15:40 구독 해제·유휴. 주말·KRX 휴장일은 스킵한다(MVP: 휴장일 YAML 수동 관리, P3: 캘린더 소스 자동화). KIS 새벽 점검 시간대에는 재접속을 억제한다.
 
 ### 2.8 단일 실행 보장 & 그레이스풀 셧다운
 
-- 상태有 워커 → **리더 락** `SET worker:price:leader {instanceId} NX PX 30000` + 10s 갱신. 락 미획득 인스턴스는 대기(스탠바이).
-- SIGTERM: 신규 구독 중지 → 전 세션 `tr_type=2` 해제 → WS close → 락 해제. (배포 중 틱 공백 수십 초는 허용 — NFR상 무손실 대상 아님)
+- worker-price는 세션 풀·구독 배정을 인메모리로 드는 상태有 워커이고, KIS WS는 계좌당 1세션이다(§1.3). 같은 계정으로 두 인스턴스가 동시에 돌면 안 되므로 **리더 락** `SET worker:price:leader {instanceId} NX PX 30000` + 10s 갱신으로 단일 실행을 보장한다. 락 미획득 인스턴스는 스탠바이로 대기한다.
+- SIGTERM: 신규 구독 중지 → 전 세션 `tr_type=2` 해제 → WS close → 락 해제. 배포 중 틱 공백 수십 초는 허용한다 — NFR상 무손실 대상이 아니다.
+
 ---
 
 ## 3. worker-batch (스케줄 수집)
@@ -156,14 +170,14 @@ KIS 프레임 → 파싱 → 종목별 최신값 버퍼(덮어쓰기)
 | `dart_corp_map` | OpenDART `corpCode.xml`(zip) — corp_code↔종목코드 매핑 | 주 1회 | 전 상장사 | `corp_code` |
 | `financials_sync` | OpenDART `list.json`(신규 정기공시 감지) → `fnlttSinglAcntAll.json` (`bsns_year`, `reprt_code` 11013/11012/11014/11011, `fs_div=CFS`→미존재 시 `OFS`) | 매일 06:00 (공시 시즌 증분) | 신규 공시 기업만 | `(corp_code, year, reprt_code)` |
 
-일일 KIS 호출 예산(실전 1계정): candle 2.6k + valuation 2.6k + investor 2.6k ≈ **7.8k콜**(15/s 페이싱 ~9분) + opinion `B × P × 66회`. `B`와 `P`는 실응답으로 계측해 확정한다. opinion 잡 자체 상한은 **4콜/s**로 두고 공용 Redis gate가 price REST 폴링과의 합산을 계정 내부 한도(실전 15/s) 아래로 제한한다. 앞 회차가 10분 안에 끝나지 않으면 다음 회차는 ShedLock 획득 실패로 건너뛰고 `opinion_sync_overrun`을 기록한다. 모의투자는 지원 여부·페이지 수 확인 전 비활성이고, 지원이 확인돼도 공용 gate 한도 안에서만 실행한다. OpenDART는 일일 한도 내 여유(분기 시즌에도 수천 콜) — 정확 한도는 포털 확인(§9).
+일일 KIS 호출 예산(실전 1계정): candle 2.6k + valuation 2.6k + investor 2.6k ≈ **7.8k콜**(15/s 페이싱 ~9분) + opinion `B × P × 66회`. `B`와 `P`는 실응답으로 계측해 확정한다(§9). opinion 잡 자체 상한은 **4콜/s**로 두고, 공용 Redis gate가 price REST 폴링과의 합산을 계정 내부 한도(실전 15/s) 아래로 묶는다. 앞 회차가 10분 안에 끝나지 않으면 다음 회차는 ShedLock 획득 실패로 건너뛰고 `opinion_sync_overrun`을 기록한다. 모의투자는 지원 여부·페이지 수를 확인하기 전까지 비활성이다. 지원이 확인돼도 공용 gate 한도 안에서만 실행한다. OpenDART는 일일 한도 내 여유가 있다(분기 시즌에도 수천 콜) — 정확한 한도는 포털에서 확인한다(§9).
 
 ### 3.2 실행 프레임워크
 
-- Spring `@Scheduled` + **ShedLock**(Redis) — 다중 기동 안전. 잡 이력 테이블 `batch_job_run(job, run_date, status, ok_count, fail_count, started_at, finished_at, error)` 기록, 동일 `(job, run_date)` SUCCESS 존재 시 스킵(재실행 멱등).
-- **일내 반복 잡 예외**: `invest_opinion_sync`(10분 주기)는 `(job, run_date)` SUCCESS 스킵을 적용하지 않는다 — 실행 이력만 기록하고 매 회 실행한다. 멱등은 잡 내부의 upsert·미발행 스캔(§3.3)이 담당. ShedLock은 동일하게 적용해 실행 중인 회차가 있으면 다음 트리거를 시작하지 않는다. lock TTL은 최대 예상 실행시간보다 길게 두고, 장기 실행 시 만료되지 않도록 연장 가능한 lock provider를 사용한다.
-- 실패 종목은 잡 말미 1회 재시도 → 잔여 실패는 `fail_count`+로그, 다음 날 자연 회복(upsert).
-- 재무 요약 변환: DART 계정과목 → `revenue/operatingProfit/netIncome/assets/liabilities/equity` 매핑 테이블(연결 우선). 매핑 불가 계정은 raw 보존 없이 스킵+카운트(포트폴리오 범위 단순화).
+- Spring `@Scheduled` + **ShedLock**(Redis) — 다중 기동에 안전하다. 잡 이력은 테이블 `batch_job_run(job, run_date, status, ok_count, fail_count, started_at, finished_at, error)`에 기록하고, 동일 `(job, run_date)` SUCCESS가 있으면 스킵한다(재실행 멱등).
+- **일내 반복 잡 예외**: `invest_opinion_sync`(10분 주기)는 `(job, run_date)` SUCCESS 스킵을 적용하지 않는다 — 실행 이력만 기록하고 매 회 실행한다. 멱등은 잡 내부의 upsert·미발행 스캔(§3.3)이 담당한다. ShedLock은 동일하게 적용해 실행 중인 회차가 있으면 다음 트리거를 시작하지 않는다. lock TTL은 최대 예상 실행시간보다 길게 두고, 장기 실행 시 만료되지 않도록 연장 가능한 lock provider를 사용한다.
+- 실패 종목은 잡 말미에 1회 재시도한다. 잔여 실패는 `fail_count`+로그로 남기고 다음 날 upsert로 자연 회복한다.
+- 재무 요약 변환: DART 계정과목 → `revenue/operatingProfit/netIncome/assets/liabilities/equity` 매핑 테이블(연결 우선). 매핑 불가 계정은 raw 보존 없이 스킵+카운트한다(포트폴리오 범위 단순화).
 
 ### 3.3 투자의견 → 실시간 소식 파이프라인 (`stream:{code}` 직접 발행) — ★ Redis 계약 v0.7·WS 계약 v0.6 반영
 
@@ -192,7 +206,7 @@ worker-batch invest_opinion_sync (영업일 07:00~17:50 · 10분 주기)
   ④ 기존 stream:{code} 구독·relay 그대로, eventId로 중복 제거
 ```
 
-**재시도·전달 의미론**: `stream_event` 커밋이 진실의 원천이다. ⓑ 전 크래시는 다음 회차가 기존 `stream_event_id`를 읽어 같은 `eventId`로 재발행하고, ⓑ 후·ⓒ 전 크래시는 같은 메시지를 중복 발행할 수 있다. 클라는 `eventId`로 흡수한다. Redis Pub/Sub은 ACK 없는 best-effort이므로 `published_at`은 **클라이언트 전달 완료가 아니라 PUBLISH 명령 수락 완료**를 뜻한다. 실시간 통보는 유실될 수 있고, 클라는 REST(`GET /rooms/{code}/stream`)의 마지막 `eventId` 이후 조회로 복구한다.
+**재시도·전달 의미론**: `stream_event` 커밋이 진실의 원천이다. ⓑ 전에 크래시하면 다음 회차가 기존 `stream_event_id`를 읽어 같은 `eventId`로 재발행한다. ⓑ 후·ⓒ 전에 크래시하면 같은 메시지를 중복 발행할 수 있다 — 클라는 `eventId`로 흡수한다. Redis Pub/Sub은 ACK 없는 best-effort이므로 `published_at`은 **클라이언트 전달 완료가 아니라 PUBLISH 명령 수락 완료**를 뜻한다. 실시간 통보는 유실될 수 있다. 클라는 REST(`GET /rooms/{code}/stream`)에서 마지막 `eventId` 이후를 조회해 복구한다.
 
 **stream_event payload** — `category="report"`를 재사용하고 `kind`·`opinion`을 WS v0.6의 optional 확장으로 추가:
 
@@ -216,7 +230,7 @@ worker-batch invest_opinion_sync (영업일 07:00~17:50 · 10분 주기)
 ```
 
 - `businessDate`는 KIS `stck_bsop_date`를 그대로 보존한다. KIS가 시각을 주지 않으므로 `occurredAt`은 해당 observation을 처음 수집한 `collected_at`으로 고정한다.
-- `FHKST663400C0` 응답에는 회원사 코드·이름이 없으므로 `brokerCode`는 조회 요청의 `FID_INPUT_ISCD`, `brokerName`은 회원사 마스터의 표시명이다. 알 수 없는 코드는 수집을 버리지 않고 `brokerName=null`, 제목은 `"{brokerCode} 투자의견 {rating}"`으로 발행한다.
+- `FHKST663400C0` 응답에는 회원사 코드·이름이 없다. 그래서 `brokerCode`는 조회 요청의 `FID_INPUT_ISCD`, `brokerName`은 회원사 마스터의 표시명을 쓴다. 알 수 없는 코드는 수집을 버리지 않고 `brokerName=null`, 제목은 `"{brokerCode} 투자의견 {rating}"`으로 발행한다.
 - `content_hash` = `SHA-256(ratingCode + "|" + previousRatingCode + "|" + targetPrice)` 소문자 hex. 해시 전 문자열 필드는 trim하고 `null`은 빈 문자열, 목표가는 부호 없는 10진 문자열로 정규화한 UTF-8 바이트를 사용한다. 같은 날 같은 회원사의 의견·목표가가 바뀌면 별도 observation과 이벤트가 된다.
 - `source_key` = `opinion:{code}:{businessDate}:{brokerCode}:{contentHash}`. 해시로 회원사 자체를 식별하지 않고 KIS 회원사 코드를 사용한다.
 - `stream_event.type=REPORT`, `stream_event.source={brokerCode}`, payload는 위 JSON이다. 발행 봉투·채널명·카테고리·payload 타입은 전부 `:contracts` 상수/DTO를 사용한다.
@@ -253,7 +267,7 @@ financial_summary(code, year SMALLINT, reprt_code CHAR(5), fs_div CHAR(3),
 batch_job_run(id, job, run_date, status, ok_count, fail_count, started_at, finished_at, error)
 ```
 
-읽기 소비자는 core-api stockinfo/search 모듈(REST 명세 §8) + worker-llm 섹터 해소(`sector`·`stock_master.sector_code` — [뉴스 파이프라인 명세](alphatalk_news_worker_spec.md) §3.6). 단위: 금액 컬럼은 원 단위 저장, API 변환은 core-api 책임(명세와 합의).
+읽기 소비자는 core-api stockinfo/search 모듈(REST 명세 §8)과 worker-llm 섹터 해소(`sector`·`stock_master.sector_code` — [뉴스 파이프라인 명세](alphatalk_news_worker_spec.md) §3.6)다. 금액 컬럼은 원 단위로 저장하고, API 단위 변환은 core-api 책임이다(명세와 합의).
 
 ## 5. 설정·환경변수
 
@@ -269,7 +283,7 @@ batch_job_run(id, job, run_date, status, ok_count, fail_count, started_at, finis
 
 ## 6. 관측성
 
-메트릭: `kis_ws_sessions{state}` · `kis_subscribed_symbols` · `demand_symbols` · `degraded_symbols` · `tick_in_rate`/`quote_publish_rate` · `conflation_lag_ms` · `pingpong_miss` · `rest_call_rate{keyId}` · `rest_throttled` · `token_refresh_total` · `batch_job_duration/fail{job}`. 로그: 구조화 JSON, appkey/token 마스킹, 프레임 원문은 DEBUG+샘플링. 알람: WS 세션 전멸 5분, 장중 tick_in=0, 배치 실패, throttled 급증.
+메트릭: `kis_ws_sessions{state}` · `kis_subscribed_symbols` · `demand_symbols` · `degraded_symbols` · `tick_in_rate`/`quote_publish_rate` · `conflation_lag_ms` · `pingpong_miss` · `rest_call_rate{keyId}` · `rest_throttled` · `token_refresh_total` · `batch_job_duration/fail{job}`. 로그는 구조화 JSON으로 남기고 appkey/token은 마스킹한다. 프레임 원문은 DEBUG+샘플링으로만 남긴다. 알람: WS 세션 전멸 5분, 장중 tick_in=0, 배치 실패, throttled 급증.
 
 ## 7. 장애 시나리오 & 대응
 
@@ -288,6 +302,7 @@ batch_job_run(id, job, run_date, status, ok_count, fail_count, started_at, finis
 - 세션풀 단위: 가짜 KIS 서버(로컬 WS)로 41 초과 배정·재접속 리플레이·해지 유예 검증.
 - 통합(Testcontainers): demand 해시 변경 → 구독 집합 수렴 / conflation 발행 주기 / 배치 2회 실행 멱등.
 - 모의투자 스모크: 장중 삼성전자 1종목 실수신 → `quote:005930` 발행 확인.
+
 ## 9. 오픈 이슈 (구현 착수 전 확인)
 
 1. **KIS 2026-03-20 "신규 고객 초당 호출 제한" 공지 원문** — §1.3 수치 재확인 (포털 공지사항).
@@ -298,6 +313,7 @@ batch_job_run(id, job, run_date, status, ok_count, fail_count, started_at, finis
 6. OpenDART 일일 호출 한도 수치.
 7. **demand 계약 증보(§2.1) — 게이트웨이 담당자 합의** 후 Redis 계약 v0.2 병합.
 8. `FHKST663400C0`의 **모의투자(vts) 지원 여부**, 활성 회원사 코드 원천·갱신 주기, 응답 1페이지 건수와 `tr_cont` 최대 페이지를 실계정 스모크로 확정. 결과로 §3.1의 `B × P` 호출량과 10분 주기 지속 가능성을 검증한다.
+
 ---
 
 *KIS 수집 워커 명세 v0.2 — Redis 계약 v0.7·WS API v0.6·core-api 명세 v0.1과 정합. KIS 수치는 2026-07 공식 샘플 대조 기준이며 §9 항목은 실계정 재확인 대상.*

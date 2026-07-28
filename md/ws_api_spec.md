@@ -4,19 +4,19 @@
 > **v0.5 → v0.6**: `stream`의 `category=report`에 증권사 투자의견 subtype 추가 — optional `kind=opinion`·`opinion{}` 필드. STOMP 목적지·봉투·기존 필드는 변경 없음([KIS 워커 명세](alphatalk_kis_worker_spec.md) §3.3).
 > **v0.4 → v0.5**: `stream` payload 확장(§4.3) — `sentiment`·`scope`·`sector`·`sources[]`(news) · `digest{}`(ai) **optional** 필드 추가([뉴스 파이프라인 명세](alphatalk_news_worker_spec.md) §3.5·§3.6·§4.2). 기존 필드 변경 없음 — 모르는 필드는 무시하면 된다(비파괴).
 > **v0.3 → v0.4**: 게이트웨이 구현 스택을 WebFlux → **Spring MVC + STOMP 브로커**로 변경 (하단 구현 노트만 수정, 클라이언트 노출 프로토콜 §1~§9는 변경 없음)
- 
+
 ---
 
 ## 1. 개요
 
-이 문서는 **WS 게이트웨이**가 클라이언트에 제공하는 실시간 푸시 API다.
+이 문서는 클라이언트 ↔ **WS 게이트웨이**의 STOMP 프로토콜 계약이다. 목적지·프레임·페이로드·에러 처리를 여기서 정한다. 실시간 수신을 구현하거나 바꿀 때 클라·게이트웨이 양쪽이 이 문서를 기준으로 삼는다. 게이트웨이 코드 레벨 설계는 [ws_architecture.md](ws_architecture.md), 게이트웨이 ↔ 워커·메인서버의 Redis 계약은 [redis_contract.md](redis_contract.md) 몫이다.
 
-- 게이트웨이는 **푸시 전용 얇은 엣지**다: 서버→클라 실시간 전달 + 구독 제어만 한다.
+설계 전제는 하나다. **DB가 진실의 원천이고 WS 푸시는 best-effort다.** 그래서 게이트웨이는 서버→클라 전달과 구독 제어만 하는 **푸시 전용 얇은 엣지**다. 끊기면 재연결 + REST로 복구한다(§6).
+
 - **클라이언트가 콘텐츠를 보내는 SEND 프레임은 없다.** 글/댓글 작성·관심목록 편집·로그인·과거 조회는 전부 **메인서버 REST**가 담당한다(§8).
 - 전달 데이터 3종: **① 주식 틱(현재가) · ② 소식(뉴스/리포트/투자의견/AI) · ③ 글/댓글 — 게시판(post·comment)**
 - 프로토콜: **STOMP 1.2 over WebSocket**
-> 설계 원칙: DB가 진실의 원천이고 WS 푸시는 best-effort다. 끊기면 재연결 + REST로 복구한다(§6).
- 
+
 ---
 
 ## 2. 연결 (Connection)
@@ -38,32 +38,35 @@ heart-beat:10000,10000
 accept-version:1.2
 ```
 
-- **토큰을 `wss://` URL 쿼리파라미터로 보내지 말 것** — 프록시/서버 로그에 남아 유출된다. 반드시 CONNECT 헤더로.
-- 게이트웨이가 JWT를 검증한다(메인서버와 공유하는 검증 모듈). 실패 시 `ERROR` 프레임 후 연결 종료.
+- `wss://` URL 쿼리파라미터에 실린 토큰은 프록시·서버 로그에 남아 유출된다. 그래서 **토큰은 반드시 CONNECT 헤더로만 보낸다.**
+- 게이트웨이가 JWT를 검증한다(메인서버와 공유하는 검증 모듈). 실패하면 `ERROR` 프레임 후 연결을 종료한다.
 - 유효한 `CONNECTED` 이전의 모든 `SUBSCRIBE`는 거부한다.
+
 ### 2.2 하트비트 / 타임아웃
 
-- 클라·서버 모두 10초마다 핑. 리버스 프록시의 유휴 타임아웃은 **하트비트보다 길게**(예: 60초) 설정해야 프록시가 멀쩡한 연결을 끊지 않는다.
-- half-open 대비로 게이트웨이는 하트비트 미수신 시 세션을 정리하고 프레즌스 TTL을 만료시킨다.
+- 클라·서버 모두 10초마다 핑. 리버스 프록시의 유휴 타임아웃이 하트비트보다 짧으면 프록시가 멀쩡한 연결을 끊는다. 유휴 타임아웃은 **하트비트보다 길게**(예: 60초) 잡는다.
+- 하트비트가 끊긴 세션은 half-open일 수 있다. 게이트웨이는 하트비트 미수신 시 세션을 정리하고 프레즌스 TTL을 만료시킨다.
+
 ---
 
 ## 3. 구독 모델 (Subscriptions)
 
-두 종류로 나뉜다. **가벼운 건 서버가 관심목록으로 대신 구독, 무거운 건 클라가 보는 방만 구독.**
+구독은 두 종류다. **가벼운 건 서버가 관심목록으로 대신 구독, 무거운 건 클라가 보는 방만 구독.**
 
 ### 3.1 서버 해소 — 관심목록 전체 (클라는 큐 2개만 구독)
 
-입장 시 게이트웨이가 그 유저의 관심목록을 조회해, **관심목록 N종목의 틱·소식을 아래 큐로 흘린다.** 클라는 종목별로 구독하지 않고, 데이터 타입 큐 2개만 구독한다. 어느 종목인지는 페이로드의 `code`로 구분한다.
+입장하면 게이트웨이가 그 유저의 관심목록을 조회해 **관심목록 N종목의 틱·소식을 아래 큐로 흘린다.** 클라는 종목별로 구독하지 않고 데이터 타입 큐 2개만 구독한다. 어느 종목인지는 페이로드의 `code`로 구분한다.
 
 | 구독 목적지 | 데이터 | 범위 | 구독 주체 |
 |---|---|---|---|
 | `/user/queue/quote` | 현재가 틱 | 관심목록 N종목 | **서버** (입장 시 해소) |
 | `/user/queue/stream` | 소식 | 관심목록 N종목 | **서버** (입장 시 해소) |
 
-- 관심목록 변경은 메인서버 REST로 이뤄진다. 메인서버가 **단일 채널 `watchlist:updated`(Pub/Sub)** 로 `{userId, added, removed}`를 발행하면, 모든 게이트웨이가 이를 구독해 **자신이 들고 있는 세션이면 그 세션의 구독을 조정**한다(broadcast-and-filter — 유저별 채널을 만들지 않는다). *(간단 대안: 알림 없이 다음 재연결 시 재해소)*
+- 관심목록은 메인서버 REST로 바꾼다. 변경 시 메인서버가 **단일 채널 `watchlist:updated`(Pub/Sub)** 로 `{userId, added, removed}`를 발행한다. 모든 게이트웨이가 이 채널을 구독하다가 **자신이 들고 있는 세션이면 그 세션의 구독을 조정**한다(broadcast-and-filter — 유저별 채널을 만들지 않는다). *(간단 대안: 알림 없이 다음 재연결 시 재해소)*
+
 ### 3.2 클라 동적 — 보는 방 1개 (입장 시 구독, 퇴장 시 해제)
 
-방(종목 상세 화면)에 들어갈 때 그 방의 토픽을 `SUBSCRIBE`하고, 나갈 때 `UNSUBSCRIBE`한다. **구독 프레임 자체가 "방 입장" 신호**이고, 게이트웨이는 그 시점에 해당 Redis 채널을 (아직 안 했으면) 구독해 relay한다.
+방(종목 상세 화면)에 들어갈 때 그 방의 토픽을 `SUBSCRIBE`하고 나갈 때 `UNSUBSCRIBE`한다. **구독 프레임 자체가 "방 입장" 신호**다. 게이트웨이는 그 시점에 해당 Redis 채널을 (아직 안 했으면) 구독해 relay한다.
 
 | 구독 목적지 | 데이터 | 범위 |
 |---|---|---|
@@ -71,8 +74,8 @@ accept-version:1.2
 | `/topic/rooms/{code}/trade` *(선택)* | 체결 | 보는 방 1개 |
 | `/topic/rooms/{code}/depth` *(선택)* | 호가 | 보는 방 1개 |
 
-> `trade`/`depth`는 호가창·체결 풀데이터로 무거우므로 보는 방에서만. 지금 단계 필수는 `post`이고 나머지는 확장.
- 
+> `trade`/`depth`는 호가창·체결 풀데이터로 무거우므로 보는 방에서만 받는다. 지금 단계에서 필수는 `post`이고 나머지는 확장이다.
+
 ---
 
 ## 4. 메시지 스키마 (Server → Client)
@@ -95,7 +98,7 @@ accept-version:1.2
 |---|---|
 | `type` | 이벤트 종류 |
 | `code` | 종목 코드 (어느 종목/방인지) |
-| `eventId` | ULID. **stream·post은 필수**(순서·중복제거). quote/trade/depth는 선택(스냅샷성) |
+| `eventId` | ULID. **stream·post는 필수**(순서·중복제거). quote/trade/depth는 선택(스냅샷성) |
 | `ts` | 서버 송신 시각 (epoch ms) |
 | `data` | 타입별 페이로드 |
 
@@ -144,7 +147,7 @@ accept-version:1.2
   - `sentiment`·`scope`·`sector`·`sources`: 뉴스·공시·일반 리포트
   - `digest`: `category=ai` 일일 브리핑
   - `kind=opinion`·`opinion`: `category=report`인 증권사 투자의견
-- 투자의견은 `summary`·`sourceUrl`·`sentiment`를 싣지 않는다. `occurredAt`은 최초 수집 시각이고, KIS가 제공한 영업일자는 `opinion.businessDate`에 원문 그대로 둔다.
+- 투자의견은 `summary`·`sourceUrl`·`sentiment`를 싣지 않는다. `occurredAt`은 최초 수집 시각이다. KIS가 제공한 영업일자는 `opinion.businessDate`에 원문 그대로 둔다.
 - `opinion.brokerName`·`previousRatingCode`·`previousRating`·`targetPrice`는 원천 값이 없으면 `null`일 수 있다. `brokerCode`·`ratingCode`·`rating`·`businessDate`는 필수다.
 - 뉴스 상세 구조·생성 규칙은 [뉴스 파이프라인 명세](alphatalk_news_worker_spec.md) §3.5·§3.6·§4.2, 투자의견 수집·멱등 규칙은 [KIS 워커 명세](alphatalk_kis_worker_spec.md) §3.3이 소유한다.
 
@@ -169,12 +172,12 @@ accept-version:1.2
 // depth
 { "bids": [[71100, 320], [71000, 540]], "asks": [[71200, 210], [71300, 480]] }
 ```
- 
+
 ---
 
 ## 5. 클라이언트 프레임 (제어 전용)
 
-클라가 보내는 프레임은 **제어 프레임뿐**이다. 콘텐츠 SEND는 없다.
+클라가 보내는 프레임은 **제어 프레임뿐**이다. 글/댓글 작성·관심목록 편집처럼 상태를 바꾸는 행위가 메인서버 REST 한 곳으로만 흐를 때 DB가 진실의 원천으로 유지된다(§1·§8). 그래서 WS로는 콘텐츠 `SEND`를 받지 않는다.
 
 | 프레임 | 용도 |
 |---|---|
@@ -183,23 +186,23 @@ accept-version:1.2
 | `UNSUBSCRIBE` | 방 퇴장 시 해당 방 토픽 해제 |
 | `DISCONNECT` | 정상 종료 |
 
-> 글/댓글 작성, 관심목록 편집 등 **상태를 바꾸는 행위는 전부 메인서버 REST**다. WS로는 `SEND` 콘텐츠를 받지 않는다.
- 
 ---
 
 ## 6. 전달 의미론 (Delivery Semantics)
 
+- **best-effort**: WS 전달 실패는 에러가 아니다. DB가 진실의 원천이고 재연결 + REST 복구로 보강한다(§1). 아래 규칙은 전부 이 전제에서 나온다.
 - **틱 coalescing**: `quote`는 합쳐져서 온다(종목당 약 100~250ms 간격의 최신값). **델타가 아니라 항상 "최신 스냅샷"** 이므로 클라는 받은 값으로 덮어쓰면 된다. 중간 틱 누락은 정상이다.
-- **순서 / 중복제거**: `stream`·`post`은 `eventId`(ULID) **오름차순**으로 의미를 가진다. 클라는 `eventId`로 중복 제거하고 정렬한다.
-- **복구**: 끊긴 동안 놓친 `stream`·`post`은 **메인서버 REST로 "마지막 eventId 이후"를 조회**해 메운다. WS는 과거 메시지를 재전송하지 않는다(live-only). **틱은 복구하지 않는다**(다음 틱이 대체).
-- **best-effort**: WS 전달 실패는 에러가 아니다. DB가 진실의 원천이고, 재연결 + REST 복구로 보강한다.
+- **순서 / 중복제거**: `stream`·`post`는 `eventId`(ULID) **오름차순**이 순서의 기준이다. 클라는 `eventId`로 중복을 제거하고 정렬한다.
+- **복구**: 끊긴 동안 놓친 `stream`·`post`는 **메인서버 REST로 "마지막 eventId 이후"를 조회**해 메운다. WS는 과거 메시지를 재전송하지 않는다(live-only). **틱은 복구하지 않는다**(다음 틱이 대체).
+
 ---
 
 ## 7. 에러 & 재연결
 
-- **인증 실패/만료**: `ERROR` 프레임(예: `message:unauthorized`) 후 연결 종료. 클라는 토큰 갱신 후 재연결.
-- **비정상 종료**: 클라는 **지수 백오프 + 지터**로 재연결(동시 재접속 폭주 완화). 재연결 후: ① 서버가 관심목록 재해소 → ② 클라가 보던 방 재구독 → ③ 놓친 `stream`/`post`은 REST 복구.
+- **인증 실패/만료**: `ERROR` 프레임(예: `message:unauthorized`) 후 연결 종료. 클라는 토큰 갱신 후 재연결한다.
+- **비정상 종료**: 클라는 **지수 백오프 + 지터**로 재연결한다(동시 재접속 폭주 완화). 재연결 후: ① 서버가 관심목록 재해소 → ② 클라가 보던 방 재구독 → ③ 놓친 `stream`/`post`는 REST 복구.
 - **배포**: graceful close. 게이트웨이/메인서버가 분리돼 있어 **메인서버 배포는 WS 연결에 영향이 없다.**
+
 ---
 
 ## 8. 범위 밖 — 메인서버 REST가 담당
@@ -211,13 +214,14 @@ WS 게이트웨이가 하지 않는 것(같은 클라가 REST로 별도 호출):
 - 관심목록 조회·편집
 - 과거 피드·글/댓글 조회 + **커서 기반 복구**
 - 차트(봉) 조회
+
 ---
 
 ## 9. 업스트림 계약 — 게이트웨이 ← Redis (`:contracts`)
 
 게이트웨이는 워커·메인서버가 발행한 Redis 채널을 구독해 클라 목적지로 relay한다. 채널명·DTO는 `:contracts` 서브프로젝트에서 공유한다(게이트웨이/워커/메인서버 합의 필요).
 
-> 아래는 **게이트웨이가 직접 구독하는 실시간 Pub/Sub 채널**만이다. 작업 큐(`queue:ingest`, Redis Streams)·자료구조·발행 순서·LLM 요약 파이프라인을 포함한 전체 규약은 **별도 문서 「Alpha Talk — Redis 계약」** 참조.
+> 아래는 **게이트웨이가 직접 구독하는 실시간 Pub/Sub 채널**만이다. 작업 큐(`queue:ingest`, Redis Streams)·자료구조·발행 순서·LLM 요약 파이프라인을 포함한 전체 규약은 [Redis 계약](redis_contract.md) 참조.
 > ⚠️ 여기 `stream:{code}`는 **Pub/Sub 채널**이다. Redis Streams(데이터 구조)는 작업 큐 `queue:ingest` 하나뿐이며 게이트웨이는 그걸 보지 않는다.
 
 | 클라 목적지 | Redis 채널 (구독 대상) | 발행 주체 |
@@ -228,7 +232,8 @@ WS 게이트웨이가 하지 않는 것(같은 클라가 REST로 별도 호출):
 | `/topic/rooms/{code}/trade` *(선택)* | `trade:{code}` | price-worker |
 | `/topic/rooms/{code}/depth` *(선택)* | `depth:{code}` | price-worker |
 
-- 게이트웨이는 같은 종목을 보는 클라가 N명이어도 Redis 채널은 **한 번만 구독**하고 N명에게 fan-out한다(중복 제거).
+- 같은 종목을 보는 클라가 N명이어도 게이트웨이는 Redis 채널을 **한 번만 구독**하고 N명에게 fan-out한다(중복 제거).
+
 ---
 
 ## 10. 부록 — 프레임 시퀀스 예시
@@ -257,7 +262,7 @@ S: MESSAGE  destination:/topic/rooms/005930/posts  {"type":"post","code":"005930
 C: UNSUBSCRIBE  id:sub-room-005930
 C: DISCONNECT
 ```
- 
+
 ---
 
 ## 구현 노트 (게이트웨이 = Spring MVC + STOMP 브로커)
@@ -265,6 +270,5 @@ C: DISCONNECT
 - 게이트웨이는 **Spring MVC 스택 + `@EnableWebSocketMessageBroker`(SimpleBroker)** 로 구현한다. STOMP 프레이밍·하트비트·구독 레지스트리·`/user` 목적지 해소·MESSAGE fan-out은 프레임워크가 담당한다.
 - 인증은 `clientInboundChannel`의 `ChannelInterceptor`에서 처리한다: CONNECT의 JWT 검증, CONNECTED 이전 SUBSCRIBE 거부, 목적지 화이트리스트, **콘텐츠 SEND 무조건 거부**(§5).
 - 게이트웨이 고유 로직은 **수요 카운트**(code→유저/세션 인덱스 = Redis 채널 refcount)와 Redis 수신→브로커 발행 relay다. `quote:`/`stream:`은 관심목록 인덱스로 대상 유저를 찾아 `convertAndSendToUser`, `post:`는 `/topic/rooms/{code}/posts`로 `convertAndSend`.
-- SimpleBroker는 인스턴스별 인메모리지만, 게이트웨이 간 버스는 Redis Pub/Sub이 담당(broadcast-and-filter)하므로 외부 브로커(RabbitMQ relay)는 불필요하다.
-- 틱 conflation(100~250ms)은 price-worker 책임이고, 게이트웨이는 전송 제한(`setSendTimeLimit`/`setSendBufferSizeLimit`)으로 느린 클라를 방어한다 — 버퍼 초과 세션은 강제 종료하고 클라가 재연결+REST 복구한다(§6·§7과 일관).
- 
+- SimpleBroker는 인스턴스별 인메모리지만 게이트웨이 간 버스는 Redis Pub/Sub이 담당(broadcast-and-filter)하므로 외부 브로커(RabbitMQ relay)는 불필요하다.
+- 틱 conflation(100~250ms)은 price-worker 책임이다. 게이트웨이는 전송 제한(`setSendTimeLimit`/`setSendBufferSizeLimit`)으로 느린 클라를 방어한다 — 버퍼 초과 세션은 강제 종료하고 클라가 재연결+REST 복구한다(§6·§7과 일관).
