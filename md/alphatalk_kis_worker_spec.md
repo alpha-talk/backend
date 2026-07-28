@@ -244,7 +244,7 @@ worker-batch invest_opinion_sync (영업일 07:00~17:50 · 10분 주기)
 ```
 stock_master(code CHAR(6) PK, name, market, sector_code NULL, shares_outstanding BIGINT,
              is_active BOOL, listed_at NULL, updated_at)
-sector(code TEXT PK, name)   -- KIS 마스터 파일 업종 필드에서 upsert (stock_master_sync가 함께 적재)
+sector(code TEXT PK, name)   -- 업종명 소스 미확정: 마스터 파일에는 업종 코드만 있고 이름이 없다(§9-8)
 daily_candle(code, date CHAR(8), open, high, low, close INT, volume BIGINT, value BIGINT,
              PK(code, date))
 valuation_daily(code, date, per NUMERIC, pbr NUMERIC, eps INT, bps INT, market_cap BIGINT,
@@ -313,6 +313,7 @@ batch_job_run(id, job, run_date, status, ok_count, fail_count, started_at, finis
 6. OpenDART 일일 호출 한도 수치.
 7. **demand 계약 증보(§2.1) — 게이트웨이 담당자 합의** 후 Redis 계약 v0.2 병합.
 8. `FHKST663400C0`의 **모의투자(vts) 지원 여부**, 활성 회원사 코드 원천·갱신 주기, 응답 1페이지 건수와 `tr_cont` 최대 페이지를 실계정 스모크로 확정. 결과로 §3.1의 `B × P` 호출량과 10분 주기 지속 가능성을 검증한다.
+9. **`sector.name`의 원천** — 마스터 파일은 업종을 코드로만 주고 이름을 주지 않는다. `stock_master.sector_code`는 그 코드를 그대로 담지만 `sector` 테이블은 비어 있고, worker-llm의 섹터 fan-out은 이름을 쓴다([뉴스 파이프라인 명세](alphatalk_news_worker_spec.md) §3.6).
 
 ---
 

@@ -104,8 +104,9 @@ class LlmWorkerIntegrationTest {
         jdbc.jdbcTemplate.execute("INSERT INTO sector (code, name) VALUES ('33', '반도체'), ('27', '은행')")
         jdbc.jdbcTemplate.execute(
             """
-            INSERT INTO stock_master (code, name, sector_code) VALUES
-            ('005930', '삼성전자', '33'), ('000660', 'SK하이닉스', '33'), ('105560', 'KB금융', '27')
+            INSERT INTO stock_master (code, name, market, sector_code) VALUES
+            ('005930', '삼성전자', 'KOSPI', '33'), ('000660', 'SK하이닉스', 'KOSPI', '33'),
+            ('105560', 'KB금융', 'KOSPI', '27')
             """,
         )
         consumer.ensureGroup()
