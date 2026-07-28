@@ -23,6 +23,7 @@ class SessionPool(
     private val backoff: BackoffPolicy = BackoffPolicy(),
     private val connectTimeoutSeconds: Long = 10,
     private val degradedThreshold: Int = 5,
+    private val ackTimeoutMillis: Long = 5_000,
     private val clock: () -> Long = System::currentTimeMillis,
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
@@ -38,7 +39,7 @@ class SessionPool(
             }.tag("state", state.name.lowercase()).register(meters)
         }
         Gauge.builder("kis.subscribed.symbols", this) { pool ->
-            pool.sessions.sumOf { it.subscribed.size }.toDouble()
+            pool.sessions.sumOf { it.confirmed.size }.toDouble()
         }.register(meters)
         Gauge.builder("degraded.symbols", this) { pool ->
             pool.degraded.size.toDouble()
@@ -70,6 +71,11 @@ class SessionPool(
     @Synchronized
     fun degradedSymbols(): Set<String> = degraded.toSet()
 
+    @Synchronized
+    private fun applyAck(pooled: PooledSession, trKey: String?, success: Boolean) {
+        pooled.onAck(trKey, success)
+    }
+
     private fun reconcileAssignments(target: Set<String>) {
         val now = clock()
         degraded.clear()
@@ -98,7 +104,8 @@ class SessionPool(
     private inner class PooledSession(val account: KisAccount) {
         var state: SessionState = SessionState.DISCONNECTED
         val assigned = mutableSetOf<String>()
-        val subscribed = mutableSetOf<String>()
+        val confirmed = mutableSetOf<String>()
+        val pending = mutableMapOf<String, Long>()
         var session: KisWebSocketSession? = null
         var nextConnectAttemptAt = 0L
         var consecutiveFailures = 0
@@ -115,7 +122,7 @@ class SessionPool(
             if (session == null) return
             runCatching { session?.close() }
             session = null
-            subscribed.clear()
+            clearSubscriptions()
             registerFailure()
             log.warn("kis ws connection lost: keyId={} failures={}", account.keyId, consecutiveFailures)
         }
@@ -126,7 +133,7 @@ class SessionPool(
                 val created = KisWebSocketSession(wsUrl, approvalKeys(account), FrameHandler(this))
                 created.connect().get(connectTimeoutSeconds, TimeUnit.SECONDS)
                 session = created
-                subscribed.clear()
+                clearSubscriptions()
                 state = SessionState.CONNECTED
                 consecutiveFailures = 0
                 log.info("kis ws connected: keyId={} assigned={}", account.keyId, assigned.size)
@@ -140,24 +147,42 @@ class SessionPool(
 
         fun syncSubscriptions() {
             val current = session ?: return
-            (assigned - subscribed).forEach { symbol ->
+            val now = clock()
+            pending.entries.removeIf { now - it.value >= ackTimeoutMillis }
+            (assigned - confirmed - pending.keys).forEach { symbol ->
                 runCatching { current.subscribe(symbol) }
-                    .onSuccess { subscribed += symbol }
+                    .onSuccess { pending[symbol] = now }
                     .onFailure { log.warn("subscribe failed: keyId={} code={}", account.keyId, symbol, it) }
             }
-            (subscribed - assigned).forEach { symbol ->
+            (confirmed + pending.keys - assigned).forEach { symbol ->
                 runCatching { current.unsubscribe(symbol) }
-                subscribed -= symbol
+                confirmed -= symbol
+                pending.remove(symbol)
             }
+        }
+
+        fun onAck(trKey: String?, success: Boolean) {
+            val symbol = trKey ?: return
+            if (pending.remove(symbol) == null) return
+            if (success) {
+                confirmed += symbol
+            } else {
+                log.warn("subscribe rejected, retrying: keyId={} code={}", account.keyId, symbol)
+            }
+        }
+
+        fun clearSubscriptions() {
+            confirmed.clear()
+            pending.clear()
         }
 
         fun disconnect() {
             session?.let { current ->
-                runCatching { subscribed.forEach { current.unsubscribe(it) } }
+                runCatching { (confirmed + pending.keys).forEach { current.unsubscribe(it) } }
                 runCatching { current.close() }
             }
             session = null
-            subscribed.clear()
+            clearSubscriptions()
             state = SessionState.DISCONNECTED
             consecutiveFailures = 0
             nextConnectAttemptAt = 0
@@ -178,9 +203,7 @@ class SessionPool(
         }
 
         override fun onSubscribeAck(trId: String?, trKey: String?, success: Boolean) {
-            if (!success) {
-                log.warn("subscribe rejected: keyId={} trId={} trKey={}", pooled.account.keyId, trId, trKey)
-            }
+            applyAck(pooled, trKey, success)
         }
 
         override fun onEncryptedDropped(trId: String) {
