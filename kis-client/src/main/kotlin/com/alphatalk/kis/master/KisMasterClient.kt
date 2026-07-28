@@ -13,20 +13,24 @@ class KisMasterClient(
     private val http: HttpClient = HttpClient.newHttpClient(),
     private val timeout: Duration = Duration.ofMinutes(2),
 ) {
-    fun download(market: KisMarket): ByteArray {
+    fun download(market: KisMarket): ByteArray = download(market.fileName)
+
+    fun downloadSectors(): ByteArray = download(KisSectorParser.FILE_NAME)
+
+    private fun download(fileName: String): ByteArray {
         val request = HttpRequest.newBuilder()
-            .uri(URI.create("$baseUrl/${market.fileName}.mst.zip"))
+            .uri(URI.create("$baseUrl/$fileName.mst.zip"))
             .timeout(timeout)
             .GET()
             .build()
         val response = http.send(request, HttpResponse.BodyHandlers.ofByteArray())
         if (response.statusCode() != 200) {
-            throw KisClientException("master download failed: market=$market status=${response.statusCode()}")
+            throw KisClientException("master download failed: file=$fileName status=${response.statusCode()}")
         }
-        return unzipSingleEntry(response.body(), market)
+        return unzipSingleEntry(response.body(), fileName)
     }
 
-    private fun unzipSingleEntry(archive: ByteArray, market: KisMarket): ByteArray {
+    private fun unzipSingleEntry(archive: ByteArray, fileName: String): ByteArray {
         ZipInputStream(archive.inputStream()).use { zip ->
             var entry = zip.nextEntry
             while (entry != null) {
@@ -36,7 +40,7 @@ class KisMasterClient(
                 entry = zip.nextEntry
             }
         }
-        throw KisClientException("master archive has no $MASTER_SUFFIX entry: market=$market")
+        throw KisClientException("master archive has no $MASTER_SUFFIX entry: file=$fileName")
     }
 
     companion object {

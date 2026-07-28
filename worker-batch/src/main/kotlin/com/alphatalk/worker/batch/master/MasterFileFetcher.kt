@@ -2,6 +2,7 @@ package com.alphatalk.worker.batch.master
 
 import com.alphatalk.kis.master.KisMarket
 
-fun interface MasterFileFetcher {
+interface MasterFileFetcher {
     fun fetch(market: KisMarket): ByteArray
+    fun fetchSectors(): ByteArray
 }
