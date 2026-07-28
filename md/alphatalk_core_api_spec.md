@@ -1,14 +1,17 @@
 # Alpha Talk — core-api REST API 명세 v0.1
 **메인서버(core-api) · 동기 API 전용 · 담당: 민균**
- 
+
+클라이언트가 메인서버(core-api)를 호출할 때 따르는 REST 계약이다. core-api를 구현하거나 클라이언트에서 이 API를 붙일 때 기준으로 삼는다. 실시간 푸시(STOMP) 프로토콜은 WS 명세(ws_api_spec.md), 서비스 간 Redis 계약은 redis_contract.md가 다룬다. 이 문서는 동기 REST만 정의한다.
+
 ---
 
 ## 0. 개요 & 원칙
 
-- core-api는 **진실의 원천(DB)을 다루는 유일한 클라이언트 대면 동기 API**다. WS는 best-effort 통보이며, 모든 영속 상태 변경(글·관심목록·커서)과 과거 조회·복구는 이 API가 담당한다 (WS 명세 §8).
+- core-api는 **진실의 원천(DB)을 다루는 유일한 클라이언트 대면 동기 API**다. WS는 best-effort 통보일 뿐이다. 영속 상태 변경(글·관심목록·커서)과 과거 조회·복구는 전부 이 API 몫이다 (WS 명세 §8).
 - **core-api는 KIS를 직접 호출하지 않는다** (ADR A7). 시세·지표는 워커가 적재한 DB/Redis만 읽는다.
-- 7개 모듈: `auth` · `search` · `subscription` · `stream` · `notification` · `community` · `stockinfo`. 경계는 Spring Modulith로 강제.
-- 이 문서의 응답 예시는 대표 케이스다. 필드 정의는 예시 + 필드 표로 확정하며, 전 바디의 기계가독 스키마(OpenAPI)는 구현과 함께 `springdoc`으로 생성해 이 문서와 상호 검증한다.
+- 모듈은 7개다: `auth` · `search` · `subscription` · `stream` · `notification` · `community` · `stockinfo`. 경계는 Spring Modulith로 강제한다.
+- 이 문서의 응답 예시는 대표 케이스다. 필드 정의는 예시 + 필드 표로 확정한다. 전 바디의 기계가독 스키마(OpenAPI)는 구현과 함께 `springdoc`으로 생성해 이 문서와 상호 검증한다.
+
 ---
 
 ## 1. 공통 규약
@@ -25,9 +28,10 @@
 
 ### 1.2 인증 토큰 정책
 
-- 액세스 토큰 30분 / 리프레시 토큰 14일, **리프레시 회전(rotation)**: `/auth/refresh` 시 새 쌍 발급, 구 리프레시 즉시 무효화. 재사용 감지 시 해당 유저 전 토큰 무효화.
-- WS 게이트웨이는 같은 검증 모듈(서명 키 공유)로 CONNECT 헤더의 JWT를 검증한다.
-- 토큰은 응답 바디로 전달(포트폴리오 단순화). XSS 대비는 프론트 책임 범위로 문서화. 로그에 토큰 출력 금지.
+- 액세스 토큰 30분 / 리프레시 토큰 14일. **리프레시 회전(rotation)**: `/auth/refresh` 시 새 쌍을 발급하고 구 리프레시는 즉시 무효화한다. 재사용을 감지하면 해당 유저의 전 토큰을 무효화한다.
+- WS 게이트웨이는 같은 검증 모듈(서명 키 공유)로 CONNECT 헤더의 JWT를 검증한다 — 클라는 같은 액세스 토큰으로 WS도 인증한다.
+- 토큰은 응답 바디로 전달한다(포트폴리오 단순화). XSS 대비는 프론트 책임 범위로 문서화한다. 로그에 토큰을 출력하지 않는다.
+
 ### 1.3 오류 포맷
 
 ```json
@@ -47,7 +51,7 @@
 
 ### 1.4 커서 페이지네이션 (공통 규약)
 
-ULID 사전순 = 시간순임을 이용한 **양방향 커서**. 스트림·글·알림 목록에 공통 적용.
+ULID 사전순이 곧 시간순이라는 성질을 이용한 **양방향 커서**다. 스트림·글·알림 목록에 공통 적용한다. WS 푸시는 전달을 보장하지 않으므로(§0) 놓친 구간 복구도 이 커서 규약이 감당한다.
 
 | 파라미터 | 의미 |
 |---|---|
@@ -62,7 +66,8 @@ ULID 사전순 = 시간순임을 이용한 **양방향 커서**. 스트림·글�
 ```
 
 - `before`: `cursor`보다 작은 ID를 내림차순 limit건. `after`: 큰 ID를 **오름차순** limit건(복구는 오래된 것부터 재생).
-- 클라는 `eventId` 기준 중복 제거(WS 수신분과 REST 복구분이 겹칠 수 있음 — 정상).
+- 클라는 `eventId` 기준으로 중복을 제거한다. WS 수신분과 REST 복구분이 겹칠 수 있고 이는 정상이다.
+
 ### 1.5 레이트리밋 (쓰기 계열, FR-19)
 
 | 대상 | 한도 | 키 |
@@ -76,11 +81,14 @@ ULID 사전순 = 시간순임을 이용한 **양방향 커서**. 스트림·글�
 
 ### 1.6 멱등성
 
-- 글/댓글 POST는 `Idempotency-Key` 헤더(선택, ULID) 지원: 10분 내 동일 키 재요청 시 최초 응답 재반환(Redis 캐시).
-- 공감/구독은 PUT/DELETE 의미론으로 자연 멱등.
+- 글/댓글 POST는 `Idempotency-Key` 헤더(선택, ULID)를 지원한다: 10분 내 같은 키로 재요청하면 최초 응답을 재반환한다(Redis 캐시).
+- 공감/구독은 PUT/DELETE 의미론이라 자연 멱등이다.
+
 ---
 
 ## 2. auth 모듈
+
+계정 생성과 세션 유지 흐름을 받친다 — 가입·로그인·토큰 갱신·로그아웃. 여기서 발급한 토큰이 REST와 WS CONNECT 인증의 원천이다(§1.2).
 
 | 메서드 | 경로 | 인증 | 설명 |
 |---|---|---|---|
@@ -91,7 +99,7 @@ ULID 사전순 = 시간순임을 이용한 **양방향 커서**. 스트림·글�
 | GET | `/users/me` | ✓ | 내 프로필 |
 
 **POST /auth/signup** — req `{ "email": "a@b.c", "password": "...", "nickname": "민균" }` → 201 `{ "userId": 123 }`
-검증: 비밀번호 8자+영/숫자 조합, 닉네임 2~12자. 중복 이메일/닉네임 409 `DUPLICATE`.
+검증: 비밀번호 8자+영/숫자 조합, 닉네임 2~12자. 중복 이메일/닉네임은 409 `DUPLICATE`.
 
 **POST /auth/login** — req `{ "email", "password" }` → 200
 ```json
@@ -101,12 +109,14 @@ ULID 사전순 = 시간순임을 이용한 **양방향 커서**. 스트림·글�
 **POST /auth/refresh** — req `{ "refreshToken" }` → 200 새 토큰 쌍(위와 동일 형태). 재사용 감지 시 401 + 전 세션 무효화.
 
 **GET /users/me** → 200 `{ "userId": 123, "email": "a@b.c", "nickname": "민균", "createdAt": 1719... }`
- 
+
 ---
 
 ## 3. search 모듈
 
-**GET /stocks/search?q={질의}&limit=10** (인증 ✓) — 종목명/코드 검색·자동완성 (FR-02)
+유저가 종목 방을 찾아 들어가는 입구다 — 종목명/코드 검색·자동완성 (FR-02).
+
+**GET /stocks/search?q={질의}&limit=10** (인증 ✓)
 
 ```json
 { "items": [ { "code": "005930", "name": "삼성전자", "market": "KOSPI" },
@@ -114,10 +124,13 @@ ULID 사전순 = 시간순임을 이용한 **양방향 커서**. 스트림·글�
 ```
 
 - 매칭: 코드 prefix OR 이름 부분일치(`ILIKE` + `pg_trgm` GIN 인덱스). 정렬: prefix 일치 우선 → 시총 내림차순.
-- `q` 1자 이상. 데이터 원천은 batch-worker의 `stock_master`. Phase 3에서 OpenSearch(형태소/초성)로 승격하되 **API 계약은 불변**.
+- `q`는 1자 이상. 데이터 원천은 batch-worker의 `stock_master`다. Phase 3에서 OpenSearch(형태소/초성)로 승격하되 **API 계약은 불변**.
+
 ---
 
 ## 4. subscription 모듈 (관심목록)
+
+관심목록이 곧 "내 방 목록"이다. 방 목록 조회(FR-03)와 구독·해지 흐름을 받친다.
 
 | 메서드 | 경로 | 설명 |
 |---|---|---|
@@ -133,16 +146,20 @@ ULID 사전순 = 시간순임을 이용한 **양방향 커서**. 스트림·글�
                "unreadCount": 12 } ] }
 ```
 
-- `include=price` → Redis `price:{code}` 조회, 미스 시 최신 일봉 종가 + `"delayed": true`.
-- `include=unread` → notification 모듈 집계 위임 (§5). 미지정 시 해당 필드 생략(가볍게).
-  **PUT /watchlist/{code}** → 201(신규)/200(기존). 한도 100개 초과 시 422. 없는 종목 404.
-  **DELETE /watchlist/{code}** → 204.
+- `include=price` → Redis `price:{code}` 조회. 미스면 최신 일봉 종가에 `"delayed": true`를 붙인다.
+- `include=unread` → notification 모듈에 집계를 위임한다 (§6). 미지정 시 해당 필드를 생략해 응답을 가볍게 유지한다.
+
+**PUT /watchlist/{code}** → 201(신규)/200(기존). 한도 100개 초과 시 422. 없는 종목은 404.
+
+**DELETE /watchlist/{code}** → 204.
 
 **부수효과(Redis 계약 §1.1)**: 변경 커밋 후 `PUBLISH watchlist:updated` `{ "userId": 123, "added": ["005930"], "removed": [], "ts": ... }` → 게이트웨이가 접속 세션의 서버 해소 구독과 **수요 카운트**를 조정한다.
- 
+
 ---
 
 ## 5. stream 모듈 (방의 통합 스트림)
+
+방 화면의 본체다 — 통합 스트림의 과거 조회·놓친 구간 복구(FR-04·05·06)와 입장 직후 시세 스냅샷(FR-08)을 받친다.
 
 | 메서드 | 경로 | 설명 |
 |---|---|---|
@@ -164,21 +181,25 @@ ULID 사전순 = 시간순임을 이용한 **양방향 커서**. 스트림·글�
   "pageInfo": { "oldest": "01J9Z7...", "newest": "01J9Z8...", "hasMoreBefore": true, "hasMoreAfter": false } }
 ```
 
-- `types` 미지정 시 전체. `payload`는 §(기획안 2.3) 타입 매핑을 따르는 타입별 JSON.
-- **재접속 복구**: 클라가 마지막 수신 `eventId`로 `direction=after` 호출 → 놓친 `stream`/`post`를 오름차순으로 메움 (WS 명세 §6). `hasMoreAfter=true`면 반복 호출.
+- `types` 미지정 시 전체 타입을 반환한다. `payload`는 타입별 JSON이며 타입 매핑은 기획안 §2.3을 따른다.
+- **재접속 복구**: 클라가 마지막 수신 `eventId`로 `direction=after`를 호출하면 놓친 `stream`/`post`를 오름차순으로 메운다 (WS 명세 §6). `hasMoreAfter=true`면 반복 호출한다.
 - 인덱스: `(code, event_id DESC)` — p95 300ms 목표(NFR-02).
-  **GET /rooms/{code}/quote** → 200
+
+**GET /rooms/{code}/quote** → 200
 
 ```json
 { "code": "005930", "price": 71200, "prevClose": 70500, "change": 700, "changeRate": 0.99,
   "open": 70600, "high": 71500, "low": 70400, "volume": 1234567, "ts": 1719..., "delayed": false }
 ```
 
-- Redis `price:{code}` Hash를 그대로 매핑. 미스(비수요 종목·장전) 시 최신 일봉 기반 + `"delayed": true`.
-- 필드는 WS `quote` data(§WS 4.2)와 동일 명세 — 클라가 스냅샷→라이브 덮어쓰기를 동일 모델로 처리.
+- Redis `price:{code}` Hash를 그대로 매핑한다. 미스(비수요 종목·장전)면 최신 일봉 기반에 `"delayed": true`.
+- 필드는 WS `quote` data(§WS 4.2)와 동일 명세다 — 클라가 스냅샷→라이브 덮어쓰기를 같은 모델로 처리한다.
+
 ---
 
 ## 6. notification 모듈 (알림 인박스 · fan-out-on-read)
+
+방 밖의 유저에게 "안 읽은 소식"을 보여주는 흐름을 받친다 — 미읽음 배지(FR-12)·알림 목록·읽음 커서(FR-13).
 
 | 메서드 | 경로 | 설명 |
 |---|---|---|
@@ -187,19 +208,25 @@ ULID 사전순 = 시간순임을 이용한 **양방향 커서**. 스트림·글�
 | PUT | `/rooms/{code}/cursor` | 읽음 커서 전진 (FR-13) |
 | POST | `/notifications/read-all` | 모두 읽음 |
 
-**동작 원리 (ADR A4)**: 유저별 알림 행을 만들지 않는다. `cursor:{userId}:{code}`(Redis, DB `read_cursor` 미러) **이후의 StreamEvent를 조회 시점에 집계**한다.
+**동작 원리 (ADR A4)**: 쓰기 시점에 유저별 알림 행을 만들지 않는다. `cursor:{userId}:{code}`(Redis, DB `read_cursor` 미러) **이후의 StreamEvent를 조회 시점에 집계**한다.
 
 **GET /notifications/badge** → 200 `{ "total": 27, "byCode": { "005930": 12, "000660": 15 } }`
-- 각 관심 종목에 대해 `count(event_id > cursor)` — 종목당 상한 99로 캡(`LIMIT 100` 카운트)해 비용 고정. 결과 10초 Redis 캐시.
-  **GET /notifications?types=&cursor=&limit=30** → 스트림과 동일 item 형태 + `code`별 혼합, `eventId` 내림차순. 항목 클릭 시 클라는 `/rooms/{code}` 화면에서 해당 `eventId`로 점프.
+
+- 관심 종목마다 `count(event_id > cursor)`를 센다. 종목당 상한 99로 캡(`LIMIT 100` 카운트)해 비용을 고정한다. 결과는 10초 Redis 캐시.
+
+**GET /notifications?types=&cursor=&limit=30** → 스트림과 동일한 item 형태에 `code`별 혼합, `eventId` 내림차순. 항목 클릭 시 클라는 `/rooms/{code}` 화면에서 해당 `eventId`로 점프한다.
 
 **PUT /rooms/{code}/cursor** — req `{ "lastEventId": "01J9Z8..." }` → 204
-- 현재 커서보다 **작은 값(역행)은 무시**. Redis SET + DB upsert(write-through). 방 열람 중 주기적/이탈 시 호출.
-  **POST /notifications/read-all** → 204 — 관심 종목 각각 커서를 해당 종목 최신 `eventId`로.
+
+- 현재 커서보다 **작은 값(역행)은 무시**한다. Redis SET + DB upsert(write-through). 방 열람 중 주기적/이탈 시 호출한다.
+
+**POST /notifications/read-all** → 204 — 관심 종목 각각의 커서를 해당 종목 최신 `eventId`로 옮긴다.
 
 ---
 
 ## 7. community 모듈 (글·댓글·공감)
+
+방 안의 유저 대화를 받친다 — 글 작성·조회(FR-09·10)와 댓글·공감·신고(FR-18).
 
 | 메서드 | 경로 | 설명 |
 |---|---|---|
@@ -221,7 +248,7 @@ ULID 사전순 = 시간순임을 이용한 **양방향 커서**. 스트림·글�
 
 → 201 `{ "postId": "01JA0...", "eventId": "01JA0..." }`
 
-**더블라이트 순서 (ADR A6)** — 한 트랜잭션: ① `post` INSERT ② `stream_event`(type=POST, `event_id`=postId 재사용) INSERT → 커밋 → ③ `@TransactionalEventListener(AFTER_COMMIT)`로 `PUBLISH post:{code}` (봉투는 Redis 계약 §1.2). 발행 실패는 무시(클라 REST 복구로 보강). `quotedEventId`는 같은 방의 실존 이벤트인지 검증.
+**더블라이트 순서 (ADR A6)** — 한 트랜잭션: ① `post` INSERT ② `stream_event`(type=POST, `event_id`=postId 재사용) INSERT → 커밋 → ③ `@TransactionalEventListener(AFTER_COMMIT)`로 `PUBLISH post:{code}` (봉투는 Redis 계약 §1.2). 발행에 실패해도 무시한다 — 클라가 REST 복구로 보강한다(§1.4). `quotedEventId`는 같은 방의 실존 이벤트인지 검증한다.
 
 **GET /posts/{postId}** → 200
 
@@ -234,11 +261,14 @@ ULID 사전순 = 시간순임을 이용한 **양방향 커서**. 스트림·글�
   "createdAt": 1719..., "updatedAt": null, "deleted": false }
 ```
 
-- **삭제 정책**: 소프트 삭제. 스트림에서는 해당 StreamEvent payload에 `"deleted": true` 마킹(재발행 없음 — 클라가 목록에서 "삭제된 글"로 표시). 댓글 작성 시에도 `post:{code}`에 `kind=comment` 발행(같은 봉투).
-- 공감: `post_like` upsert + `like_count` 원자 증감. 신고: `{ "reason": "SPAM|ABUSE|MANIPULATION|ETC", "detail?" }` → 201, 상태(접수/처리)는 운영 도구 범위.
+- **삭제 정책**: 소프트 삭제다. 스트림에서는 해당 StreamEvent payload에 `"deleted": true`를 마킹한다(재발행 없음 — 클라가 목록에서 "삭제된 글"로 표시). 댓글 작성 시에도 `post:{code}`에 `kind=comment`를 발행한다(같은 봉투).
+- 공감: `post_like` upsert + `like_count` 원자 증감. 신고: `{ "reason": "SPAM|ABUSE|MANIPULATION|ETC", "detail?" }` → 201. 신고 상태(접수/처리)는 운영 도구 범위다.
+
 ---
 
 ## 8. stockinfo 모듈 (종목 정보·지표·차트)
+
+방의 정보 탭을 받친다 — 종목 개요·차트(FR-15)·밸류에이션(FR-14)·재무·수급. 원천은 전부 워커가 적재한 테이블이고 core-api는 읽기만 한다(§0).
 
 | 메서드 | 경로 | 원천 (워커) | 설명 |
 |---|---|---|---|
@@ -258,9 +288,10 @@ ULID 사전순 = 시간순임을 이용한 **양방향 커서**. 스트림·글�
   "pageInfo": { "hasMoreBefore": true } }
 ```
 
-- 저장은 **일봉만**(수정주가). `W`/`M`은 조회 시 일봉 집계(ADR A8: 주=ISO주, 월=역월; open=첫날 시가, close=마지막 종가, high/low=극값, volume=합). `to` 이전 `count`건 내림차순 아님 — **오름차순 반환**(차트 라이브러리 관행).
-- 미적재 과거 구간은 있는 만큼 반환 + `hasMoreBefore:false` (백필은 batch 잡).
-  **GET /stocks/{code}/valuation** → `{ "per": 12.3, "pbr": 1.1, "eps": 5800, "bps": 65000, "marketCap": 4250000, "asOf": "20260706" }` (marketCap 단위 억원 — 프론트 합의)
+- 저장은 **일봉만**(수정주가) 한다. `W`/`M`은 조회 시 일봉을 집계한다(ADR A8: 주=ISO주, 월=역월; open=첫날 시가, close=마지막 종가, high/low=극값, volume=합). `to` 이전 `count`건은 내림차순이 아니라 **오름차순 반환**(차트 라이브러리 관행).
+- 미적재 과거 구간은 있는 만큼 반환하고 `hasMoreBefore:false`를 준다(백필은 batch 잡).
+
+**GET /stocks/{code}/valuation** → `{ "per": 12.3, "pbr": 1.1, "eps": 5800, "bps": 65000, "marketCap": 4250000, "asOf": "20260706" }` (marketCap 단위 억원 — 프론트 합의)
 
 **GET /stocks/{code}/financials?years=3** → 200
 
@@ -273,7 +304,7 @@ ULID 사전순 = 시간순임을 이용한 **양방향 커서**. 스트림·글�
 **GET /stocks/{code}/investors?days=20** → `{ "items": [ { "date": "20260706", "individual": -12000, "foreign": 8000, "institution": 4000 } ] }` (순매수, 단위 백만원 — 워커 명세와 합의)
 
 모든 지표 응답에 `asOf` 필수(기획안 데이터 신선도 요구).
- 
+
 ---
 
 ## 9. 모듈 간 의존 & 이벤트 (Modulith 경계)
@@ -286,8 +317,9 @@ stream/stockinfo ──(읽기)──► Redis price:{code} / 워커 적재 테�
 auth ◄── 전 모듈 (SecurityContext)
 ```
 
-- `stream_event` 테이블의 논리 소유자는 **stream 모듈**. community는 직접 INSERT하지 않고 노출된 `StreamEventAppender`를 호출(경계 테스트로 강제). worker-llm과 worker-batch(투자의견)는 별도 프로세스로 같은 테이블에 INSERT한다. 스키마는 `db-migrations` 모듈(Liquibase)이 단일 관리하고, 외부 생산자는 `source_key` 멱등 계약을 지킨다.
-- 채널명·봉투는 `:contracts` 상수만 사용(문자열 하드코딩 금지).
+- `stream_event` 테이블의 논리 소유자는 **stream 모듈**이다. community는 직접 INSERT하지 않고 노출된 `StreamEventAppender`를 호출한다(경계 테스트로 강제). worker-llm과 worker-batch(투자의견)는 별도 프로세스로 같은 테이블에 INSERT한다. 스키마는 `db-migrations` 모듈(Liquibase)이 단일 관리하고 외부 생산자는 `source_key` 멱등 계약을 지킨다.
+- 채널명·봉투는 `:contracts` 상수만 사용한다(문자열 하드코딩 금지).
+
 ## 10. 보안 체크리스트
 
 bcrypt(cost 10+) · JWT HS256(단일 키 공유, 게이트웨이 동일 모듈) · 토큰/앱키 로그 마스킹 · CORS 화이트리스트 · 입력 검증(Bean Validation) · 소유자 검증(글/댓글 수정·삭제) · 커서 등 ULID 형식 검증(정규식) · SQL 파라미터 바인딩만.
@@ -322,7 +354,7 @@ read_cursor(user_id, code, last_event_id, updated_at, PK(user_id, code))   -- Re
 | notification (4) | GET badge, GET /notifications, PUT /rooms/{code}/cursor, POST read-all |
 | community (9) | posts CRUD(4)+목록, comments(2), like(PUT/DELETE=1), report |
 | stockinfo (5) | GET /stocks/{code} + candles·valuation·financials·investors |
- 
+
 ---
 
 *core-api REST API 명세 v0.1 — WS 명세 v0.3·Redis 계약 v0.1과 정합. 봉투/채널 문자열은 `:contracts`가 원천.*
