@@ -75,4 +75,45 @@ class KisRestClientTest {
         assertFailsWith<KisClientException> { client.getJson(account, "/uapi/test", "TR123", emptyMap()) }
         assertEquals(2, server.received.count { it.path == "/uapi/test" })
     }
+
+    @Test
+    fun `주식현재가 스냅샷을 파싱하고 하락 부호를 음수로 만든다`() {
+        server.enqueue("/oauth2/tokenP", 200, tokenBody("T1"))
+        server.enqueue(
+            "/uapi/domestic-stock/v1/quotations/inquire-price",
+            200,
+            """
+            {"rt_cd":"0","msg_cd":"MCA00000","output":{
+              "stck_prpr":"71200","prdy_vrss":"700","prdy_vrss_sign":"5","prdy_ctrt":"0.99",
+              "stck_oprc":"70600","stck_hgpr":"71500","stck_lwpr":"70400","acml_vol":"1234567",
+              "per":"12.10","pbr":"1.35"}}
+            """.trimIndent(),
+        )
+
+        val snapshot = client.quoteSnapshot(account, "005930")
+
+        assertEquals(71200, snapshot.price)
+        assertEquals(-700, snapshot.change)
+        assertEquals(-0.99, snapshot.changeRate)
+        assertEquals(70600, snapshot.open)
+        assertEquals(71500, snapshot.high)
+        assertEquals(70400, snapshot.low)
+        assertEquals(1234567, snapshot.volume)
+        val call = server.received.single { it.path.endsWith("inquire-price") }
+        assertEquals("FHKST01010100", call.headers["tr_id"])
+        assertTrue("FID_COND_MRKT_DIV_CODE=J" in call.query)
+        assertTrue("FID_INPUT_ISCD=005930" in call.query)
+    }
+
+    @Test
+    fun `스냅샷 rt_cd가 0이 아니면 예외를 던진다`() {
+        server.enqueue("/oauth2/tokenP", 200, tokenBody("T1"))
+        server.enqueue(
+            "/uapi/domestic-stock/v1/quotations/inquire-price",
+            200,
+            """{"rt_cd":"1","msg_cd":"EGW00121","msg1":"invalid"}""",
+        )
+
+        assertFailsWith<KisClientException> { client.quoteSnapshot(account, "005930") }
+    }
 }
