@@ -1,0 +1,1 @@
+{"header":{"tr_id":"H0STCNT0","tr_key":"005930","encrypt":"N"},"body":{"rt_cd":"1","msg_cd":"OPSP0011","msg1":"INVALID APPROVAL KEY"}}
