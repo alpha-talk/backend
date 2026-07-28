@@ -4,6 +4,7 @@ import com.alphatalk.kis.master.KisMarket
 import com.alphatalk.kis.master.KisMasterParser
 import com.alphatalk.kis.master.KisSectorParser
 import com.alphatalk.kis.master.KisStockMaster
+import com.alphatalk.kis.master.ParsedSectors
 import com.alphatalk.kis.master.ParsedStockMaster
 import com.alphatalk.worker.batch.job.BatchJobRunStore
 import io.micrometer.core.instrument.MeterRegistry
@@ -43,7 +44,6 @@ open class StockMasterSyncJob(
         val failedMarkets = mutableListOf<KisMarket>()
         var incompleteMarkets = 0
         try {
-            syncSectors()
             KisMarket.entries.forEach { market ->
                 val parsed = withOneRetry(market)
                 if (parsed == null) {
@@ -56,6 +56,7 @@ open class StockMasterSyncJob(
                     }
                 }
             }
+            syncSectors(collected)
             val stored = stocks.upsertAll(collected)
             retireMissing(collected, failedMarkets, incompleteMarkets)
             runs.succeed(runId, stored, failedMarkets.size, clock())
@@ -68,12 +69,37 @@ open class StockMasterSyncJob(
         }
     }
 
-    private fun syncSectors() {
-        val parsed = KisSectorParser.parse(files.fetchSectors())
-        check(parsed.isNotEmpty()) { "sector master file has no entry" }
-        val stored = sectors.upsertAll(parsed)
+    private fun syncSectors(collected: List<KisStockMaster>) {
+        val referenced = collected.mapNotNull(KisStockMaster::sectorCode).toSet()
+        if (referenced.isEmpty()) {
+            log.warn("no sector referenced by collected stocks, skipping sector sync")
+            return
+        }
+        val parsed = fetchSectorsComplete()
+        val members = parsed.sectors.filter { it.code in referenced }
+        check(members.isNotEmpty()) {
+            "sector master has no entry for referenced codes: ${referenced.sorted().take(SAMPLE_SIZE)}"
+        }
+        val stored = sectors.upsertAll(members)
         meters.counter("batch.sector.synced").increment(stored.toDouble())
-        log.info("sector master synced: count={}", stored)
+        log.info("sector master synced: stored={} referenced={} available={}", stored, referenced.size, parsed.sectors.size)
+    }
+
+    private fun fetchSectorsComplete(): ParsedSectors {
+        val first = parseSectors()
+        if (first.isComplete) return first
+        log.warn("sector master had unreadable rows, retrying once: skipped={}", first.skippedLines)
+        val second = parseSectors()
+        check(second.isComplete) {
+            "sector master still incomplete after retry: skipped=${second.skippedLines}"
+        }
+        return second
+    }
+
+    private fun parseSectors(): ParsedSectors {
+        val parsed = KisSectorParser.parse(files.fetchSectors())
+        check(parsed.sectors.isNotEmpty()) { "sector master file has no entry" }
+        return parsed
     }
 
     private fun retireMissing(
@@ -111,6 +137,7 @@ open class StockMasterSyncJob(
 
     companion object {
         const val JOB_NAME = "stock_master_sync"
+        private const val SAMPLE_SIZE = 5
         private val SEOUL = ZoneId.of("Asia/Seoul")
     }
 }
