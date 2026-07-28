@@ -93,6 +93,13 @@ class KisWebSocketSessionTest {
         awaitTrue { listener.closedReasons.isNotEmpty() }
     }
 
+    @Test
+    fun `비정상 절단도 종료나 전송 오류 신호로 전달된다`() {
+        server.abortAllConnections()
+
+        awaitTrue { listener.closedReasons.isNotEmpty() || listener.transportErrors.isNotEmpty() }
+    }
+
     private fun awaitTrue(timeoutMillis: Long = 5000, condition: () -> Boolean) {
         val deadline = System.currentTimeMillis() + timeoutMillis
         while (System.currentTimeMillis() < deadline) {
@@ -106,7 +113,12 @@ class KisWebSocketSessionTest {
         val ticks = CopyOnWriteArrayList<KisTick>()
         val acks = CopyOnWriteArrayList<Triple<String?, String?, Boolean>>()
         val closedReasons = CopyOnWriteArrayList<String?>()
+        val transportErrors = CopyOnWriteArrayList<Throwable>()
         val pingPongCount = AtomicInteger()
+
+        override fun onTransportError(t: Throwable) {
+            transportErrors += t
+        }
 
         override fun onTicks(ticks: List<KisTick>) {
             this.ticks += ticks

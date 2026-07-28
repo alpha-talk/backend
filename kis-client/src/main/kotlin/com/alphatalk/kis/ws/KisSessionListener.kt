@@ -8,4 +8,7 @@ interface KisSessionListener {
     fun onEncryptedDropped(trId: String) {}
     fun onClosed(reason: String?) {}
     fun onError(t: Throwable) {}
+    fun onTransportError(t: Throwable) {
+        onError(t)
+    }
 }
