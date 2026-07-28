@@ -1,6 +1,7 @@
 package com.alphatalk.kis.rest
 
 import com.alphatalk.kis.KisClientException
+import com.alphatalk.kis.KisSigns
 import com.alphatalk.kis.auth.KisTokenManager
 import com.alphatalk.kis.model.KisAccount
 import com.alphatalk.kis.rate.KisRateLimiters
@@ -21,6 +22,36 @@ class KisRestClient(
     private val http: HttpClient = HttpClient.newHttpClient(),
 ) {
     private val mapper: ObjectMapper = jacksonObjectMapper()
+
+    fun quoteSnapshot(account: KisAccount, code: String): KisQuoteSnapshot {
+        val json = getJson(
+            account,
+            INQUIRE_PRICE_PATH,
+            TR_INQUIRE_PRICE,
+            mapOf(
+                "FID_COND_MRKT_DIV_CODE" to "J",
+                "FID_INPUT_ISCD" to code,
+            ),
+        )
+        val rtCd = json.path("rt_cd").asText("")
+        if (rtCd != "0") {
+            throw KisClientException(
+                "inquire-price failed: keyId=${account.keyId} code=$code rt_cd=$rtCd msg_cd=${json.path("msg_cd").asText("")}",
+            )
+        }
+        val output = json.path("output")
+        val falling = KisSigns.isFalling(output.path("prdy_vrss_sign").asText(""))
+        return KisQuoteSnapshot(
+            code = code,
+            price = output.path("stck_prpr").asText().trim().toLong(),
+            change = KisSigns.apply(output.path("prdy_vrss").asText().trim().toLong(), falling),
+            changeRate = KisSigns.apply(output.path("prdy_ctrt").asText().trim().toDouble(), falling),
+            open = output.path("stck_oprc").asText().trim().toLong(),
+            high = output.path("stck_hgpr").asText().trim().toLong(),
+            low = output.path("stck_lwpr").asText().trim().toLong(),
+            volume = output.path("acml_vol").asText().trim().toLong(),
+        )
+    }
 
     internal fun getJson(account: KisAccount, path: String, trId: String, params: Map<String, String>): JsonNode {
         val first = send(account, path, trId, params)
@@ -58,4 +89,9 @@ class KisRestClient(
     }
 
     private fun encode(value: String): String = URLEncoder.encode(value, StandardCharsets.UTF_8)
+
+    companion object {
+        const val TR_INQUIRE_PRICE = "FHKST01010100"
+        private const val INQUIRE_PRICE_PATH = "/uapi/domestic-stock/v1/quotations/inquire-price"
+    }
 }

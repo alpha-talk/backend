@@ -14,4 +14,6 @@ data class PriceProperties(
     val removalGraceMs: Long = 30_000,
     val marketHoursEnforced: Boolean = true,
     val holidays: List<String> = emptyList(),
+    val pollIntervalMs: Long = 30_000,
+    val pollBudgetFactor: Double = 0.5,
 )
