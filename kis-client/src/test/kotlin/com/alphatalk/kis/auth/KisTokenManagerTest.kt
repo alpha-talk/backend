@@ -12,6 +12,7 @@ import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFails
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
@@ -120,4 +121,52 @@ class KisTokenManagerTest {
 
         assertFailsWith<KisClientException> { manager.accessToken(account) }
     }
+
+    @Test
+    fun `응답이 락 유효기간보다 늦어도 tokenP 호출은 한 번뿐이다`() {
+        server.enqueue("/oauth2/tokenP", 200, tokenBody("T1"), delayMillis = 900)
+        server.enqueue("/oauth2/tokenP", 200, tokenBody("T2"))
+        val store = InMemoryKisTokenStore()
+        val first = manager(store)
+        val second = manager(store)
+
+        assertFails { first.accessToken(account) }
+        assertFailsWith<KisClientException> { second.accessToken(account) }
+
+        assertEquals(1, server.countOf("/oauth2/tokenP"))
+    }
+
+    @Test
+    fun `응답 유실 뒤에도 재발급 제한이 유지된다`() {
+        server.enqueue("/oauth2/tokenP", 200, tokenBody("T1"), delayMillis = 900)
+        server.enqueue("/oauth2/tokenP", 200, tokenBody("T2"))
+        val store = InMemoryKisTokenStore()
+        val manager = manager(store)
+
+        assertFails { manager.accessToken(account) }
+        val throttled = assertFailsWith<KisClientException> { manager.accessToken(account) }
+
+        assertTrue("throttled" in throttled.message.orEmpty())
+        assertEquals(1, server.countOf("/oauth2/tokenP"))
+    }
+
+    @Test
+    fun `발급 타임아웃이 락 유효기간보다 길면 기동에 실패한다`() {
+        assertFailsWith<IllegalArgumentException> {
+            KisTokenManager(
+                server.baseUrl,
+                InMemoryKisTokenStore(),
+                lockTtl = Duration.ofSeconds(3),
+                issueTimeout = Duration.ofSeconds(5),
+            )
+        }
+    }
+
+    private fun manager(store: InMemoryKisTokenStore) = KisTokenManager(
+        server.baseUrl,
+        store,
+        lockTtl = Duration.ofMillis(400),
+        issueTimeout = Duration.ofMillis(250),
+        lockWaitMillis = 50,
+    )
 }
