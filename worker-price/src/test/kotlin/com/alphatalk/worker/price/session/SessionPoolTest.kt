@@ -34,6 +34,7 @@ class SessionPoolTest {
         accounts: Int = 1,
         maxPerSession: Int = 2,
         graceMillis: Long = 1_000,
+        ackTimeoutMillis: Long = 5_000,
     ) = SessionPool(
         accounts = (1..accounts).map { KisAccount("key$it", "app$it", "secret$it") },
         wsUrl = server.url,
@@ -43,8 +44,15 @@ class SessionPoolTest {
         maxSymbolsPerSession = maxPerSession,
         removalGraceMillis = graceMillis,
         backoff = BackoffPolicy(initialMillis = 50, jitterRatio = 0.0),
+        ackTimeoutMillis = ackTimeoutMillis,
         clock = { now },
     )
+
+    private fun ackFrame(code: String, success: Boolean): String {
+        val rtCd = if (success) "0" else "1"
+        return """{"header":{"tr_id":"H0STCNT0","tr_key":"$code","encrypt":"N"},""" +
+            """"body":{"rt_cd":"$rtCd","msg_cd":"OPSP0000","msg1":"ack"}}"""
+    }
 
     private fun subscribesOf(messages: List<String>) =
         messages.map { mapper.readTree(it) }.filter { it.path("header").path("tr_type").asText() == "1" }
@@ -114,6 +122,49 @@ class SessionPoolTest {
             pool.maintain(setOf("005930"), subscribeAllowed = true)
             subscribesOf(server.receivedMessages).size >= 2
         }
+    }
+
+    @Test
+    fun `구독이 거절되면 다음 리컨실에서 재등록한다`() {
+        val pool = pool()
+        pool.maintain(setOf("000001"), subscribeAllowed = true)
+        server.awaitMessages(1)
+        assertEquals(1, subscribesOf(server.receivedMessages).size)
+
+        server.broadcastText(ackFrame("000001", success = false))
+
+        await().atMost(Duration.ofSeconds(10)).until {
+            pool.maintain(setOf("000001"), subscribeAllowed = true)
+            subscribesOf(server.receivedMessages).size >= 2
+        }
+    }
+
+    @Test
+    fun `구독이 확정되면 ACK 유효기간이 지나도 재등록하지 않는다`() {
+        val pool = pool(ackTimeoutMillis = 100)
+        pool.maintain(setOf("000001"), subscribeAllowed = true)
+        server.awaitMessages(1)
+
+        server.broadcastText(ackFrame("000001", success = true))
+        Thread.sleep(300)
+        now += 500
+        repeat(3) { pool.maintain(setOf("000001"), subscribeAllowed = true) }
+
+        Thread.sleep(200)
+        assertEquals(1, subscribesOf(server.receivedMessages).size)
+    }
+
+    @Test
+    fun `응답이 없으면 ACK 유효기간 뒤에 재등록한다`() {
+        val pool = pool(ackTimeoutMillis = 100)
+        pool.maintain(setOf("000001"), subscribeAllowed = true)
+        server.awaitMessages(1)
+
+        now += 500
+        pool.maintain(setOf("000001"), subscribeAllowed = true)
+
+        server.awaitMessages(2)
+        assertEquals(2, subscribesOf(server.receivedMessages).size)
     }
 
     @Test
