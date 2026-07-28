@@ -7,6 +7,14 @@ data class KisSector(
     val name: String,
 )
 
+data class ParsedSectors(
+    val sectors: List<KisSector>,
+    val skippedLines: Int,
+) {
+    val isComplete: Boolean
+        get() = skippedLines == 0
+}
+
 object KisSectorParser {
     const val FILE_NAME = "idxcode"
 
@@ -14,33 +22,41 @@ object KisSectorParser {
     private const val LINE_LENGTH = 45
     private const val CODE_TO = 5
 
-    fun parse(content: ByteArray): List<KisSector> =
-        content.split('\n'.code.toByte())
-            .mapNotNull(::parseLine)
+    fun parse(content: ByteArray): ParsedSectors {
+        val sectors = mutableListOf<KisSector>()
+        var skipped = 0
+        splitLines(content).forEach { line ->
+            val parsed = parseLine(line)
+            if (parsed == null) skipped += 1 else sectors += parsed
+        }
+        return ParsedSectors(sectors, skipped)
+    }
 
     private fun parseLine(line: ByteArray): KisSector? {
-        val trimmed = if (line.isNotEmpty() && line.last() == '\r'.code.toByte()) {
-            line.copyOfRange(0, line.size - 1)
-        } else {
-            line
-        }
-        if (trimmed.size != LINE_LENGTH) return null
-        val code = String(trimmed, 0, CODE_TO, CP949).trim()
-        val name = String(trimmed, CODE_TO, LINE_LENGTH - CODE_TO, CP949).trim()
+        if (line.size != LINE_LENGTH) return null
+        val code = String(line, 0, CODE_TO, CP949).trim()
+        val name = String(line, CODE_TO, LINE_LENGTH - CODE_TO, CP949).trim()
         if (code.isEmpty() || name.isEmpty()) return null
         return KisSector(code, name)
     }
 
-    private fun ByteArray.split(separator: Byte): List<ByteArray> {
-        val parts = mutableListOf<ByteArray>()
+    private fun splitLines(content: ByteArray): List<ByteArray> {
+        val lines = mutableListOf<ByteArray>()
         var start = 0
-        for (i in indices) {
-            if (this[i] == separator) {
-                if (i > start) parts += copyOfRange(start, i)
+        for (i in content.indices) {
+            if (content[i] == '\n'.code.toByte()) {
+                addIfNotBlank(lines, content, start, i)
                 start = i + 1
             }
         }
-        if (start < size) parts += copyOfRange(start, size)
-        return parts
+        addIfNotBlank(lines, content, start, content.size)
+        return lines
+    }
+
+    private fun addIfNotBlank(lines: MutableList<ByteArray>, content: ByteArray, from: Int, toExclusive: Int) {
+        if (toExclusive <= from) return
+        val end = if (content[toExclusive - 1] == '\r'.code.toByte()) toExclusive - 1 else toExclusive
+        if (end <= from) return
+        lines += content.copyOfRange(from, end)
     }
 }

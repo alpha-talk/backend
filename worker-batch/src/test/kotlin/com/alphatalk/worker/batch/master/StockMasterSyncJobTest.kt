@@ -22,6 +22,7 @@ class StockMasterSyncJobTest {
         private val failing: Set<KisMarket> = emptySet(),
         private val failuresBeforeSuccess: MutableMap<KisMarket, Int> = mutableMapOf(),
         private val corrupt: Set<KisMarket> = emptySet(),
+        private var corruptSectorTimes: Int = 0,
     ) : MasterFileFetcher {
         val requested = mutableListOf<KisMarket>()
         var sectorRequests = 0
@@ -41,7 +42,12 @@ class StockMasterSyncJobTest {
 
         override fun fetchSectors(): ByteArray {
             sectorRequests += 1
-            return javaClass.getResourceAsStream("/fixtures/idxcode_sample.mst")!!.readBytes()
+            val bytes = javaClass.getResourceAsStream("/fixtures/idxcode_sample.mst")!!.readBytes()
+            if (corruptSectorTimes > 0) {
+                corruptSectorTimes -= 1
+                return bytes + "짧은 줄\n".toByteArray()
+            }
+            return bytes
         }
     }
 
@@ -129,16 +135,53 @@ class StockMasterSyncJobTest {
     }
 
     @Test
-    fun `종목의 업종 코드가 업종 마스터 코드와 맞물린다`() {
+    fun `적재한 업종은 모두 구성 종목을 가진다`() {
         val stocks = RecordingStockStore()
         val sectors = RecordingSectorStore()
 
         job(RecordingFetcher(), stocks, RecordingRuns(startResult = 1L), sectors).syncOnce()
 
-        val sectorCodes = sectors.upserted.map { it.code }.toSet()
-        val used = stocks.upserted.mapNotNull { it.sectorCode }.toSet()
-        assertTrue(used.isNotEmpty())
-        assertTrue(used.all { it in sectorCodes }, "매칭되지 않는 업종 코드: ${used - sectorCodes}")
+        val referenced = stocks.upserted.mapNotNull { it.sectorCode }.toSet()
+        val stored = sectors.upserted.map { it.code }.toSet()
+        assertTrue(stored.isNotEmpty())
+        assertEquals(referenced, stored, "구성 종목이 없는 업종이 섞였다: ${stored - referenced}")
+    }
+
+    @Test
+    fun `종목이 참조하지 않는 지수 항목은 적재하지 않는다`() {
+        val sectors = RecordingSectorStore()
+
+        job(RecordingFetcher(), RecordingStockStore(), RecordingRuns(startResult = 1L), sectors).syncOnce()
+
+        val stored = sectors.upserted.map { it.code }.toSet()
+        assertFalse("00001" in stored, "지수 '종합'이 업종으로 적재됐다")
+        assertFalse("11001" in stored, "지수 'KOSDAQ'이 업종으로 적재됐다")
+    }
+
+    @Test
+    fun `업종 파일에 읽지 못한 행이 있으면 한 번 더 받아 회복한다`() {
+        val files = RecordingFetcher(corruptSectorTimes = 1)
+        val sectors = RecordingSectorStore()
+
+        job(files, RecordingStockStore(), RecordingRuns(startResult = 1L), sectors).syncOnce()
+
+        assertEquals(2, files.sectorRequests)
+        assertTrue(sectors.upserted.isNotEmpty())
+    }
+
+    @Test
+    fun `업종 파일이 계속 불완전하면 잡을 실패로 남긴다`() {
+        val files = RecordingFetcher(corruptSectorTimes = 2)
+        val runs = RecordingRuns(startResult = 1L)
+        val sectors = RecordingSectorStore()
+
+        assertFailsWith<IllegalStateException> {
+            job(files, RecordingStockStore(), runs, sectors).syncOnce()
+        }
+
+        assertEquals(1L, runs.failed?.first)
+        assertEquals(null, runs.succeeded)
+        assertTrue(sectors.upserted.isEmpty())
     }
 
     @Test
