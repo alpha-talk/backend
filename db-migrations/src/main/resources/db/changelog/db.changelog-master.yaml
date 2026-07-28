@@ -5,3 +5,6 @@ databaseChangeLog:
   - include:
       file: price/db.changelog-price.yaml
       relativeToChangelogFile: true
+  - include:
+      file: batch/db.changelog-batch.yaml
+      relativeToChangelogFile: true

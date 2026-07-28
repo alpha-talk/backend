@@ -34,10 +34,13 @@ class MasterChangelogTest {
         withConnection { connection ->
             update(connection)
 
-            assertEquals(8, appliedChangeSetCount(connection))
+            assertEquals(9, appliedChangeSetCount(connection))
             assertTrue(tableExists(connection, "news_cluster"))
             assertTrue(tableExists(connection, "stream_event"))
             assertTrue(tableExists(connection, "daily_candle"))
+            assertTrue(tableExists(connection, "stock_master"))
+            assertTrue(tableExists(connection, "sector"))
+            assertTrue(tableExists(connection, "batch_job_run"))
         }
     }
 
