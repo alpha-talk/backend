@@ -1,17 +1,37 @@
 package com.alphatalk.worker.price.config
 
 import com.alphatalk.kis.auth.KisApprovalClient
+import com.alphatalk.kis.auth.KisTokenManager
+import com.alphatalk.kis.auth.KisTokenStore
 import com.alphatalk.kis.model.KisAccount
 import com.alphatalk.kis.model.KisEnv
-import com.alphatalk.kis.model.KisLimits
+import com.alphatalk.kis.rate.KisRateLimiters
+import com.alphatalk.kis.rest.KisRestClient
+import com.alphatalk.worker.price.calendar.MarketCalendar
+import com.alphatalk.worker.price.candle.CandleSyncJob
+import com.alphatalk.worker.price.candle.DailyCandleFetcher
+import com.alphatalk.worker.price.candle.DailyCandleStore
 import com.alphatalk.worker.price.conflation.ConflationBuffer
-import com.alphatalk.worker.price.session.FixedSubscriptionRunner
+import com.alphatalk.worker.price.demand.DemandSource
+import com.alphatalk.worker.price.demand.FixedDemandSource
+import com.alphatalk.worker.price.leader.LeaderLock
+import com.alphatalk.worker.price.leader.RedisLeaderLock
+import com.alphatalk.worker.price.poll.QuoteSnapshotFetcher
+import com.alphatalk.worker.price.poll.RestPollingScheduler
+import com.alphatalk.worker.price.poll.WarmupPoller
+import com.alphatalk.worker.price.publish.QuotePublisher
+import com.alphatalk.worker.price.session.PriceLifecycle
+import com.alphatalk.worker.price.session.PriceOrchestrator
+import com.alphatalk.worker.price.session.SessionPool
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.fasterxml.jackson.module.kotlin.readValue
 import io.micrometer.core.instrument.MeterRegistry
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
+import org.springframework.data.redis.core.StringRedisTemplate
+import java.lang.management.ManagementFactory
+import java.time.LocalDate
 
 @Configuration
 class PriceConfig {
@@ -20,34 +40,151 @@ class PriceConfig {
 
     @Bean
     @ConditionalOnProperty("alphatalk.price.enabled", havingValue = "true")
-    fun fixedSubscriptionRunner(
+    fun demandSource(props: PriceProperties): DemandSource {
+        check(props.symbols.isNotEmpty()) {
+            "alphatalk.price.enabled=true에는 symbols가 최소 1개 필요하다"
+        }
+        return FixedDemandSource(props.symbols)
+    }
+
+    @Bean
+    @ConditionalOnProperty("alphatalk.price.enabled", havingValue = "true")
+    fun sessionPool(
         props: PriceProperties,
         buffer: ConflationBuffer,
         meters: MeterRegistry,
-    ): FixedSubscriptionRunner {
-        val env = KisEnv.valueOf(props.env.trim().uppercase())
+    ): SessionPool {
+        val env = kisEnv(props)
         val accounts = parseAccounts(props.accountsJson)
         check(accounts.isNotEmpty()) {
             "alphatalk.price.enabled=true에는 KIS_ACCOUNTS 계정이 최소 1개 필요하다"
         }
-        check(props.symbols.isNotEmpty()) {
-            "alphatalk.price.enabled=true에는 symbols가 최소 1개 필요하다"
-        }
-        check(props.symbols.size <= KisLimits.MAX_SYMBOLS_PER_SESSION) {
-            "고정 종목은 세션당 등록 한도 ${KisLimits.MAX_SYMBOLS_PER_SESSION}건을 넘을 수 없다"
-        }
-        val account = accounts.first()
         val approvals = KisApprovalClient(env.restBaseUrl)
-        return FixedSubscriptionRunner(
+        return SessionPool(
+            accounts = accounts,
             wsUrl = env.wsUrl,
-            symbols = props.symbols,
-            approvalKey = { approvals.approvalKey(account) },
+            approvalKeys = { approvals.approvalKey(it) },
             buffer = buffer,
             meters = meters,
+            removalGraceMillis = props.removalGraceMs,
         )
     }
 
-    private fun parseAccounts(accountsJson: String): List<KisAccount> = try {
+    @Bean
+    @ConditionalOnProperty("alphatalk.price.enabled", havingValue = "true")
+    fun marketCalendar(props: PriceProperties): MarketCalendar = MarketCalendar(
+        holidays = props.holidays.map(LocalDate::parse).toSet(),
+        enforced = props.marketHoursEnforced,
+    )
+
+    @Bean
+    @ConditionalOnProperty("alphatalk.price.enabled", havingValue = "true")
+    fun leaderLock(redis: StringRedisTemplate): LeaderLock =
+        RedisLeaderLock(redis, instanceId = ManagementFactory.getRuntimeMXBean().name)
+
+    @Bean
+    @ConditionalOnProperty("alphatalk.price.enabled", havingValue = "true")
+    fun priceOrchestrator(
+        demand: DemandSource,
+        pool: SessionPool,
+        calendar: MarketCalendar,
+        leader: LeaderLock,
+        meters: MeterRegistry,
+    ): PriceOrchestrator = PriceOrchestrator(demand, pool, calendar, leader, meters)
+
+    @Bean
+    @ConditionalOnProperty("alphatalk.price.enabled", havingValue = "true")
+    fun priceLifecycle(orchestrator: PriceOrchestrator, props: PriceProperties): PriceLifecycle =
+        PriceLifecycle(orchestrator, props.maintainIntervalMs)
+
+    @Bean
+    @ConditionalOnProperty("alphatalk.price.enabled", havingValue = "true")
+    fun kisTokenManager(props: PriceProperties, store: KisTokenStore): KisTokenManager =
+        KisTokenManager(kisEnv(props).restBaseUrl, store)
+
+    @Bean
+    @ConditionalOnProperty("alphatalk.price.enabled", havingValue = "true")
+    fun quoteSnapshotFetcher(props: PriceProperties, tokens: KisTokenManager): QuoteSnapshotFetcher {
+        val env = kisEnv(props)
+        val accounts = parseAccounts(props.accountsJson)
+        check(accounts.isNotEmpty()) {
+            "alphatalk.price.enabled=true에는 KIS_ACCOUNTS 계정이 최소 1개 필요하다"
+        }
+        val account = accounts.first()
+        val rest = KisRestClient(
+            env.restBaseUrl,
+            tokens,
+            KisRateLimiters(env.restCallsPerSecond, props.rateFactor * props.pollBudgetFactor),
+        )
+        return QuoteSnapshotFetcher { code -> rest.quoteSnapshot(account, code) }
+    }
+
+    @Bean
+    @ConditionalOnProperty("alphatalk.price.enabled", havingValue = "true")
+    fun restPollingScheduler(
+        pool: SessionPool,
+        fetcher: QuoteSnapshotFetcher,
+        publisher: QuotePublisher,
+        calendar: MarketCalendar,
+        leader: LeaderLock,
+        meters: MeterRegistry,
+    ): RestPollingScheduler = RestPollingScheduler(pool::degradedSymbols, fetcher, publisher, calendar, leader, meters)
+
+    @Bean
+    @ConditionalOnProperty("alphatalk.price.enabled", havingValue = "true")
+    fun warmupPoller(
+        demand: DemandSource,
+        poller: RestPollingScheduler,
+        calendar: MarketCalendar,
+        leader: LeaderLock,
+    ): WarmupPoller = WarmupPoller(demand, poller, calendar, leader)
+
+    @Bean
+    @ConditionalOnProperty(
+        name = ["alphatalk.price.enabled", "alphatalk.price.candle-enabled"],
+        havingValue = "true",
+    )
+    fun dailyCandleFetcher(props: PriceProperties, tokens: KisTokenManager): DailyCandleFetcher {
+        val env = kisEnv(props)
+        val accounts = parseAccounts(props.accountsJson)
+        check(accounts.isNotEmpty()) {
+            "alphatalk.price.candle-enabled=true에는 KIS_ACCOUNTS 계정이 최소 1개 필요하다"
+        }
+        val account = accounts.first()
+        val rest = KisRestClient(
+            env.restBaseUrl,
+            tokens,
+            KisRateLimiters(env.restCallsPerSecond, props.rateFactor),
+        )
+        return DailyCandleFetcher { code, from, to -> rest.dailyCandles(account, code, from, to) }
+    }
+
+    @Bean
+    @ConditionalOnProperty(
+        name = ["alphatalk.price.enabled", "alphatalk.price.candle-enabled"],
+        havingValue = "true",
+    )
+    fun candleSyncJob(
+        demand: DemandSource,
+        fetcher: DailyCandleFetcher,
+        store: DailyCandleStore,
+        calendar: MarketCalendar,
+        leader: LeaderLock,
+        meters: MeterRegistry,
+        props: PriceProperties,
+    ): CandleSyncJob = CandleSyncJob(
+        symbols = { demand.targetSymbols() },
+        fetcher = fetcher,
+        store = store,
+        backfillDays = props.candleBackfillDays,
+        calendar = calendar,
+        leader = leader,
+        meters = meters,
+    )
+
+    internal fun kisEnv(props: PriceProperties): KisEnv = KisEnv.valueOf(props.env.trim().uppercase())
+
+    internal fun parseAccounts(accountsJson: String): List<KisAccount> = try {
         jacksonObjectMapper().readValue(accountsJson)
     } catch (e: Exception) {
         throw IllegalStateException(

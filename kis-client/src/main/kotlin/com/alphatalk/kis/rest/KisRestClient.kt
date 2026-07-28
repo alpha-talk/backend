@@ -1,6 +1,7 @@
 package com.alphatalk.kis.rest
 
 import com.alphatalk.kis.KisClientException
+import com.alphatalk.kis.KisSigns
 import com.alphatalk.kis.auth.KisTokenManager
 import com.alphatalk.kis.model.KisAccount
 import com.alphatalk.kis.rate.KisRateLimiters
@@ -13,6 +14,8 @@ import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import java.nio.charset.StandardCharsets
+import java.time.LocalDate
+import java.time.format.DateTimeFormatter
 
 class KisRestClient(
     private val restBaseUrl: String,
@@ -21,6 +24,75 @@ class KisRestClient(
     private val http: HttpClient = HttpClient.newHttpClient(),
 ) {
     private val mapper: ObjectMapper = jacksonObjectMapper()
+
+    fun quoteSnapshot(account: KisAccount, code: String): KisQuoteSnapshot {
+        val json = getJson(
+            account,
+            INQUIRE_PRICE_PATH,
+            TR_INQUIRE_PRICE,
+            mapOf(
+                "FID_COND_MRKT_DIV_CODE" to "J",
+                "FID_INPUT_ISCD" to code,
+            ),
+        )
+        val rtCd = json.path("rt_cd").asText("")
+        if (rtCd != "0") {
+            throw KisClientException(
+                "inquire-price failed: keyId=${account.keyId} code=$code rt_cd=$rtCd msg_cd=${json.path("msg_cd").asText("")}",
+            )
+        }
+        val output = json.path("output")
+        val falling = KisSigns.isFalling(output.path("prdy_vrss_sign").asText(""))
+        return KisQuoteSnapshot(
+            code = code,
+            price = output.path("stck_prpr").asText().trim().toLong(),
+            change = KisSigns.apply(output.path("prdy_vrss").asText().trim().toLong(), falling),
+            changeRate = KisSigns.apply(output.path("prdy_ctrt").asText().trim().toDouble(), falling),
+            open = output.path("stck_oprc").asText().trim().toLong(),
+            high = output.path("stck_hgpr").asText().trim().toLong(),
+            low = output.path("stck_lwpr").asText().trim().toLong(),
+            volume = output.path("acml_vol").asText().trim().toLong(),
+        )
+    }
+
+    fun dailyCandles(account: KisAccount, code: String, from: LocalDate, to: LocalDate): List<KisDailyCandle> {
+        val json = getJson(
+            account,
+            DAILY_CHART_PATH,
+            TR_DAILY_CHART,
+            mapOf(
+                "FID_COND_MRKT_DIV_CODE" to "J",
+                "FID_INPUT_ISCD" to code,
+                "FID_INPUT_DATE_1" to from.format(DateTimeFormatter.BASIC_ISO_DATE),
+                "FID_INPUT_DATE_2" to to.format(DateTimeFormatter.BASIC_ISO_DATE),
+                "FID_PERIOD_DIV_CODE" to "D",
+                "FID_ORG_ADJ_PRC" to "0",
+            ),
+        )
+        val rtCd = json.path("rt_cd").asText("")
+        if (rtCd != "0") {
+            throw KisClientException(
+                "daily chart failed: keyId=${account.keyId} code=$code rt_cd=$rtCd msg_cd=${json.path("msg_cd").asText("")}",
+            )
+        }
+        return json.path("output2").mapNotNull { row ->
+            val date = row.path("stck_bsop_date").asText("")
+            if (date.isBlank()) {
+                null
+            } else {
+                KisDailyCandle(
+                    code = code,
+                    date = date,
+                    open = row.path("stck_oprc").asText().trim().toLong(),
+                    high = row.path("stck_hgpr").asText().trim().toLong(),
+                    low = row.path("stck_lwpr").asText().trim().toLong(),
+                    close = row.path("stck_clpr").asText().trim().toLong(),
+                    volume = row.path("acml_vol").asText().trim().toLong(),
+                    value = row.path("acml_tr_pbmn").asText().trim().toLong(),
+                )
+            }
+        }
+    }
 
     internal fun getJson(account: KisAccount, path: String, trId: String, params: Map<String, String>): JsonNode {
         val first = send(account, path, trId, params)
@@ -58,4 +130,11 @@ class KisRestClient(
     }
 
     private fun encode(value: String): String = URLEncoder.encode(value, StandardCharsets.UTF_8)
+
+    companion object {
+        const val TR_INQUIRE_PRICE = "FHKST01010100"
+        const val TR_DAILY_CHART = "FHKST03010100"
+        private const val INQUIRE_PRICE_PATH = "/uapi/domestic-stock/v1/quotations/inquire-price"
+        private const val DAILY_CHART_PATH = "/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice"
+    }
 }

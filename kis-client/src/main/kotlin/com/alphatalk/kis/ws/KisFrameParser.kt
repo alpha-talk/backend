@@ -1,5 +1,6 @@
 package com.alphatalk.kis.ws
 
+import com.alphatalk.kis.KisSigns
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 
@@ -19,7 +20,6 @@ object KisFrameParser {
     private const val IDX_LOW = 9
     private const val IDX_ACML_VOLUME = 13
     private const val MIN_FIELDS_PER_RECORD = 14
-    private val FALLING_SIGNS = setOf("4", "5")
 
     private val mapper: ObjectMapper = jacksonObjectMapper()
 
@@ -59,23 +59,17 @@ object KisFrameParser {
     }
 
     private fun toTick(fields: List<String>, base: Int): KisTick? {
-        val falling = fields[base + IDX_CHANGE_SIGN] in FALLING_SIGNS
+        val falling = KisSigns.isFalling(fields[base + IDX_CHANGE_SIGN])
         return KisTick(
             code = fields[base + IDX_CODE],
             time = fields[base + IDX_TIME],
             price = fields[base + IDX_PRICE].toLongOrNull() ?: return null,
-            change = applySign(fields[base + IDX_CHANGE].toLongOrNull() ?: return null, falling),
-            changeRate = applySign(fields[base + IDX_CHANGE_RATE].toDoubleOrNull() ?: return null, falling),
+            change = KisSigns.apply(fields[base + IDX_CHANGE].toLongOrNull() ?: return null, falling),
+            changeRate = KisSigns.apply(fields[base + IDX_CHANGE_RATE].toDoubleOrNull() ?: return null, falling),
             open = fields[base + IDX_OPEN].toLongOrNull() ?: return null,
             high = fields[base + IDX_HIGH].toLongOrNull() ?: return null,
             low = fields[base + IDX_LOW].toLongOrNull() ?: return null,
             volume = fields[base + IDX_ACML_VOLUME].toLongOrNull() ?: return null,
         )
     }
-
-    private fun applySign(value: Long, falling: Boolean): Long =
-        if (falling && value > 0) -value else value
-
-    private fun applySign(value: Double, falling: Boolean): Double =
-        if (falling && value > 0) -value else value
 }

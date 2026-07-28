@@ -10,4 +10,12 @@ data class PriceProperties(
     val symbols: List<String> = emptyList(),
     val conflationMs: Long = 200,
     val rateFactor: Double = 0.75,
+    val maintainIntervalMs: Long = 1_000,
+    val removalGraceMs: Long = 30_000,
+    val marketHoursEnforced: Boolean = true,
+    val holidays: List<String> = emptyList(),
+    val pollIntervalMs: Long = 30_000,
+    val pollBudgetFactor: Double = 0.5,
+    val candleEnabled: Boolean = false,
+    val candleBackfillDays: Long = 90,
 )
