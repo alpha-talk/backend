@@ -1,0 +1,9 @@
+package com.alphatalk.worker.batch.job
+
+import java.time.Instant
+
+interface BatchJobRunStore {
+    fun start(job: String, runDate: String, startedAt: Instant): Long?
+    fun succeed(id: Long, okCount: Int, failCount: Int, finishedAt: Instant)
+    fun fail(id: Long, error: String, finishedAt: Instant)
+}

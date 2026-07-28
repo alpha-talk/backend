@@ -1,20 +1,7 @@
--- 로컬 E2E 테스트용 시드 — 운영에선 worker-batch가 스키마 적재·마스터 동기화를 담당한다(KIS 워커 명세 §4).
--- stock_master·sector는 worker-batch 소유 테이블이라 db-migrations에 아직 없으므로 여기서 임시 생성한다
--- (worker-llm 테스트의 db/testdeps/read_deps.sql과 같은 최소 대역).
+-- 로컬 E2E 테스트용 시드. stock_master·sector 스키마는 db-migrations가 소유하고(KIS 워커 명세 §4),
+-- 운영 데이터는 worker-batch의 stock_master_sync가 KIS 마스터 파일에서 적재한다(§3.1).
+-- 이 파일은 워커를 돌리지 않고 화면을 확인할 때 쓰는 최소 표본이다.
 -- 적용: docker exec -i alphatalk-postgres psql -U alphatalk alphatalk < test-front/seed-stocks.sql
-
-CREATE TABLE IF NOT EXISTS stock_master (
-    code        CHAR(6) PRIMARY KEY,
-    name        TEXT    NOT NULL,
-    market      TEXT,
-    sector_code TEXT,
-    is_active   BOOLEAN NOT NULL DEFAULT true
-);
-
-CREATE TABLE IF NOT EXISTS sector (
-    code TEXT PRIMARY KEY,
-    name TEXT NOT NULL
-);
 
 INSERT INTO sector (code, name) VALUES
     ('ELEC',  '전기·전자'),

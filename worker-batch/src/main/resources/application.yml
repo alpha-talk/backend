@@ -1,0 +1,32 @@
+spring:
+  application:
+    name: worker-batch
+  datasource:                                   # 스키마는 :db-migrations Liquibase master changelog가 기동 시 적용 (단일 소유)
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/alphatalk}
+    username: ${DB_USER:alphatalk}
+    password: ${DB_PASSWORD:alphatalk}
+  data:
+    redis:                                      # ShedLock 락 저장소 — 다중 기동 시 잡 중복 실행 방지 (KIS 워커 명세 §3.2)
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      timeout: 3s
+  lifecycle:
+    timeout-per-shutdown-phase: 30s
+
+server:
+  port: 8083          # 모노레포 포트 배치 (기획안 §3.1)
+  shutdown: graceful
+
+alphatalk:
+  batch:
+    enabled: true
+    stock-master:
+      enabled: true
+      cron: "0 0 8 * * *"                       # 매일 08:00 KST — 원본이 07:40경 갱신된다 (명세 §3.1)
+      base-url: https://new.real.download.dws.co.kr/common/master
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, metrics

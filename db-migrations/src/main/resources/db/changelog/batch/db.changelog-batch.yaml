@@ -1,0 +1,8 @@
+databaseChangeLog:
+  - changeSet:
+      id: 0001-stock-master
+      author: worker-batch
+      changes:
+        - sqlFile:
+            path: sql/0001_stock_master.sql
+            relativeToChangelogFile: true
