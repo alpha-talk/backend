@@ -1,0 +1,94 @@
+package com.alphatalk.kis.master
+
+import java.nio.charset.Charset
+import java.time.LocalDate
+import java.time.format.DateTimeFormatter
+
+data class ParsedStockMaster(
+    val stocks: List<KisStockMaster>,
+    val skippedLines: Int,
+) {
+    val isComplete: Boolean
+        get() = skippedLines == 0
+}
+
+object KisMasterParser {
+    private val CP949: Charset = Charset.forName("x-windows-949")
+    private val DATE_FORMAT: DateTimeFormatter = DateTimeFormatter.BASIC_ISO_DATE
+
+    private const val CODE_FROM = 0
+    private const val CODE_TO = 9
+    private const val NAME_FROM = 21
+    private const val NAME_TO = 61
+    private const val GROUP_FROM = 61
+    private const val GROUP_TO = 63
+    private const val SECTOR_FROM = 64
+    private const val SECTOR_TO = 68
+    private const val LISTED_AT_LENGTH = 8
+    private const val SHARES_LENGTH = 15
+    private const val SHARES_UNIT = 1_000L
+    private const val UNCLASSIFIED_SECTOR = "0000"
+
+    fun parse(market: KisMarket, content: ByteArray): ParsedStockMaster {
+        val lines = splitLines(content)
+        val stocks = mutableListOf<KisStockMaster>()
+        var skipped = 0
+        lines.forEach { line ->
+            val parsed = parseLine(market, line)
+            if (parsed == null) skipped += 1 else stocks += parsed
+        }
+        return ParsedStockMaster(stocks, skipped)
+    }
+
+    fun parseLine(market: KisMarket, line: ByteArray): KisStockMaster? {
+        if (line.size != market.lineLength) return null
+        val code = text(line, CODE_FROM, CODE_TO)
+        val name = text(line, NAME_FROM, NAME_TO)
+        if (code.isEmpty() || name.isEmpty()) return null
+        val sharesFrom = market.listedAtOffset + LISTED_AT_LENGTH
+        return KisStockMaster(
+            code = code,
+            name = name,
+            market = market,
+            groupCode = text(line, GROUP_FROM, GROUP_TO),
+            sectorCode = sectorCode(market, line),
+            sharesOutstanding = number(line, sharesFrom, sharesFrom + SHARES_LENGTH)?.times(SHARES_UNIT),
+            listedAt = date(line, market.listedAtOffset),
+        )
+    }
+
+    private fun sectorCode(market: KisMarket, line: ByteArray): String? =
+        text(line, SECTOR_FROM, SECTOR_TO)
+            .takeIf { it.isNotEmpty() && it != UNCLASSIFIED_SECTOR }
+            ?.let { market.sectorPrefix + it }
+
+    private fun splitLines(content: ByteArray): List<ByteArray> {
+        val lines = mutableListOf<ByteArray>()
+        var start = 0
+        for (i in content.indices) {
+            if (content[i] == '\n'.code.toByte()) {
+                if (i > start) lines += slice(content, start, i)
+                start = i + 1
+            }
+        }
+        if (start < content.size) lines += slice(content, start, content.size)
+        return lines
+    }
+
+    private fun slice(content: ByteArray, from: Int, toExclusive: Int): ByteArray {
+        val end = if (toExclusive > from && content[toExclusive - 1] == '\r'.code.toByte()) toExclusive - 1 else toExclusive
+        return content.copyOfRange(from, end)
+    }
+
+    private fun text(line: ByteArray, from: Int, toExclusive: Int): String =
+        String(line, from, toExclusive - from, CP949).trim()
+
+    private fun number(line: ByteArray, from: Int, toExclusive: Int): Long? =
+        text(line, from, toExclusive).takeIf { it.isNotEmpty() && it.all(Char::isDigit) }?.toLong()
+
+    private fun date(line: ByteArray, from: Int): LocalDate? {
+        val raw = text(line, from, from + LISTED_AT_LENGTH)
+        if (raw.length != LISTED_AT_LENGTH || !raw.all(Char::isDigit) || raw == "00000000") return null
+        return runCatching { LocalDate.parse(raw, DATE_FORMAT) }.getOrNull()
+    }
+}
