@@ -63,6 +63,10 @@ class FakeKisServer : WebSocketServer(InetSocketAddress("127.0.0.1", 0)), AutoCl
         connections.forEach { it.close(1000, "test-close") }
     }
 
+    fun abortAllConnections() {
+        connections.forEach { it.closeConnection(1006, "test-abort") }
+    }
+
     override fun close() {
         stop(1000)
     }

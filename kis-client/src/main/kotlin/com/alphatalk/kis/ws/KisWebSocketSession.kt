@@ -93,7 +93,7 @@ class KisWebSocketSession(
         }
 
         override fun onError(ws: WebSocket, error: Throwable) {
-            listener.onError(error)
+            listener.onTransportError(error)
         }
 
         private fun handle(ws: WebSocket, text: String) {
