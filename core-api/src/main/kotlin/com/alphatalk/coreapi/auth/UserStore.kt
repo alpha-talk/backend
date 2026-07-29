@@ -17,3 +17,5 @@ interface UserStore {
     fun existsByEmail(email: String): Boolean
     fun existsByNickname(nickname: String): Boolean
 }
+
+class DuplicateUserException(cause: Throwable) : RuntimeException(cause)
