@@ -2,7 +2,9 @@ package com.alphatalk.coreapi.stream
 
 import com.alphatalk.coreapi.support.ApiException
 import com.alphatalk.coreapi.support.ErrorCode
+import org.springframework.stereotype.Service
 
+@Service
 class StreamService(
     private val stream: StreamStore,
     private val quotes: QuoteStore,
