@@ -3,14 +3,8 @@ package com.alphatalk.worker.ingest.scheduler
 import io.micrometer.core.instrument.MeterRegistry
 import org.slf4j.LoggerFactory
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
-import org.springframework.context.annotation.Configuration
-import org.springframework.scheduling.annotation.EnableScheduling
 import org.springframework.scheduling.annotation.Scheduled
 import org.springframework.stereotype.Component
-
-@Configuration
-@EnableScheduling
-class SchedulingConfig
 
 @Component
 @ConditionalOnProperty("alphatalk.ingest.poll-enabled", havingValue = "true", matchIfMissing = true)
