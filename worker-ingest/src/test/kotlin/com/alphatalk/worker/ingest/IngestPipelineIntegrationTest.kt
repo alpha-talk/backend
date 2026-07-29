@@ -90,7 +90,8 @@ class IngestPipelineIntegrationTest {
             sources = listOf(source),
             seen = RedisSeenMarker(template, props),
             queue = RedisIngestQueue(template, props),
-            excerptMaxLength = 200,
+            props = props,
+            fetchExecutor = { it.run() },
         )
 
         poller.pollOnce()
