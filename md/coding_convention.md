@@ -95,3 +95,23 @@ class AuthService(
 - refcount/인덱스 전이 로직을 바꿀 때는 반드시 단위 테스트를 함께 둔다 (CLAUDE.md 불변 규칙).
 - 포트는 페이크 구현으로 인프라(Redis/브로커) 없이 테스트한다.
 - 계약(LSP)은 구현 공용 계약 테스트로 고정한다.
+
+---
+
+## 4. 관계형 DB 접근
+
+DB를 사용하는 모든 서버 모듈은 Spring Data JPA를 최우선으로 사용한다. 쿼리 구현 우선순위는 다음과 같다.
+
+1. `JpaRepository` 기본 CRUD와 파생 쿼리
+2. `@Query`의 JPQL
+3. native SQL과 raw SQL(`JdbcTemplate` 포함)
+
+엔티티 중심 CRUD와 일반 조회는 먼저 Spring Data JPA로 표현한다. 파생 쿼리로 의도가 불명확하거나 조인·벌크 갱신이 필요하면 JPQL을 사용한다. 다음 조건 중 하나를 충족할 때만 native SQL이나 raw SQL을 사용한다.
+
+- PostgreSQL 전용 연산자·함수·정렬·인덱스 기능이 필요할 때
+- JPQL로 명확하게 표현하기 어려운 복잡 집계나 대량 처리가 필요할 때
+- 실행 계획과 측정 결과로 확인된 성능 병목을 해결할 때
+
+raw SQL을 사용할 때는 문자열 연결로 값을 삽입하지 않고 모든 입력값을 파라미터로 바인딩한다. 리뷰할 때는 JPA나 JPQL로 충족할 수 없는 이유와 쿼리 동작을 고정하는 테스트가 있는지 확인한다.
+
+DB 스키마의 단일 소유자는 `:db-migrations`의 Liquibase다. JPA는 스키마를 생성하거나 갱신하지 않고 `ddl-auto=validate`로 엔티티 매핑과 실제 스키마의 정합성만 검증한다.
