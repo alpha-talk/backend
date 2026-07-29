@@ -2,7 +2,9 @@ package com.alphatalk.coreapi.search
 
 import com.alphatalk.coreapi.support.ApiException
 import com.alphatalk.coreapi.support.ErrorCode
+import org.springframework.stereotype.Service
 
+@Service
 class StockSearchService(
     private val store: StockSearchStore,
 ) {

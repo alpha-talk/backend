@@ -41,7 +41,48 @@
 
 ---
 
-## 2. 로깅
+## 2. 빈 등록은 컴포넌트 스캔이 기본
+
+**우리가 소유한 클래스는 스테레오타입 어노테이션을 붙여 스캔으로 등록한다.** `@Configuration`에 `@Bean` 메서드를 만들어 손으로 조립하지 않는다.
+
+| 대상 | 어노테이션 |
+|---|---|
+| 서비스(유스케이스·도메인 로직) | `@Service` |
+| 저장소 어댑터(JDBC·Redis 구현) | `@Repository` |
+| 그 외 우리가 만든 협력자(핸들러·라이프사이클·인터셉터) | `@Component` |
+| HTTP 진입점 | `@RestController` |
+
+포트 인터페이스에는 아무것도 붙이지 않는다. 구현에만 붙이고, 주입은 인터페이스 타입으로 받는다 — 스캔을 쓴다고 DIP가 약해지지 않는다.
+
+### 왜
+
+- 손으로 조립하면 **클래스를 추가할 때마다 config를 같이 고쳐야 한다.** 의존성 하나를 추가하는 데 두 파일이 바뀌고, 빠뜨리면 기동 시점에야 드러난다.
+- 조립 코드는 생성자 시그니처를 그대로 베낀 중복이다. 컴파일러가 이미 검증하는 내용을 사람이 한 번 더 적는 셈이다.
+- 저장소 안에서 방식이 갈리면 **어디를 고쳐야 할지 매번 확인해야 한다.** ws는 처음부터 `@Component` 스캔이고 `config/`에는 프레임워크 설정만 둔다 — 모든 모듈이 이 형태를 따른다.
+
+### `@Bean`을 쓰는 경우
+
+조립에 **판단이 들어갈 때만** config로 간다. 단순 결선은 해당하지 않는다.
+
+- 우리가 만들지 않은 타입: `SecurityFilterChain`·`PasswordEncoder`·`ObjectMapper`처럼 어노테이션을 붙일 수 없는 프레임워크·라이브러리 클래스
+- 조건부 등록: 프로파일·프로퍼티에 따라 구현이 갈리거나(`@ConditionalOnProperty`), 미설정 시 기동을 막는 fail-closed 검증이 붙는 경우 (worker-llm `LlmConfig`)
+- 같은 타입의 빈을 여러 개 만들어 이름으로 구분해야 하는 경우
+
+생성자에 빈이 아닌 값(시각·난수원 등)이 필요하면 Kotlin 기본 파라미터로 두면 된다. Spring이 기본값을 그대로 쓰고, 테스트는 직접 생성해 원하는 값을 넣는다.
+
+```kotlin
+@Service
+class AuthService(
+    private val users: UserStore,
+    private val clock: Clock = Clock.systemUTC(),
+)
+```
+
+`@ConfigurationProperties`는 `@ConfigurationPropertiesScan`으로 등록한다 — 프로퍼티 클래스마다 `@Bean`을 만들지 않는다.
+
+---
+
+## 3. 로깅
 
 - 로그는 구조화(JSON)를 지향하고 `sessionId`/`userId`를 태깅한다.
 - 뜨거운 경로(틱 relay)에는 debug 이상 로그 금지.
@@ -49,7 +90,7 @@
 
 ---
 
-## 3. 테스트
+## 4. 테스트
 
 - refcount/인덱스 전이 로직을 바꿀 때는 반드시 단위 테스트를 함께 둔다 (CLAUDE.md 불변 규칙).
 - 포트는 페이크 구현으로 인프라(Redis/브로커) 없이 테스트한다.
