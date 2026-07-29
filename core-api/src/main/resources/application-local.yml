@@ -1,0 +1,4 @@
+alphatalk:
+  auth:
+    jwt:
+      secret: insecure-local-dev-only-secret-0123456789abcdef

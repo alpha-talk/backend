@@ -1,0 +1,36 @@
+spring:
+  application:
+    name: core-api
+  datasource:                                   # 스키마는 :db-migrations Liquibase master changelog가 기동 시 적용 (단일 소유)
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/alphatalk}
+    username: ${DB_USER:alphatalk}
+    password: ${DB_PASSWORD:alphatalk}
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      timeout: 3s
+  lifecycle:
+    timeout-per-shutdown-phase: 20s
+
+server:
+  port: 8080          # 모노레포 포트 배치 (기획안 §3.1)
+  shutdown: graceful
+
+alphatalk:
+  auth:
+    jwt:
+      # :auth-jwt 자동구성. HS256 32바이트 이상, ws 게이트웨이와 동일 값 주입 (NFR-07).
+      # 기본값 없음 — 환경변수 미설정 시 기동 실패(fail-closed). 로컬 개발은 local 프로파일 사용.
+      secret: ${ALPHATALK_AUTH_JWT_SECRET}
+  core-api:
+    auth:
+      access-ttl: 30m                           # core-api 명세 §1.2
+      refresh-ttl: 14d
+      login-attempts-per-minute: 10             # 명세 §1.5 — 키는 IP+email
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, metrics

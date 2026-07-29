@@ -123,8 +123,9 @@ ULID 사전순이 곧 시간순이라는 성질을 이용한 **양방향 커서*
              { "code": "005935", "name": "삼성전자우", "market": "KOSPI" } ] }
 ```
 
-- 매칭: 코드 prefix OR 이름 부분일치(`ILIKE` + `pg_trgm` GIN 인덱스). 정렬: prefix 일치 우선 → 시총 내림차순.
-- `q`는 1자 이상. 데이터 원천은 batch-worker의 `stock_master`다. Phase 3에서 OpenSearch(형태소/초성)로 승격하되 **API 계약은 불변**.
+- 매칭: 코드 prefix OR 이름 부분일치(`ILIKE` + `pg_trgm` GIN 인덱스). 정렬: 코드 prefix 일치 우선 → 이름 일치 → **규모 내림차순** → 코드.
+- 규모 기준은 원래 시가총액이지만 `stock_master`에 가격이 없어 지금은 **`shares_outstanding`(발행주식수)로 근사**한다. 발행주식수는 시총과 다르므로 저가·다주식 종목이 고가 우량주보다 앞설 수 있다. `valuation_daily.market_cap`이 들어오는 M5에서 시총으로 교체한다 — 정렬 기준은 응답에 드러나지 않으므로 그때도 **API 계약은 그대로**다.
+- `q`는 1자 이상. 데이터 원천은 batch-worker의 `stock_master`이고 `is_active=true`만 조회한다. Phase 3에서 OpenSearch(형태소/초성)로 승격하되 **API 계약은 불변**.
 
 ---
 
