@@ -31,6 +31,7 @@
 - Kotlin 2.x / JVM 21 / Spring Boot 3.5.x (3.x 최신 패치)
 - WebSocket: **Spring MVC 스택 + `@EnableWebSocketMessageBroker`(SimpleBroker)** — WebFlux 아님 (v0.2에서 전환 결정)
 - Redis: Spring Data Redis (Lettuce), Pub/Sub 구독 전용
+- 관계형 DB 접근: DB를 사용하는 모든 서버 모듈은 **Spring Data JPA를 최우선**으로 사용한다. 우선순위는 `JpaRepository` 기본 CRUD·파생 쿼리 → JPQL → native SQL/raw SQL(`JdbcTemplate` 포함)이다. JPA/JPQL로 요구사항을 명확하게 충족할 수 없거나 PostgreSQL 전용 기능·복잡 집계·대량 처리·측정된 성능 병목이 있을 때만 raw SQL을 허용하며, 모든 쿼리는 파라미터를 바인딩한다.
 - 빌드: Gradle Kotlin DSL 멀티모듈 + `gradle/libs.versions.toml`
 - 테스트: JUnit5 + Testcontainers(Redis) + `WebSocketStompClient`
 

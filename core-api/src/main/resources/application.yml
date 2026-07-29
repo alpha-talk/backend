@@ -5,11 +5,17 @@ spring:
     url: ${DB_URL:jdbc:postgresql://localhost:5432/alphatalk}
     username: ${DB_USER:alphatalk}
     password: ${DB_PASSWORD:alphatalk}
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
   data:
     redis:
       host: ${REDIS_HOST:localhost}
       port: ${REDIS_PORT:6379}
       timeout: 3s
+      repositories:
+        enabled: false
   lifecycle:
     timeout-per-shutdown-phase: 20s
 
