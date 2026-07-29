@@ -7,7 +7,6 @@ import org.springframework.stereotype.Service
 @Service
 class WatchlistService(
     private val store: WatchlistStore,
-    private val catalog: StockCatalog,
     private val mirror: WatchlistMirror,
     private val announcer: WatchlistAnnouncer,
 ) {
@@ -15,30 +14,33 @@ class WatchlistService(
 
     fun subscribe(userId: Long, rawCode: String): Boolean {
         val code = normalize(rawCode)
-        val state = store.state(userId, code)
-        if (!state.subscribed) {
-            if (!catalog.exists(code)) {
-                throw ApiException(ErrorCode.NOT_FOUND, "존재하지 않는 종목입니다", mapOf("code" to code))
+        return when (store.subscribe(userId, code, MAX_ITEMS)) {
+            SubscribeOutcome.ADDED -> {
+                mirror.add(userId, code)
+                announcer.announce(userId, added = listOf(code), removed = emptyList())
+                true
             }
-            if (state.total >= MAX_ITEMS) {
+
+            SubscribeOutcome.ALREADY_SUBSCRIBED -> {
+                mirror.add(userId, code)
+                false
+            }
+
+            SubscribeOutcome.UNKNOWN_STOCK ->
+                throw ApiException(ErrorCode.NOT_FOUND, "존재하지 않는 종목입니다", mapOf("code" to code))
+
+            SubscribeOutcome.LIMIT_EXCEEDED ->
                 throw ApiException(
                     ErrorCode.LIMIT_EXCEEDED,
                     "관심목록은 최대 ${MAX_ITEMS}개까지 담을 수 있습니다",
                     mapOf("limit" to MAX_ITEMS),
                 )
-            }
         }
-        val added = !state.subscribed && store.add(userId, code)
-        mirror.add(userId, code)
-        if (added) {
-            announcer.announce(userId, added = listOf(code), removed = emptyList())
-        }
-        return added
     }
 
     fun unsubscribe(userId: Long, rawCode: String) {
         val code = normalize(rawCode)
-        val removed = store.remove(userId, code)
+        val removed = store.unsubscribe(userId, code)
         mirror.remove(userId, code)
         if (removed) {
             announcer.announce(userId, added = emptyList(), removed = listOf(code))
