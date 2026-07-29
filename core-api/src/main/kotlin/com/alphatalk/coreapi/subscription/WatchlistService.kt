@@ -2,7 +2,9 @@ package com.alphatalk.coreapi.subscription
 
 import com.alphatalk.coreapi.support.ApiException
 import com.alphatalk.coreapi.support.ErrorCode
+import org.springframework.stereotype.Service
 
+@Service
 class WatchlistService(
     private val store: WatchlistStore,
     private val catalog: StockCatalog,
