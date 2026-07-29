@@ -5,6 +5,7 @@ import com.alphatalk.contracts.Keys
 import com.alphatalk.contracts.envelope.WatchlistUpdated
 import com.fasterxml.jackson.databind.ObjectMapper
 import org.springframework.data.redis.core.StringRedisTemplate
+import org.springframework.stereotype.Component
 import java.time.Clock
 
 interface WatchlistMirror {
@@ -17,10 +18,11 @@ interface WatchlistAnnouncer {
     fun announce(userId: Long, added: List<String>, removed: List<String>)
 }
 
+@Component
 class RedisWatchlistBroadcaster(
     private val redis: StringRedisTemplate,
     private val mapper: ObjectMapper,
-    private val clock: Clock,
+    private val clock: Clock = Clock.systemUTC(),
 ) : WatchlistMirror, WatchlistAnnouncer {
     override fun add(userId: Long, code: String) {
         redis.opsForSet().add(Keys.watchlist(userId), code)
