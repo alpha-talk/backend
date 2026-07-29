@@ -127,4 +127,32 @@ class JdbcStockSearchStoreTest {
 
         assertTrue("idx_stock_master_name_trgm" in indexes, "trgm 인덱스 없음: $indexes")
     }
+
+    @Test
+    fun `코드 인덱스는 LIKE 접두어 검색에 실제로 쓰인다`() {
+        jdbc.execute("SET enable_seqscan = off")
+        try {
+            val plan = jdbc.queryForList(
+                "EXPLAIN SELECT code FROM stock_master WHERE is_active AND code LIKE '0059%'",
+                String::class.java,
+            ).joinToString("\n")
+
+            assertTrue("idx_stock_master_active_code" in plan, "인덱스가 계획에 없다:\n$plan")
+        } finally {
+            jdbc.execute("SET enable_seqscan = on")
+        }
+    }
+
+    @Test
+    fun `코드 인덱스는 패턴 검색용 opclass를 쓴다`() {
+        val definition = jdbc.queryForObject(
+            "SELECT indexdef FROM pg_indexes WHERE indexname = 'idx_stock_master_active_code'",
+            String::class.java,
+        )
+
+        assertTrue(
+            definition!!.contains("bpchar_pattern_ops"),
+            "기본 콜레이션에서 LIKE에 쓰이지 않는 opclass다: $definition",
+        )
+    }
 }
