@@ -14,6 +14,7 @@ import org.springframework.http.HttpMethod
 import org.springframework.http.MediaType
 import org.springframework.boot.test.web.client.TestRestTemplate
 import org.springframework.jdbc.core.JdbcTemplate
+import org.springframework.test.context.ActiveProfiles
 import org.testcontainers.containers.GenericContainer
 import org.testcontainers.containers.PostgreSQLContainer
 import org.testcontainers.junit.jupiter.Container
@@ -21,11 +22,13 @@ import org.testcontainers.junit.jupiter.Testcontainers
 import org.testcontainers.utility.DockerImageName
 import java.time.Duration
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @Testcontainers(disabledWithoutDocker = true)
+@ActiveProfiles("test")
 class AuthEndToEndTest {
     companion object {
         @Container
@@ -49,6 +52,9 @@ class AuthEndToEndTest {
 
     @Autowired
     private lateinit var issuer: TokenIssuer
+
+    @Autowired
+    private lateinit var users: UserStore
 
     private val mapper = ObjectMapper()
 
@@ -132,6 +138,18 @@ class AuthEndToEndTest {
 
         assertEquals(409, response.statusCode.value())
         assertEquals("DUPLICATE", json(response.body).path("error").path("code").asText())
+    }
+
+    @Test
+    fun `DB 중복 제약 충돌은 DuplicateUserException으로 변환한다`() {
+        users.create("duplicate@b.c", "hash", "중복검증")
+
+        assertFailsWith<DuplicateUserException> {
+            users.create("duplicate@b.c", "hash", "다른닉")
+        }
+        assertFailsWith<DuplicateUserException> {
+            users.create("other@b.c", "hash", "중복검증")
+        }
     }
 
     @Test
