@@ -1,18 +1,60 @@
 package com.alphatalk.coreapi.stream
 
 import com.alphatalk.contracts.Keys
+import jakarta.persistence.Column
+import jakarta.persistence.Entity
+import jakarta.persistence.Id
+import jakarta.persistence.IdClass
+import jakarta.persistence.Table
+import org.hibernate.annotations.Immutable
+import org.hibernate.annotations.JdbcTypeCode
+import org.hibernate.type.SqlTypes
+import org.springframework.data.jpa.repository.JpaRepository
 import org.springframework.data.redis.core.StringRedisTemplate
-import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.stereotype.Repository
-import java.sql.ResultSet
+import java.io.Serializable
 import java.time.LocalDate
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 
+data class DailyCandleId(
+    val code: String = "",
+    val date: String = "",
+) : Serializable
+
+@Entity
+@Immutable
+@Table(name = "daily_candle")
+@IdClass(DailyCandleId::class)
+class DailyCandleEntity(
+    @Id
+    @JdbcTypeCode(SqlTypes.CHAR)
+    @Column(name = "code", length = 6, columnDefinition = "char(6)")
+    var code: String = "",
+    @Id
+    @JdbcTypeCode(SqlTypes.CHAR)
+    @Column(name = "date", length = 8, columnDefinition = "char(8)")
+    var date: String = "",
+    @Column(name = "open", nullable = false)
+    var open: Int = 0,
+    @Column(name = "high", nullable = false)
+    var high: Int = 0,
+    @Column(name = "low", nullable = false)
+    var low: Int = 0,
+    @Column(name = "close", nullable = false)
+    var close: Int = 0,
+    @Column(name = "volume", nullable = false)
+    var volume: Long = 0,
+)
+
+interface DailyCandleJpaRepository : JpaRepository<DailyCandleEntity, DailyCandleId> {
+    fun findTop2ByCodeOrderByDateDesc(code: String): List<DailyCandleEntity>
+}
+
 @Repository
 class RedisQuoteStore(
     private val redis: StringRedisTemplate,
-    private val jdbc: JdbcTemplate,
+    private val candles: DailyCandleJpaRepository,
 ) : QuoteStore {
     override fun liveQuote(code: String): QuoteResponse? {
         val hash = redis.opsForHash<String, String>().entries(Keys.price(code))
@@ -35,57 +77,33 @@ class RedisQuoteStore(
     }
 
     override fun lastCandleQuote(code: String): QuoteResponse? =
-        jdbc.query(LAST_TWO_CANDLES, ::mapCandle, code).takeIf { it.isNotEmpty() }?.let(::toQuote)
+        candles.findTop2ByCodeOrderByDateDesc(code).takeIf { it.isNotEmpty() }?.let(::toQuote)
 
-    private fun toQuote(candles: List<Candle>): QuoteResponse {
+    private fun toQuote(candles: List<DailyCandleEntity>): QuoteResponse {
         val latest = candles.first()
-        val prevClose = candles.getOrNull(1)?.close ?: latest.close
+        val prevClose = candles.getOrNull(1)?.close?.toLong() ?: latest.close.toLong()
         val change = latest.close - prevClose
         return QuoteResponse(
-            code = latest.code,
-            price = latest.close,
+            code = latest.code.trim(),
+            price = latest.close.toLong(),
             prevClose = prevClose,
             change = change,
             changeRate = if (prevClose == 0L) 0.0 else round2(change * 100.0 / prevClose),
-            open = latest.open,
-            high = latest.high,
-            low = latest.low,
+            open = latest.open.toLong(),
+            high = latest.high.toLong(),
+            low = latest.low.toLong(),
             volume = latest.volume,
-            ts = latest.date.atStartOfDay(SEOUL).toInstant().toEpochMilli(),
+            ts = LocalDate.parse(latest.date.trim(), DateTimeFormatter.BASIC_ISO_DATE)
+                .atStartOfDay(SEOUL)
+                .toInstant()
+                .toEpochMilli(),
             delayed = true,
         )
     }
 
     private fun round2(value: Double): Double = Math.round(value * 100.0) / 100.0
 
-    private data class Candle(
-        val code: String,
-        val date: LocalDate,
-        val open: Long,
-        val high: Long,
-        val low: Long,
-        val close: Long,
-        val volume: Long,
-    )
-
-    private fun mapCandle(rows: ResultSet, rowNum: Int) = Candle(
-        code = rows.getString("code").trim(),
-        date = LocalDate.parse(rows.getString("date"), DateTimeFormatter.BASIC_ISO_DATE),
-        open = rows.getLong("open"),
-        high = rows.getLong("high"),
-        low = rows.getLong("low"),
-        close = rows.getLong("close"),
-        volume = rows.getLong("volume"),
-    )
-
     companion object {
         private val SEOUL: ZoneId = ZoneId.of("Asia/Seoul")
-        private val LAST_TWO_CANDLES = """
-            SELECT code, date, open, high, low, close, volume
-            FROM daily_candle
-            WHERE code = ?
-            ORDER BY date DESC
-            LIMIT 2
-        """.trimIndent()
     }
 }

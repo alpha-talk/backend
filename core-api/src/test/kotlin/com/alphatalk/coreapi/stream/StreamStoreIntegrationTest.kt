@@ -1,84 +1,83 @@
 package com.alphatalk.coreapi.stream
 
-import com.fasterxml.jackson.databind.ObjectMapper
-import liquibase.Contexts
-import liquibase.LabelExpression
-import liquibase.Liquibase
-import liquibase.database.DatabaseFactory
-import liquibase.database.jvm.JdbcConnection
-import liquibase.resource.ClassLoaderResourceAccessor
-import org.junit.jupiter.api.BeforeAll
+import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
+import org.springframework.beans.factory.annotation.Autowired
+import org.springframework.boot.test.context.SpringBootTest
+import org.springframework.boot.testcontainers.service.connection.ServiceConnection
 import org.springframework.jdbc.core.JdbcTemplate
-import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate
-import org.springframework.jdbc.datasource.DriverManagerDataSource
+import org.springframework.test.context.ActiveProfiles
+import org.testcontainers.containers.GenericContainer
 import org.testcontainers.containers.PostgreSQLContainer
 import org.testcontainers.junit.jupiter.Container
 import org.testcontainers.junit.jupiter.Testcontainers
 import org.testcontainers.utility.DockerImageName
-import java.sql.DriverManager
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
+@SpringBootTest
 @Testcontainers(disabledWithoutDocker = true)
+@ActiveProfiles("test")
 class StreamStoreIntegrationTest {
     companion object {
-        private const val MASTER_CHANGELOG = "db/changelog/db.changelog-master.yaml"
+        @Container
+        @ServiceConnection
+        @JvmStatic
+        val redis = GenericContainer("redis:7-alpine").withExposedPorts(6379)
 
         @Container
+        @ServiceConnection
         @JvmStatic
         val postgres = PostgreSQLContainer(
             DockerImageName.parse("pgvector/pgvector:pg16").asCompatibleSubstituteFor("postgres"),
         )
-
-        private val plain by lazy {
-            JdbcTemplate(DriverManagerDataSource(postgres.jdbcUrl, postgres.username, postgres.password))
-        }
-
-        @Suppress("DEPRECATION")
-        @BeforeAll
-        @JvmStatic
-        fun migrateAndSeed() {
-            DriverManager.getConnection(postgres.jdbcUrl, postgres.username, postgres.password).use { connection ->
-                val database = DatabaseFactory.getInstance()
-                    .findCorrectDatabaseImplementation(JdbcConnection(connection))
-                Liquibase(MASTER_CHANGELOG, ClassLoaderResourceAccessor(), database)
-                    .update(Contexts(), LabelExpression())
-            }
-            listOf(
-                Triple("01J9Z800000000000000000001", "NEWS", "첫 뉴스"),
-                Triple("01J9Z800000000000000000002", "NEWS", "둘째 뉴스"),
-                Triple("01J9Z800000000000000000003", "AI", "브리핑"),
-                Triple("01J9Z800000000000000000004", "POST", "유저 글"),
-                Triple("01J9Z800000000000000000005", "NEWS", "최신 뉴스"),
-            ).forEach { (id, type, title) ->
-                plain.update(
-                    """
-                    INSERT INTO stream_event (event_id, code, type, occurred_at, source, payload)
-                    VALUES (?, '005930', ?, now(), 'hankyung', ?::jsonb)
-                    """.trimIndent(),
-                    id,
-                    type,
-                    """{"title":"$title"}""",
-                )
-            }
-            plain.update(
-                """
-                INSERT INTO stream_event (event_id, code, type, occurred_at, source, payload)
-                VALUES ('01J9Z800000000000000000009', '000660', 'NEWS', now(), 'hankyung', '{"title":"다른 종목"}'::jsonb)
-                """.trimIndent(),
-            )
-            plain.update(
-                """
-                INSERT INTO daily_candle (code, date, open, high, low, close, volume, value) VALUES
-                ('005930', '20260727', 70000, 71000, 69800, 70500, 1000, 70000000),
-                ('005930', '20260728', 70600, 71500, 70400, 71200, 2000, 142000000)
-                """.trimIndent(),
-            )
-        }
     }
 
-    private val store by lazy { JdbcStreamStore(NamedParameterJdbcTemplate(plain), ObjectMapper()) }
+    @Autowired
+    private lateinit var store: StreamStore
+
+    @Autowired
+    private lateinit var quotes: QuoteStore
+
+    @Autowired
+    private lateinit var jdbc: JdbcTemplate
+
+    @BeforeEach
+    fun seed() {
+        jdbc.update("DELETE FROM stream_event")
+        jdbc.update("DELETE FROM daily_candle")
+        listOf(
+            Triple("01J9Z800000000000000000001", "NEWS", "첫 뉴스"),
+            Triple("01J9Z800000000000000000002", "NEWS", "둘째 뉴스"),
+            Triple("01J9Z800000000000000000003", "AI", "브리핑"),
+            Triple("01J9Z800000000000000000004", "POST", "유저 글"),
+            Triple("01J9Z800000000000000000005", "NEWS", "최신 뉴스"),
+        ).forEach { (id, type, title) ->
+            jdbc.update(
+                """
+                INSERT INTO stream_event (event_id, code, type, occurred_at, source, payload)
+                VALUES (?, '005930', ?, now(), 'hankyung', ?::jsonb)
+                """.trimIndent(),
+                id,
+                type,
+                """{"title":"$title"}""",
+            )
+        }
+        jdbc.update(
+            """
+            INSERT INTO stream_event (event_id, code, type, occurred_at, source, payload)
+            VALUES ('01J9Z800000000000000000009', '000660', 'NEWS', now(), 'hankyung', '{"title":"다른 종목"}'::jsonb)
+            """.trimIndent(),
+        )
+        jdbc.update(
+            """
+            INSERT INTO daily_candle (code, date, open, high, low, close, volume, value) VALUES
+            ('005930', '20260727', 70000, 71000, 69800, 70500, 1000, 70000000),
+            ('005930', '20260728', 70600, 71500, 70400, 71200, 2000, 142000000)
+            """.trimIndent(),
+        )
+    }
 
     private fun query(
         cursor: String? = null,
@@ -140,34 +139,24 @@ class StreamStoreIntegrationTest {
     @Test
     fun `앞뒤 존재 여부는 타입 필터를 함께 본다`() {
         assertTrue(store.hasOlderThan("005930", "01J9Z800000000000000000002", emptyList()))
-        assertEquals(
-            false,
-            store.hasOlderThan("005930", "01J9Z800000000000000000002", listOf(StreamEventType.POST)),
-        )
+        assertFalse(store.hasOlderThan("005930", "01J9Z800000000000000000002", listOf(StreamEventType.POST)))
         assertTrue(store.hasNewerThan("005930", "01J9Z800000000000000000004", emptyList()))
-        assertEquals(
-            false,
-            store.hasNewerThan("005930", "01J9Z800000000000000000005", emptyList()),
-        )
+        assertFalse(store.hasNewerThan("005930", "01J9Z800000000000000000005", emptyList()))
     }
 
     @Test
     fun `시세 캐시가 비면 최신 일봉으로 답하고 지연 표시한다`() {
-        val quotes = RedisQuoteStore(
-            redis = org.springframework.data.redis.core.StringRedisTemplate(
-                org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory("localhost", 1).apply {
-                    afterPropertiesSet()
-                },
-            ),
-            jdbc = plain,
-        )
-
         val quote = quotes.lastCandleQuote("005930")!!
 
         assertEquals(71200, quote.price)
         assertEquals(70500, quote.prevClose)
         assertEquals(700, quote.change)
         assertEquals(0.99, quote.changeRate)
-        assertEquals(true, quote.delayed)
+        assertTrue(quote.delayed)
+    }
+
+    @Test
+    fun `일봉이 없는 종목은 시세를 만들지 않는다`() {
+        assertEquals(null, quotes.lastCandleQuote("000660"))
     }
 }

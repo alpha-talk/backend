@@ -1,5 +1,6 @@
 package com.alphatalk.coreapi.stream
 
+import com.alphatalk.coreapi.search.StockCatalog
 import com.alphatalk.coreapi.support.ApiException
 import com.alphatalk.coreapi.support.ErrorCode
 import org.springframework.stereotype.Service
@@ -8,6 +9,7 @@ import org.springframework.stereotype.Service
 class StreamService(
     private val stream: StreamStore,
     private val quotes: QuoteStore,
+    private val stocks: StockCatalog,
 ) {
     fun read(
         code: String,
@@ -23,6 +25,7 @@ class StreamService(
             limit = validLimit(limit),
             types = parseTypes(types),
         )
+        if (!stocks.existsActive(query.code)) throw unknownStock(query.code)
         val items = stream.find(query)
         return StreamPage(items, pageInfo(query, items))
     }
@@ -31,8 +34,16 @@ class StreamService(
         val valid = validCode(code)
         return quotes.liveQuote(valid)
             ?: quotes.lastCandleQuote(valid)
-            ?: throw ApiException(ErrorCode.NOT_FOUND, "시세를 찾을 수 없습니다", mapOf("code" to valid))
+            ?: throw quoteNotFound(valid)
     }
+
+    private fun quoteNotFound(code: String): ApiException {
+        if (!stocks.existsActive(code)) return unknownStock(code)
+        return ApiException(ErrorCode.NOT_FOUND, "시세를 찾을 수 없습니다", mapOf("code" to code))
+    }
+
+    private fun unknownStock(code: String) =
+        ApiException(ErrorCode.NOT_FOUND, "존재하지 않는 종목입니다", mapOf("code" to code))
 
     private fun pageInfo(query: StreamQuery, items: List<StreamItem>): PageInfo {
         if (items.isEmpty()) {
