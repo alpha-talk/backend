@@ -1,5 +1,7 @@
 package com.alphatalk.coreapi.stream
 
+import com.alphatalk.coreapi.search.StockCatalog
+import com.alphatalk.coreapi.search.StockRef
 import com.alphatalk.coreapi.support.ApiException
 import com.alphatalk.coreapi.support.ErrorCode
 import com.fasterxml.jackson.databind.ObjectMapper
@@ -50,10 +52,51 @@ class StreamServiceTest {
         payload = mapper.readTree("""{"title":"제목"}"""),
     )
 
+    private class FakeStockCatalog(private val known: Set<String> = setOf("005930")) : StockCatalog {
+        override fun existsActive(code: String) = code in known
+
+        override fun refs(codes: Collection<String>): Map<String, StockRef> = emptyMap()
+    }
+
     private fun service(
         store: StreamStore = RecordingStreamStore(),
         quotes: QuoteStore = StubQuoteStore(),
-    ) = StreamService(store, quotes)
+        stocks: StockCatalog = FakeStockCatalog(),
+    ) = StreamService(store, quotes, stocks)
+
+    @Test
+    fun `없는 종목의 방은 404다`() {
+        val store = RecordingStreamStore()
+
+        val failure = assertFailsWith<ApiException> {
+            service(store, stocks = FakeStockCatalog(emptySet())).read("999999", null, null, null, null)
+        }
+
+        assertEquals(ErrorCode.NOT_FOUND, failure.code)
+        assertNull(store.lastQuery, "없는 종목인데 이벤트를 조회했다")
+    }
+
+    @Test
+    fun `이벤트가 없는 정상 종목은 빈 목록으로 200이다`() {
+        val page = service(RecordingStreamStore()).read("005930", null, null, null, null)
+
+        assertTrue(page.items.isEmpty())
+        assertNull(page.pageInfo.oldest)
+        assertNull(page.pageInfo.newest)
+    }
+
+    @Test
+    fun `시세가 없을 때 없는 종목과 데이터 없음을 구분한다`() {
+        val unknown = assertFailsWith<ApiException> {
+            service(stocks = FakeStockCatalog(emptySet())).quote("999999")
+        }
+        val known = assertFailsWith<ApiException> { service().quote("005930") }
+
+        assertEquals(ErrorCode.NOT_FOUND, unknown.code)
+        assertEquals(ErrorCode.NOT_FOUND, known.code)
+        assertEquals("존재하지 않는 종목입니다", unknown.message)
+        assertEquals("시세를 찾을 수 없습니다", known.message)
+    }
 
     @Test
     fun `기본값은 최신부터 50건이다`() {

@@ -20,9 +20,11 @@ import org.testcontainers.junit.jupiter.Testcontainers
 import org.testcontainers.utility.DockerImageName
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
+import org.springframework.test.context.ActiveProfiles
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @Testcontainers(disabledWithoutDocker = true)
+@ActiveProfiles("test")
 class StreamEndToEndTest {
     companion object {
         @Container
@@ -52,6 +54,15 @@ class StreamEndToEndTest {
         jdbc.update("DELETE FROM stream_event")
         jdbc.update("DELETE FROM refresh_tokens")
         jdbc.update("DELETE FROM users")
+        jdbc.update("DELETE FROM stock_master")
+        jdbc.update(
+            """
+            INSERT INTO stock_master (code, name, market, shares_outstanding, is_active) VALUES
+            ('005930', '삼성전자',   'KOSPI', 5846278000, true),
+            ('000660', 'SK하이닉스', 'KOSPI',  712702000, true),
+            ('001234', '폐지된종목', 'KOSPI',   10000000, false)
+            """.trimIndent(),
+        )
         (1..5).forEach { i ->
             val type = if (i == 3) "AI" else "NEWS"
             jdbc.update(
@@ -180,5 +191,15 @@ class StreamEndToEndTest {
         assertEquals(0, response.path("items").size())
         assertTrue(response.path("pageInfo").path("oldest").isNull)
         assertEquals(false, response.path("pageInfo").path("hasMoreBefore").asBoolean())
+    }
+
+    @Test
+    fun `없거나 상장폐지된 종목의 방은 404다`() {
+        val unknown = get("/api/v1/rooms/999999/stream")
+        val delisted = get("/api/v1/rooms/001234/stream")
+
+        assertEquals(404, unknown.statusCode.value())
+        assertEquals(404, delisted.statusCode.value())
+        assertEquals("NOT_FOUND", json(unknown.body).path("error").path("code").asText())
     }
 }
