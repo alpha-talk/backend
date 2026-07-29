@@ -156,12 +156,14 @@ ULID 사전순이 곧 시간순이라는 성질을 이용한 **양방향 커서*
 
 **DELETE /watchlist/{code}** → 204. 담은 적 없는 종목이어도 204다.
 
+**한도 검사는 사용자 단위로 직렬화한다.** 99개를 가진 사용자가 서로 다른 두 종목을 동시에 PUT하면, 두 요청 모두 "99개"를 읽고 통과해 101개가 된다. `(user_id, code)` 기본키는 같은 종목의 중복만 막을 뿐 서로 다른 종목끼리의 경쟁은 막지 못한다. 그래서 구독 트랜잭션은 먼저 해당 사용자 행을 잠그고(`select id from users where id = ? for update`) 중복 확인·종목 존재 확인·개수 확인·INSERT를 한 트랜잭션 안에서 끝낸다. 행 잠금은 JPQL로 표현할 수 없어 이 한 줄만 native SQL이다.
+
 **부수효과 (Redis 계약 §1.1·§3)**: 관심목록의 진실은 core-api의 DB지만, 게이트웨이는 CONNECT 때 Redis Set `watchlist:{userId}`만 읽는다. 그래서 변경을 커밋한 뒤 두 가지를 순서대로 한다.
 
 1. Set `watchlist:{userId}`에 SADD/SREM — 다음 CONNECT가 해소할 상태를 먼저 맞춘다
 2. `PUBLISH watchlist:updated` `{ "userId": 123, "added": ["005930"], "removed": [], "ts": ... }` — 접속 중인 세션의 구독과 **수요 카운트**를 즉시 조정한다
 
-순서가 뒤집히면 이벤트를 받은 게이트웨이가 갱신 전 Set을 읽는다.
+순서가 뒤집히면 이벤트를 받은 게이트웨이가 갱신 전 Set을 읽는다. 저장소는 트랜잭션 안에서 결과만 판정해 돌려주고 Redis는 건드리지 않는다 — 미러 갱신과 발행은 서비스가 그 뒤에 하므로 항상 커밋 이후다.
 
 둘의 조건은 다르다. **발행은 DB가 실제로 바뀌었을 때만** 한다 — 모든 게이트웨이가 받는 전역 채널이라 의미 없는 발행은 그대로 비용이다. **Set 갱신은 멱등 재요청에도 매번** 한다 — Redis가 잠깐 끊겨 DB만 커밋되고 미러가 어긋난 경우, 같은 요청을 한 번 더 보내면 맞춰진다. 이 경로가 없으면 커밋된 DB와 어긋난 미러를 되돌릴 방법이 없다.
 
@@ -324,11 +326,13 @@ ULID 사전순이 곧 시간순이라는 성질을 이용한 **양방향 커서*
 ```
 community ──(StreamEventAppender 포트)──► stream   # POST 이벤트 기록
 subscription ──(WatchlistBroadcaster 포트)──► watchlist:{userId} 미러 + watchlist:updated
+subscription/stream ──(StockCatalog 포트)──► search   # 종목 존재 확인·이름 조회
 notification ──(읽기)──► stream(이벤트 조회) + subscription(관심목록)
 stream/stockinfo ──(읽기)──► Redis price:{code} / 워커 적재 테이블
 auth ◄── 전 모듈 (SecurityContext)
 ```
 
+- `stock_master`를 읽는 **JPA 매핑은 search 모듈이 단독 소유**한다. 관심목록도 스트림도 "이 종목이 실재하는가"를 물어야 하는데, 모듈마다 같은 테이블을 각자 매핑하면 매핑이 갈라진다. search가 `StockCatalog`(존재 확인·이름/시장 조회)를 노출하고 나머지는 이 포트만 쓴다. 검색 질의 자체는 `pg_trgm`·`ILIKE`·정렬 규칙 때문에 native SQL로 남는다(코딩 컨벤션 §4의 예외).
 - `stream_event` 테이블의 논리 소유자는 **stream 모듈**이다. community는 직접 INSERT하지 않고 노출된 `StreamEventAppender`를 호출한다(경계 테스트로 강제). worker-llm과 worker-batch(투자의견)는 별도 프로세스로 같은 테이블에 INSERT한다. 스키마는 `db-migrations` 모듈(Liquibase)이 단일 관리하고 외부 생산자는 `source_key` 멱등 계약을 지킨다.
 - 채널명·봉투는 `:contracts` 상수만 사용한다(문자열 하드코딩 금지).
 
