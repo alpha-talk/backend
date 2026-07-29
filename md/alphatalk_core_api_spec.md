@@ -150,11 +150,22 @@ ULID 사전순이 곧 시간순이라는 성질을 이용한 **양방향 커서*
 - `include=price` → Redis `price:{code}` 조회. 미스면 최신 일봉 종가에 `"delayed": true`를 붙인다.
 - `include=unread` → notification 모듈에 집계를 위임한다 (§6). 미지정 시 해당 필드를 생략해 응답을 가볍게 유지한다.
 
-**PUT /watchlist/{code}** → 201(신규)/200(기존). 한도 100개 초과 시 422. 없는 종목은 404.
+> 구현 현황: 목록·구독·해지와 아래 부수효과는 동작한다. `include`는 시세를 가진 stream 모듈(§5)과 미읽음을 가진 notification 모듈(§6)이 붙는 시점에 함께 연다.
 
-**DELETE /watchlist/{code}** → 204.
+**PUT /watchlist/{code}** → 201(신규)/200(기존). 한도 100개를 넘기면 422, 없거나 상장폐지된 종목은 404, 6자리 숫자가 아닌 코드는 400이다. 이미 담긴 종목은 한도와 상관없이 200 — 한도가 재요청까지 막으면 멱등성이 깨진다.
 
-**부수효과(Redis 계약 §1.1)**: 변경 커밋 후 `PUBLISH watchlist:updated` `{ "userId": 123, "added": ["005930"], "removed": [], "ts": ... }` → 게이트웨이가 접속 세션의 서버 해소 구독과 **수요 카운트**를 조정한다.
+**DELETE /watchlist/{code}** → 204. 담은 적 없는 종목이어도 204다.
+
+**부수효과 (Redis 계약 §1.1·§3)**: 관심목록의 진실은 core-api의 DB지만, 게이트웨이는 CONNECT 때 Redis Set `watchlist:{userId}`만 읽는다. 그래서 변경을 커밋한 뒤 두 가지를 순서대로 한다.
+
+1. Set `watchlist:{userId}`에 SADD/SREM — 다음 CONNECT가 해소할 상태를 먼저 맞춘다
+2. `PUBLISH watchlist:updated` `{ "userId": 123, "added": ["005930"], "removed": [], "ts": ... }` — 접속 중인 세션의 구독과 **수요 카운트**를 즉시 조정한다
+
+순서가 뒤집히면 이벤트를 받은 게이트웨이가 갱신 전 Set을 읽는다.
+
+둘의 조건은 다르다. **발행은 DB가 실제로 바뀌었을 때만** 한다 — 모든 게이트웨이가 받는 전역 채널이라 의미 없는 발행은 그대로 비용이다. **Set 갱신은 멱등 재요청에도 매번** 한다 — Redis가 잠깐 끊겨 DB만 커밋되고 미러가 어긋난 경우, 같은 요청을 한 번 더 보내면 맞춰진다. 이 경로가 없으면 커밋된 DB와 어긋난 미러를 되돌릴 방법이 없다.
+
+미러가 통째로 사라지면(Redis 초기화 등) 종목을 하나씩 다시 요청하기 전까지 복구되지 않는다. 일괄 재구축 경로는 아직 없다.
 
 ---
 
@@ -312,7 +323,7 @@ ULID 사전순이 곧 시간순이라는 성질을 이용한 **양방향 커서*
 
 ```
 community ──(StreamEventAppender 포트)──► stream   # POST 이벤트 기록
-subscription ──(RedisPublisher)──► watchlist:updated
+subscription ──(WatchlistBroadcaster 포트)──► watchlist:{userId} 미러 + watchlist:updated
 notification ──(읽기)──► stream(이벤트 조회) + subscription(관심목록)
 stream/stockinfo ──(읽기)──► Redis price:{code} / 워커 적재 테이블
 auth ◄── 전 모듈 (SecurityContext)

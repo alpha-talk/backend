@@ -13,3 +13,10 @@ databaseChangeLog:
         - sqlFile:
             path: sql/0002_stock_search.sql
             relativeToChangelogFile: true
+  - changeSet:
+      id: 0003-watchlist
+      author: core-api
+      changes:
+        - sqlFile:
+            path: sql/0003_watchlist.sql
+            relativeToChangelogFile: true
