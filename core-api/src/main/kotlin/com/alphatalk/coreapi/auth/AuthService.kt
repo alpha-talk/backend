@@ -5,11 +5,13 @@ import com.alphatalk.coreapi.support.ApiException
 import com.alphatalk.coreapi.support.ErrorCode
 import org.slf4j.LoggerFactory
 import org.springframework.security.crypto.password.PasswordEncoder
+import org.springframework.stereotype.Service
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.time.Clock
 import java.util.Base64
 
+@Service
 class AuthService(
     private val users: UserStore,
     private val refreshTokens: RefreshTokenStore,
