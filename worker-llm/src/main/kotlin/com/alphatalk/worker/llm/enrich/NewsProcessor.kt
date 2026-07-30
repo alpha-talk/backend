@@ -10,16 +10,19 @@ import com.alphatalk.worker.llm.cluster.ClusterContendedException
 import com.alphatalk.worker.llm.cluster.ClusterRecord
 import com.alphatalk.worker.llm.cluster.ClusterStatus
 import com.alphatalk.worker.llm.cluster.ClusterStore
+import com.alphatalk.worker.llm.config.LlmProperties
 import com.alphatalk.worker.llm.persist.EventIdGenerator
 import com.alphatalk.worker.llm.persist.StreamEventStore
 import com.alphatalk.worker.llm.publish.StreamPublisher
 import com.alphatalk.worker.llm.sector.SectorDirectory
 import com.fasterxml.jackson.databind.ObjectMapper
 import io.micrometer.core.instrument.MeterRegistry
+import org.springframework.stereotype.Service
 import java.time.Clock
 import java.time.Duration
 import java.util.UUID
 
+@Service
 class NewsProcessor(
     private val store: ClusterStore,
     private val assigner: ClusterAssigner,
@@ -31,13 +34,13 @@ class NewsProcessor(
     private val eventIds: EventIdGenerator,
     private val mapper: ObjectMapper,
     private val meters: MeterRegistry,
-    private val fanoutCap: Int,
-    coverageStocks: List<String>,
     private val transactions: TransactionRunner,
+    props: LlmProperties,
     private val summarizeLease: Duration = Duration.ofMinutes(2),
     private val clock: Clock = Clock.systemUTC(),
 ) {
-    private val coverage: Set<String> = coverageStocks.toSet()
+    private val fanoutCap: Int = props.sector.fanoutCap
+    private val coverage: Set<String> = props.sector.coverageStocks.toSet()
 
     fun process(entry: IngestQueueEntry) {
         val assignment = assigner.assign(entry)

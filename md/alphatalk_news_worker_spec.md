@@ -379,14 +379,29 @@ worker-ingest/
 worker-llm/
 ├─ consume/     IngestConsumer(XREADGROUP 루프 · XPENDING/XCLAIM · DLQ 격리)
 ├─ article/     ArticleFetcher(포트) · ArticleRequestGate(포트) · JsoupArticleFetcher(본문 추출) · RedisArticleRequestGate(호스트별 요청 간격)
-├─ cluster/     EmbeddingClient(포트) · ClusterAssigner(판정·락) · PgVectorClusterStore
-├─ enrich/      LlmClient(포트) · TransactionRunner(포트) · ClusterSummarizer(§3.4) · DailyDigestWriter(§4)
-├─ persist/     StreamEventWriter(upsert·payload 병합) · NewsRepository
+├─ cluster/     EmbeddingClient·ClusterLock·ClusterStore(포트) · ClusterAssigner(판정·락) · JdbcClusterStore(pgvector)
+├─ enrich/      LlmClient·TransactionRunner(포트) · ClusterSummarizer(§3.4) · NewsProcessor(§3.2) · DigestProcessor(§4)
+├─ persist/     StreamEventStore(포트) · JdbcStreamEventStore(upsert·payload 병합)
+├─ sector/      SectorDirectory(포트) · JpaSectorDirectory(sector·stock_master 조회)
 └─ publish/     StreamPublisher(포트) · RedisStreamPublisher
 ```
 
 - 서버 → 서버 의존 금지 — worker-ingest는 `:contracts`에만, worker-llm은 `:contracts`·`:db-migrations`에 의존한다. JWT가 필요 없으므로 `:auth-jwt`는 의존하지 않는다.
 - 포트는 도메인 패키지에 구현과 함께 둔다(`port/` 패키지로 몰지 않음). 도메인 클래스는 Lettuce·HTTP 클라이언트·LLM SDK를 직접 import하지 않는다 — `ClusterAssigner`·`ClusterSummarizer` 전이 로직이 인프라 없이 단위 테스트되어야 한다.
+
+### 7.1 데이터 접근 — JPA 우선과 raw SQL 예외
+
+[coding_convention.md](coding_convention.md) §4에 따라 worker-llm은 Spring Data JPA를 기본으로 쓰고, 아래 두 어댑터만 raw SQL 예외로 남긴다. 예외 근거는 여기가 단일 소유이며, 새 쿼리를 추가할 때도 먼저 JPA/JPQL로 표현되는지 확인한다.
+
+| 어댑터 | 방식 | 근거 |
+|---|---|---|
+| `JpaSectorDirectory` (`sector`·`stock_master` 조회) | Spring Data JPA 파생 쿼리 | 엔티티 중심 단순 조회 — PostgreSQL 전용 기능 불필요 |
+| `JdbcClusterStore` | native SQL | pgvector 거리 연산자(`<=>`)·`CAST(... AS vector)` 최근접 검색, `ON CONFLICT DO NOTHING/DO UPDATE` 업서트, `GREATEST` 부분 갱신, 상태 전이 CAS(`claimSummarize`·`markSummarized`) 조건부 UPDATE의 갱신 행 수 판정 |
+| `JdbcStreamEventStore` | native SQL | `jsonb` 캐스팅·`jsonb_set` 부분 갱신·`payload -> 'digest' ->> 'date'` 경로 조회, 멱등 삽입 `ON CONFLICT DO NOTHING` |
+
+- 두 예외 어댑터도 모든 입력값을 named parameter로 바인딩한다 — 문자열 연결로 값을 넣지 않는다. 동적으로 조립하는 부분은 종목 후보 유무에 따른 필터 **절 선택**뿐이고, 값은 항상 파라미터로 간다.
+- JPA는 스키마를 소유하지 않는다. `ddl-auto=validate`로 엔티티 매핑과 `:db-migrations` Liquibase 스키마의 정합성만 검증한다(`stock_master.code`는 `CHAR(6)`이므로 엔티티에서 `@JdbcTypeCode(SqlTypes.CHAR)`로 맞춘다).
+- JPA 트랜잭션 매니저 아래에서 native SQL 어댑터도 같은 커넥션에 참여한다 — §3.2 persist→publish→ack의 롤백 계약은 통합 테스트가 고정한다.
 
 ## 8. 설정 · 메트릭
 

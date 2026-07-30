@@ -1,21 +1,26 @@
 package com.alphatalk.worker.llm.cluster
 
 import com.alphatalk.contracts.queue.IngestQueueEntry
+import com.alphatalk.worker.llm.config.LlmProperties
+import com.github.f4b6a3.ulid.UlidCreator
 import org.slf4j.LoggerFactory
+import org.springframework.stereotype.Service
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
 
+@Service
 class ClusterAssigner(
     private val store: ClusterStore,
     private val embeddings: EmbeddingClient,
     private val lock: ClusterLock,
-    private val window: Duration,
-    private val similarityThreshold: Double,
-    private val clusterIds: () -> String,
+    props: LlmProperties,
+    private val clusterIds: () -> String = { UlidCreator.getMonotonicUlid().toString() },
     private val clock: Clock = Clock.systemUTC(),
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
+    private val window: Duration = Duration.ofHours(props.cluster.windowHours)
+    private val similarityThreshold: Double = props.cluster.similarityThreshold
 
     fun assign(entry: IngestQueueEntry): AssignResult {
         store.findArticleCluster(entry.sourceId)?.let {

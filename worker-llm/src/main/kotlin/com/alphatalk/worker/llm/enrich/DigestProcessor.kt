@@ -11,14 +11,14 @@ import com.alphatalk.worker.llm.persist.EventIdGenerator
 import com.alphatalk.worker.llm.persist.StreamEventStore
 import com.alphatalk.worker.llm.publish.StreamPublisher
 import com.alphatalk.worker.llm.sector.SectorDirectory
-import org.springframework.stereotype.Component
+import org.springframework.stereotype.Service
 import java.time.Clock
 import java.time.Duration
 import java.time.LocalDate
 import java.time.LocalTime
 import java.time.ZoneId
 
-@Component
+@Service
 class DigestProcessor(
     private val store: ClusterStore,
     private val sectors: SectorDirectory,
