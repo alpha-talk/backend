@@ -391,7 +391,7 @@ worker-llm/
 
 ### 7.1 데이터 접근 — JPA 우선과 raw SQL 예외
 
-[coding_convention.md](coding_convention.md) §4에 따라 worker-llm은 Spring Data JPA를 기본으로 쓰고, 아래 두 어댑터만 raw SQL 예외로 남긴다. 예외 근거는 여기가 단일 소유이며, 새 쿼리를 추가할 때도 먼저 JPA/JPQL로 표현되는지 확인한다.
+[coding_convention.md](coding_convention.md) §7에 따라 worker-llm은 Spring Data JPA를 기본으로 쓰고, 아래 두 어댑터만 raw SQL 예외로 남긴다. 예외 근거는 여기가 단일 소유이며, 새 쿼리를 추가할 때도 먼저 JPA/JPQL로 표현되는지 확인한다.
 
 | 어댑터 | 방식 | 근거 |
 |---|---|---|
