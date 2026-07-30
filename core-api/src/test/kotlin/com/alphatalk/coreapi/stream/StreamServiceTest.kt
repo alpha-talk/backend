@@ -213,6 +213,17 @@ class StreamServiceTest {
         assertEquals("01J9Z8000000000000000000B", page.pageInfo.newest)
         assertEquals(true, page.pageInfo.hasMoreBefore)
         assertEquals(false, page.pageInfo.hasMoreAfter)
+        assertTrue(!store.newerAsked, "최초 최신 페이지에서 새로운 이벤트 존재 여부를 조회했다")
+    }
+
+    @Test
+    fun `커서가 있는 페이지는 양쪽 존재 여부를 조회한다`() {
+        val store = RecordingStreamStore(listOf(item("01J9Z8000000000000000000B"), item("01J9Z8000000000000000000A")))
+
+        service(store).read("005930", "01J9Z800000000000000000001", "before", null, null)
+
+        assertTrue(store.olderAsked)
+        assertTrue(store.newerAsked)
     }
 
     @Test

@@ -9,6 +9,7 @@ import jakarta.persistence.Table
 import org.hibernate.annotations.Immutable
 import org.hibernate.annotations.JdbcTypeCode
 import org.hibernate.type.SqlTypes
+import org.slf4j.LoggerFactory
 import org.springframework.data.jpa.repository.JpaRepository
 import org.springframework.data.redis.core.StringRedisTemplate
 import org.springframework.stereotype.Repository
@@ -56,8 +57,15 @@ class RedisQuoteStore(
     private val redis: StringRedisTemplate,
     private val candles: DailyCandleJpaRepository,
 ) : QuoteStore {
+    private val log = LoggerFactory.getLogger(javaClass)
+
     override fun liveQuote(code: String): QuoteResponse? {
-        val hash = redis.opsForHash<String, String>().entries(Keys.price(code))
+        val hash = runCatching {
+            redis.opsForHash<String, String>().entries(Keys.price(code))
+        }.getOrElse {
+            log.warn("live quote cache read failed: code={}", code, it)
+            return null
+        }
         if (hash.isEmpty()) return null
         return runCatching {
             QuoteResponse(
@@ -73,7 +81,10 @@ class RedisQuoteStore(
                 ts = hash.getValue("ts").toLong(),
                 delayed = false,
             )
-        }.getOrNull()
+        }.getOrElse {
+            log.warn("live quote cache payload is invalid: code={} fields={}", code, hash.keys.sorted(), it)
+            null
+        }
     }
 
     override fun lastCandleQuote(code: String): QuoteResponse? =
@@ -94,7 +105,8 @@ class RedisQuoteStore(
             low = latest.low.toLong(),
             volume = latest.volume,
             ts = LocalDate.parse(latest.date.trim(), DateTimeFormatter.BASIC_ISO_DATE)
-                .atStartOfDay(SEOUL)
+                .atTime(MARKET_CLOSE_HOUR, MARKET_CLOSE_MINUTE)
+                .atZone(SEOUL)
                 .toInstant()
                 .toEpochMilli(),
             delayed = true,
@@ -105,5 +117,7 @@ class RedisQuoteStore(
 
     companion object {
         private val SEOUL: ZoneId = ZoneId.of("Asia/Seoul")
+        private const val MARKET_CLOSE_HOUR = 15
+        private const val MARKET_CLOSE_MINUTE = 30
     }
 }
