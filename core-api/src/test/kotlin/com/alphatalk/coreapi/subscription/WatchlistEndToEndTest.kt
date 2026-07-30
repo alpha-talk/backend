@@ -29,7 +29,6 @@ import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
-import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import org.springframework.test.context.ActiveProfiles
 
@@ -168,14 +167,15 @@ class WatchlistEndToEndTest {
     }
 
     @Test
-    fun `같은 종목을 다시 담으면 200이고 새 이벤트는 없다`() {
+    fun `같은 종목을 다시 담으면 200이고 복구 이벤트를 다시 발행한다`() {
         call(HttpMethod.PUT, "/api/v1/watchlist/005930")
         assertNotNull(nextEvent())
 
         val again = call(HttpMethod.PUT, "/api/v1/watchlist/005930")
 
         assertEquals(200, again.statusCode.value())
-        assertNull(published.poll(500, TimeUnit.MILLISECONDS), "변경이 없는데 발행됐다")
+        val event = assertNotNull(nextEvent(), "재요청 복구 이벤트가 발행되지 않았다")
+        assertEquals(listOf("005930"), event.path("added").map { it.asText() })
         assertEquals(1, json(call(HttpMethod.GET, "/api/v1/watchlist").body).path("items").size())
     }
 
@@ -189,7 +189,8 @@ class WatchlistEndToEndTest {
 
         assertEquals(200, again.statusCode.value())
         assertEquals(setOf("005930"), mirroredCodes(), "미러가 복구되지 않았다")
-        assertNull(published.poll(500, TimeUnit.MILLISECONDS), "복구는 전역 발행 없이 끝나야 한다")
+        val event = assertNotNull(nextEvent(), "접속 중인 게이트웨이의 복구 이벤트가 발행되지 않았다")
+        assertEquals(listOf("005930"), event.path("added").map { it.asText() })
     }
 
     @Test
@@ -208,11 +209,12 @@ class WatchlistEndToEndTest {
     }
 
     @Test
-    fun `담지 않은 종목을 해지해도 204다`() {
+    fun `담지 않은 종목을 해지해도 204이고 복구 이벤트를 발행한다`() {
         val delete = call(HttpMethod.DELETE, "/api/v1/watchlist/000660")
 
         assertEquals(204, delete.statusCode.value())
-        assertNull(published.poll(500, TimeUnit.MILLISECONDS), "변경이 없는데 발행됐다")
+        val event = assertNotNull(nextEvent(), "해지 재요청 복구 이벤트가 발행되지 않았다")
+        assertEquals(listOf("000660"), event.path("removed").map { it.asText() })
     }
 
     @Test
