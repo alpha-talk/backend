@@ -4,9 +4,9 @@ import com.alphatalk.ws.relay.RedisChannelSubscriber
 import com.alphatalk.ws.subscription.DemandQuery
 import io.micrometer.core.instrument.Gauge
 import io.micrometer.core.instrument.MeterRegistry
-import org.springframework.context.annotation.Configuration
+import org.springframework.stereotype.Component
 
-@Configuration
+@Component
 class MetricsConfig(
     meterRegistry: MeterRegistry,
     demand: DemandQuery,
