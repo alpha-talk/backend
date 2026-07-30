@@ -160,8 +160,9 @@ class AuthService(
 
 - 컨트롤러는 요청 검증·인증 컨텍스트 변환·유스케이스 호출·응답 변환만 담당한다. 트랜잭션, 영속성 쿼리, 외부 API 호출과 핵심 분기를 컨트롤러에 넣지 않는다.
 - 요청·응답에는 전용 DTO를 사용하고 JPA entity를 직렬화하거나 API 계약으로 노출하지 않는다. Kotlin `data class`는 값 DTO에 사용하고 변경 가능한 entity에는 사용하지 않는다.
-- 요청 검증은 `jakarta.validation`과 `@Valid`를 사용한다. 오류 응답은 `ProblemDetail`과 중앙 `@RestControllerAdvice`로 일관되게 만들고, 임의의 `Map<String, Any>` 응답이나 컨트롤러별 예외 포맷을 만들지 않는다.
-- Spring MVC의 동기 HTTP 클라이언트가 필요하면 `RestClient`를 우선하고 새 코드에 `RestTemplate`을 도입하지 않는다. 비동기·스트리밍 요구가 설계에 있을 때만 `WebClient`를 사용하며, 이를 이유로 서버 전체를 WebFlux 방식으로 섞지 않는다.
+- 요청 검증은 `jakarta.validation`과 `@Valid`를 사용한다. 오류 응답은 중앙 `@RestControllerAdvice` 하나가 소유하고, 임의의 `Map<String, Any>` 응답이나 컨트롤러별 예외 포맷을 만들지 않는다. 에러 봉투 타입은 해당 모듈의 REST 계약 문서가 정하고, 계약이 정하지 않은 새 진입점은 `ProblemDetail`을 기본으로 한다.
+  - core-api는 [alphatalk_core_api_spec.md](alphatalk_core_api_spec.md)가 정한 `{ "error": { "code", "message", "detail" } }` 봉투를 쓴다. 클라 계약이므로 이 봉투를 바꾸려면 코드가 아니라 스펙 개정이 먼저다 — `ProblemDetail` 전환 여부는 계약 개정 안건으로 남겨 두고, 그 전까지 core-api 신규 엔드포인트도 기존 봉투를 그대로 쓴다.
+- Spring MVC의 동기 HTTP 클라이언트가 필요하면 `RestClient`를 우선하고 새 코드에 `RestTemplate`을 도입하지 않는다. 비동기·스트리밍 요구가 설계에 있을 때만 `WebClient`를 사용하며, 이를 이유로 서버 전체를 WebFlux 방식으로 섞지 않는다. 이 항목은 Spring 위에서 도는 서버 모듈 기준이며, `contracts`·`auth-jwt`·`kis-client`처럼 Spring 무의존이 설계인 라이브러리 모듈은 대상이 아니다 — 이 규칙을 근거로 spring-web 의존을 새로 추가하지 않는다.
 - API·프레임워크의 deprecated 경고를 방치하지 않는다. 교체 API를 확인해 새 방식으로 구현하고, 불가피한 호환성 예외는 설계 문서와 테스트로 범위를 고정한다.
 
 ### 트랜잭션과 JPA 모델
@@ -178,11 +179,10 @@ class AuthService(
 
 DB를 사용하는 모든 서버 모듈은 Spring Data JPA를 기본이자 우선 구현으로 사용한다. 쿼리 구현 우선순위는 다음과 같다.
 
-1. `JpaRepository` 기본 CRUD와 파생 쿼리
-2. 파생 쿼리와 projection 또는 `@EntityGraph`
-3. `@Query`의 JPQL과 DTO projection 또는 fetch join
+1. `JpaRepository` 기본 CRUD와 파생 쿼리 — 조회 컬럼을 좁혀야 하면 projection을, 연관을 함께 로딩해야 하면 `@EntityGraph`를 붙인다
+2. `@Query`의 JPQL — 파생 쿼리로 의도가 불명확하거나 조인·DTO projection·fetch join·벌크 갱신이 필요할 때
 
-엔티티 중심 CRUD와 일반 조회는 먼저 Spring Data JPA로 표현한다. 파생 쿼리로 의도가 불명확하거나 조인·벌크 갱신이 필요하면 projection이나 JPQL을 사용한다.
+엔티티 중심 CRUD와 일반 조회는 먼저 Spring Data JPA로 표현한다.
 
 **native query, `JdbcTemplate`, `JdbcClient`, 직접 JDBC와 문자열 SQL은 일반적인 선택지에 포함하지 않는다. 에이전트는 이를 자체 판단으로 도입하거나 JPA 구현을 raw SQL로 교체하지 않는다.** 불가피하다고 판단하면 코드를 작성하기 전에 다음 내용을 사용자에게 제시하고 명시적 합의를 받는다.
 
@@ -192,5 +192,16 @@ DB를 사용하는 모든 서버 모듈은 Spring Data JPA를 기본이자 우�
 - 제안하는 SQL의 입력 바인딩 방식과 회귀·통합 테스트 계획
 
 합의한 예외는 관련 설계 문서에 사용 범위와 이유를 먼저 기록한다. 구현에서는 모든 입력을 파라미터로 바인딩하고 쿼리 동작을 통합 테스트로 고정한다. 합의 범위를 넘어 다른 조회에 raw SQL 방식을 확산하지 않는다.
+
+이 규칙은 신규·변경 코드 기준이다. 규칙 도입 이전부터 있던 raw SQL 어댑터는 아래와 같고, 예외 근거가 기록된 것과 아직 기록되지 않은 것을 구분해 둔다.
+
+| 모듈 | 어댑터 | 상태 |
+|---|---|---|
+| worker-llm | `JdbcClusterStore`, `JdbcStreamEventStore` | 예외 근거 기록됨 — [alphatalk_news_worker_spec.md](alphatalk_news_worker_spec.md) §7.1 |
+| core-api | `JdbcStockSearchStore` | 미기록 — JPA 전환 또는 예외 근거 기록 대상 |
+| worker-price | `JdbcDailyCandleStore` | 미기록 — JPA 전환 또는 예외 근거 기록 대상 |
+| worker-batch | `JdbcSectorStore`, `JdbcStockMasterStore`, `JdbcBatchJobRunStore` | 미기록 — JPA 전환 또는 예외 근거 기록 대상 |
+
+미기록 어댑터를 건드리는 변경은 JPA 전환과 해당 모듈 설계 문서의 예외 기록 중 하나를 함께 수행한다.
 
 DB 스키마의 단일 소유자는 `:db-migrations`의 Liquibase다. JPA는 스키마를 생성하거나 갱신하지 않고 `ddl-auto=validate`로 엔티티 매핑과 실제 스키마의 정합성만 검증한다.
