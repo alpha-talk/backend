@@ -160,7 +160,7 @@ class AuthService(
 
 - 컨트롤러는 요청 검증·인증 컨텍스트 변환·유스케이스 호출·응답 변환만 담당한다. 트랜잭션, 영속성 쿼리, 외부 API 호출과 핵심 분기를 컨트롤러에 넣지 않는다.
 - 요청·응답에는 전용 DTO를 사용하고 JPA entity를 직렬화하거나 API 계약으로 노출하지 않는다. Kotlin `data class`는 값 DTO에 사용하고 변경 가능한 entity에는 사용하지 않는다.
-- 요청 검증은 `jakarta.validation`과 `@Valid`를 사용한다. 오류 응답은 중앙 `@RestControllerAdvice` 하나가 소유하고, 임의의 `Map<String, Any>` 응답이나 컨트롤러별 예외 포맷을 만들지 않는다. 에러 봉투 타입은 해당 모듈의 REST 계약 문서가 정하고, 계약이 정하지 않은 새 진입점은 `ProblemDetail`을 기본으로 한다.
+- 요청 검증은 `jakarta.validation`과 `@Valid`를 사용한다. MVC 예외는 중앙 `@RestControllerAdvice`가 처리하고, 필터·Spring Security 경계(`AuthenticationEntryPoint`·`AccessDeniedHandler`·커스텀 필터)는 advice까지 도달하지 않으므로 같은 모듈 에러 계약과 봉투 타입을 직접 사용해 응답한다. 어느 경계든 임의의 `Map<String, Any>` 응답이나 진입점별 예외 포맷을 만들지 않는다. 에러 봉투 타입은 해당 모듈의 REST 계약 문서가 정하고, 계약이 정하지 않은 새 진입점은 `ProblemDetail`을 기본으로 한다.
   - core-api는 [alphatalk_core_api_spec.md](alphatalk_core_api_spec.md)가 정한 `{ "error": { "code", "message", "detail" } }` 봉투를 쓴다. 클라 계약이므로 이 봉투를 바꾸려면 코드가 아니라 스펙 개정이 먼저다 — `ProblemDetail` 전환 여부는 계약 개정 안건으로 남겨 두고, 그 전까지 core-api 신규 엔드포인트도 기존 봉투를 그대로 쓴다.
 - Spring MVC의 동기 HTTP 클라이언트가 필요하면 `RestClient`를 우선하고 새 코드에 `RestTemplate`을 도입하지 않는다. 비동기·스트리밍 요구가 설계에 있을 때만 `WebClient`를 사용하며, 이를 이유로 서버 전체를 WebFlux 방식으로 섞지 않는다. 이 항목은 Spring 위에서 도는 서버 모듈 기준이며, `contracts`·`auth-jwt`·`kis-client`처럼 Spring 무의존이 설계인 라이브러리 모듈은 대상이 아니다 — 이 규칙을 근거로 spring-web 의존을 새로 추가하지 않는다.
 - API·프레임워크의 deprecated 경고를 방치하지 않는다. 교체 API를 확인해 새 방식으로 구현하고, 불가피한 호환성 예외는 설계 문서와 테스트로 범위를 고정한다.
