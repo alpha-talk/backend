@@ -1,22 +1,32 @@
 package com.alphatalk.worker.ingest.scheduler
 
 import com.alphatalk.contracts.queue.IngestQueueEntry
+import com.alphatalk.worker.ingest.config.IngestProperties
 import com.alphatalk.worker.ingest.dedup.SeenMarker
 import com.alphatalk.worker.ingest.queue.IngestQueue
 import com.alphatalk.worker.ingest.source.FetchedArticle
 import com.alphatalk.worker.ingest.source.NewsSource
 import org.junit.jupiter.api.Test
 import java.util.concurrent.CyclicBarrier
+import java.util.concurrent.Executor
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import kotlin.test.assertEquals
 
 class IngestPollerTest {
+    private val sameThread = Executor { it.run() }
     private val seen = InMemorySeenMarker()
     private val queue = RecordingQueue()
 
     private fun poller(vararg sources: NewsSource) =
-        IngestPoller(sources.toList(), seen, queue, excerptMaxLength = 200, clock = { 1719500000000 })
+        IngestPoller(
+            sources.toList(),
+            seen,
+            queue,
+            props = IngestProperties(excerptMaxLength = 200),
+            fetchExecutor = sameThread,
+            clock = { 1719500000000 },
+        )
 
     @Test
     fun `같은 기사를 두 번 폴링해도 큐 적재는 한 번`() {
@@ -130,7 +140,11 @@ class IngestPollerTest {
         }
         val pool = Executors.newFixedThreadPool(2)
         try {
-            val poller = IngestPoller(sources, seen, queue, excerptMaxLength = 200, fetchExecutor = pool)
+            val poller = IngestPoller(
+                sources, seen, queue,
+                props = IngestProperties(excerptMaxLength = 200),
+                fetchExecutor = pool,
+            )
             val stats = poller.pollOnce()
             assertEquals(0, stats.sourceErrors)
             assertEquals(2, stats.fetched)
@@ -150,7 +164,7 @@ class IngestPollerTest {
                     FakeSource("b", listOf(FetchedArticle(title = "오늘의 날씨", url = "https://example.com/w"))),
                     FailingSource("c"),
                 ),
-                seen, queue, excerptMaxLength = 200, fetchExecutor = pool,
+                seen, queue, props = IngestProperties(excerptMaxLength = 200), fetchExecutor = pool,
             )
             val stats = poller.pollOnce()
             assertEquals(2, stats.enqueued)
