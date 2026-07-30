@@ -6,6 +6,7 @@ import jakarta.persistence.GeneratedValue
 import jakarta.persistence.GenerationType
 import jakarta.persistence.Id
 import jakarta.persistence.Table
+import org.hibernate.annotations.DynamicUpdate
 import org.hibernate.annotations.JdbcTypeCode
 import org.hibernate.type.SqlTypes
 import org.springframework.data.jpa.repository.JpaRepository
@@ -18,6 +19,7 @@ import java.time.Instant
 
 @Entity
 @Table(name = "batch_job_run")
+@DynamicUpdate
 class BatchJobRunEntity(
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
