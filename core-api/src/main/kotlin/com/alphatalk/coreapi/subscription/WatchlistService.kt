@@ -23,6 +23,7 @@ class WatchlistService(
 
             SubscribeOutcome.ALREADY_SUBSCRIBED -> {
                 mirror.add(userId, code)
+                announcer.announce(userId, added = listOf(code), removed = emptyList())
                 false
             }
 
@@ -40,11 +41,9 @@ class WatchlistService(
 
     fun unsubscribe(userId: Long, rawCode: String) {
         val code = normalize(rawCode)
-        val removed = store.unsubscribe(userId, code)
+        store.unsubscribe(userId, code)
         mirror.remove(userId, code)
-        if (removed) {
-            announcer.announce(userId, added = emptyList(), removed = listOf(code))
-        }
+        announcer.announce(userId, added = emptyList(), removed = listOf(code))
     }
 
     private fun normalize(rawCode: String): String {

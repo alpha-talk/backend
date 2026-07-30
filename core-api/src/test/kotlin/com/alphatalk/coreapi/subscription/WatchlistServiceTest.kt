@@ -67,13 +67,16 @@ class WatchlistServiceTest {
     }
 
     @Test
-    fun `이미 담긴 종목은 다시 알리지 않는다`() {
+    fun `이미 담긴 종목 재요청도 게이트웨이에 다시 알린다`() {
         store.outcome = SubscribeOutcome.ALREADY_SUBSCRIBED
 
         val created = service.subscribe(1L, "005930")
 
         assertFalse(created)
-        assertTrue(broadcaster.announcements.isEmpty(), "변경이 없는데 전역 채널에 발행했다")
+        assertEquals(
+            RecordingBroadcaster.Announcement(1L, listOf("005930"), emptyList()),
+            broadcaster.announcements.single(),
+        )
     }
 
     @Test
@@ -83,6 +86,10 @@ class WatchlistServiceTest {
         service.subscribe(1L, "005930")
 
         assertEquals(setOf(1L to "005930"), broadcaster.mirrored, "미러가 복구되지 않았다")
+        assertEquals(
+            RecordingBroadcaster.Announcement(1L, listOf("005930"), emptyList()),
+            broadcaster.announcements.single(),
+        )
     }
 
     @Test
@@ -122,12 +129,15 @@ class WatchlistServiceTest {
     }
 
     @Test
-    fun `담지 않은 종목 해지는 알리지 않는다`() {
+    fun `담지 않은 종목 해지도 게이트웨이에 다시 알린다`() {
         store.removes = false
 
         service.unsubscribe(1L, "005930")
 
-        assertTrue(broadcaster.announcements.isEmpty(), "변경이 없는데 전역 채널에 발행했다")
+        assertEquals(
+            RecordingBroadcaster.Announcement(1L, emptyList(), listOf("005930")),
+            broadcaster.announcements.single(),
+        )
     }
 
     @Test
