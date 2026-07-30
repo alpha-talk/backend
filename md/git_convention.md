@@ -10,7 +10,7 @@
 
 1. **scope = 모듈** — 커밋/브랜치의 범위 토큰은 Gradle 모듈명(`ws`, `contracts`, `auth-jwt`, `core-api`, `worker-*`)으로 고정한다. 그래야 `git log --oneline`만 봐도 어느 서버가 바뀌었는지 안다.
 2. **한 브랜치 = 한 모듈 = 한 목적** — 여러 모듈을 한 브랜치에서 섞지 않는다. 섞이면 scope 토큰 하나로 브랜치를 이름 붙일 수 없고 로그 추적도 깨진다. (예외: §4의 계약 동반 변경)
-3. **단계 단위 PR** — 커밋·PR은 계획서의 단계(ws는 S0~S7, 다른 모듈은 각자 정의) 단위로 쪼갠다. 이렇게 쪼개야 Squash 머지 뒤 main 히스토리가 단계당 커밋 1개로 읽힌다(§2.4). PR 본문에는 해당 단계와 DoD 충족 여부를 적는다. (CLAUDE.md 컨벤션과 동일)
+3. **단계 단위 PR** — 커밋·PR은 계획서의 단계(ws는 S0~S7, 다른 모듈은 각자 정의) 단위로 쪼갠다. 이렇게 쪼개야 Squash 머지 뒤 main 히스토리가 단계당 커밋 1개로 읽힌다(§2.4). PR 본문에는 해당 단계와 DoD 충족 여부를 적는다. (`AGENTS.md` 컨벤션과 동일)
 4. **main은 항상 초록** — main 직접 커밋 금지. 브랜치 → PR → CI 통과 → 머지 순서만 허용해 CI를 거치지 않은 커밋이 main에 들어갈 길을 없앤다.
 
 ---
@@ -87,7 +87,7 @@ main 에서 분기 → 작업·커밋 → push → PR(Draft 가능)
 
 <본문 — 선택. 왜/무엇을 바꿨는지>
 
-<푸터 — 선택. 단계·이슈·BREAKING·공동작성>
+<푸터 — 선택. 단계·이슈·BREAKING>
 ```
 
 ### 3.2 타입 vs 스코프 (혼동 주의)
@@ -122,7 +122,8 @@ main 에서 분기 → 작업·커밋 → push → PR(Draft 가능)
   - `Phase: S4` — 계획서 단계 참조 (선택)
   - `Refs: #12` / `Closes: #12` — 이슈 연결
   - `BREAKING CHANGE: <내용>` — `:contracts`/`:auth-jwt` 등 **공유 계약**이 깨지는 변경은 반드시 명시한다. 계약이 깨지면 소비 모듈 전체가 영향을 받는다.
-  - `Co-Authored-By: ...` — AI 도구(Claude Code) 등과 함께 작업한 커밋
+
+- **공동 저자 서명 금지**: 커밋 메시지와 PR 본문에 `Co-Authored-By` 등 공동 저자 트레일러를 넣지 않는다. AI 도구 서명도 포함한다.
 
 ### 3.5 예시 (실제 작업 기준)
 
@@ -171,10 +172,10 @@ ci: PR·main push에 gradle build 워크플로 추가
 
 - **제목** = §3 커밋 형식. Squash 머지 시 제목이 그대로 커밋 메시지가 된다. 예: `feat(ws): S4 Redis relay end-to-end`
 - **본문**에 반드시 적는다:
-  1. 해당 **단계(S/M)와 DoD 충족 여부** (CLAUDE.md 컨벤션)
+  1. 해당 **단계(S/M)와 DoD 충족 여부** (`AGENTS.md` 컨벤션)
   2. 변경 요약 / 테스트 방법
   3. 계약 변경 시 영향 모듈
-- **머지 조건**: `./gradlew build` 통과 + 리뷰 승인. `DemandRegistry` 등 refcount/인덱스 변경은 단위 테스트를 동반한다(CLAUDE.md 불변 규칙).
+- **머지 조건**: `./gradlew build` 통과 + 리뷰 승인. `DemandRegistry` 등 refcount/인덱스 변경은 단위 테스트를 동반한다(`AGENTS.md` 불변 규칙).
 
 ### 5.1 PR의 base는 언제나 `main`이다
 
