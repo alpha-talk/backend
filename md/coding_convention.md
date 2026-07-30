@@ -193,15 +193,6 @@ DB를 사용하는 모든 서버 모듈은 Spring Data JPA를 기본이자 우�
 
 합의한 예외는 관련 설계 문서에 사용 범위와 이유를 먼저 기록한다. 구현에서는 모든 입력을 파라미터로 바인딩하고 쿼리 동작을 통합 테스트로 고정한다. 합의 범위를 넘어 다른 조회에 raw SQL 방식을 확산하지 않는다.
 
-이 규칙은 신규·변경 코드 기준이다. 규칙 도입 이전부터 있던 raw SQL 어댑터는 아래와 같고, 예외 근거가 기록된 것과 아직 기록되지 않은 것을 구분해 둔다.
-
-| 모듈 | 어댑터 | 상태 |
-|---|---|---|
-| worker-llm | `JdbcClusterStore`, `JdbcStreamEventStore` | 예외 근거 기록됨 — [alphatalk_news_worker_spec.md](alphatalk_news_worker_spec.md) §7.1 |
-| core-api | `JdbcStockSearchStore` | 미기록 — JPA 전환 또는 예외 근거 기록 대상 |
-| worker-price | `JdbcDailyCandleStore` | 미기록 — JPA 전환 또는 예외 근거 기록 대상 |
-| worker-batch | `JdbcSectorStore`, `JdbcStockMasterStore`, `JdbcBatchJobRunStore` | 미기록 — JPA 전환 또는 예외 근거 기록 대상 |
-
-미기록 어댑터를 건드리는 변경은 JPA 전환과 해당 모듈 설계 문서의 예외 기록 중 하나를 함께 수행한다.
+이 규칙은 신규·변경 코드 기준이다. 규칙 도입 이전부터 있던 raw SQL 어댑터는 순차적으로 JPA로 전환한다.
 
 DB 스키마의 단일 소유자는 `:db-migrations`의 Liquibase다. JPA는 스키마를 생성하거나 갱신하지 않고 `ddl-auto=validate`로 엔티티 매핑과 실제 스키마의 정합성만 검증한다.
