@@ -66,7 +66,11 @@ class StreamService(
             oldest = oldest,
             newest = newest,
             hasMoreBefore = stream.hasOlderThan(query.code, oldest, query.types),
-            hasMoreAfter = stream.hasNewerThan(query.code, newest, query.types),
+            hasMoreAfter = if (query.cursor == null && query.direction == CursorDirection.BEFORE) {
+                false
+            } else {
+                stream.hasNewerThan(query.code, newest, query.types)
+            },
         )
     }
 

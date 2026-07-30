@@ -1,5 +1,6 @@
 package com.alphatalk.coreapi.stream
 
+import com.alphatalk.contracts.Keys
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
 import org.junit.jupiter.api.BeforeEach
@@ -8,6 +9,7 @@ import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.boot.test.web.client.TestRestTemplate
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection
+import org.springframework.data.redis.core.StringRedisTemplate
 import org.springframework.http.HttpEntity
 import org.springframework.http.HttpHeaders
 import org.springframework.http.HttpMethod
@@ -45,6 +47,9 @@ class StreamEndToEndTest {
 
     @Autowired
     private lateinit var jdbc: JdbcTemplate
+
+    @Autowired
+    private lateinit var redisTemplate: StringRedisTemplate
 
     private val mapper = ObjectMapper()
     private lateinit var token: String
@@ -138,14 +143,8 @@ class StreamEndToEndTest {
 
     @Test
     fun `FR-08 - 시세 캐시가 있으면 실시간으로 답한다`() {
-        val redisTemplate = org.springframework.data.redis.core.StringRedisTemplate(
-            org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory(
-                redis.host,
-                redis.getMappedPort(6379),
-            ).apply { afterPropertiesSet() },
-        )
         redisTemplate.opsForHash<String, String>().putAll(
-            "price:005930",
+            Keys.price("005930"),
             mapOf(
                 "price" to "71200", "prevClose" to "70500", "change" to "700", "changeRate" to "0.99",
                 "open" to "70600", "high" to "71500", "low" to "70400", "volume" to "1234567",

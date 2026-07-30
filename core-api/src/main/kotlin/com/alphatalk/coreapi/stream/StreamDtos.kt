@@ -1,6 +1,5 @@
 package com.alphatalk.coreapi.stream
 
-import com.fasterxml.jackson.annotation.JsonInclude
 import com.fasterxml.jackson.databind.JsonNode
 
 enum class CursorDirection(val token: String) {
@@ -14,7 +13,6 @@ enum class CursorDirection(val token: String) {
     }
 }
 
-@JsonInclude(JsonInclude.Include.NON_NULL)
 data class StreamItem(
     val eventId: String,
     val code: String,
