@@ -5,6 +5,7 @@ import jakarta.persistence.Column
 import jakarta.persistence.Embeddable
 import jakarta.persistence.EmbeddedId
 import jakarta.persistence.Entity
+import jakarta.persistence.EntityManager
 import jakarta.persistence.Table
 import org.hibernate.annotations.JdbcTypeCode
 import org.hibernate.type.SqlTypes
@@ -52,26 +53,25 @@ interface DailyCandleJpaRepository : JpaRepository<DailyCandleEntity, DailyCandl
 @Repository
 class JpaDailyCandleStore(
     private val repository: DailyCandleJpaRepository,
+    private val entityManager: EntityManager,
 ) : DailyCandleStore {
     @Transactional
     override fun upsert(candles: List<KisDailyCandle>): Int {
         if (candles.isEmpty()) return 0
         val existing = repository.findAllById(candles.map { DailyCandleId(it.code, it.date) })
             .associateBy(DailyCandleEntity::id)
-        repository.saveAll(
-            candles.map { candle ->
-                (existing[DailyCandleId(candle.code, candle.date)] ?: DailyCandleEntity(
-                    id = DailyCandleId(code = candle.code, date = candle.date),
-                )).apply {
-                    open = candle.open.toInt()
-                    high = candle.high.toInt()
-                    low = candle.low.toInt()
-                    close = candle.close.toInt()
-                    volume = candle.volume
-                    tradedValue = candle.value
-                }
-            },
-        )
+        candles.forEach { candle ->
+            val id = DailyCandleId(code = candle.code, date = candle.date)
+            val entity = existing[id] ?: DailyCandleEntity(id = id).also(entityManager::persist)
+            entity.apply {
+                open = Math.toIntExact(candle.open)
+                high = Math.toIntExact(candle.high)
+                low = Math.toIntExact(candle.low)
+                close = Math.toIntExact(candle.close)
+                volume = candle.volume
+                tradedValue = candle.value
+            }
+        }
         return candles.size
     }
 

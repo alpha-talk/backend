@@ -16,6 +16,12 @@ spring:
     open-in-view: false
     hibernate:
       ddl-auto: validate
+    properties:
+      hibernate:
+        jdbc:
+          batch_size: 100
+        order_inserts: true
+        order_updates: true
   lifecycle:
     timeout-per-shutdown-phase: 10s
 
