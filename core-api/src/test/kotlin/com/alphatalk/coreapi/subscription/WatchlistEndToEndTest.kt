@@ -25,6 +25,8 @@ import org.testcontainers.containers.PostgreSQLContainer
 import org.testcontainers.junit.jupiter.Container
 import org.testcontainers.junit.jupiter.Testcontainers
 import org.testcontainers.utility.DockerImageName
+import java.util.concurrent.CyclicBarrier
+import java.util.concurrent.Executors
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import kotlin.test.assertEquals
@@ -215,6 +217,33 @@ class WatchlistEndToEndTest {
         assertEquals(204, delete.statusCode.value())
         val event = assertNotNull(nextEvent(), "해지 재요청 복구 이벤트가 발행되지 않았다")
         assertEquals(listOf("000660"), event.path("removed").map { it.asText() })
+    }
+
+    @Test
+    fun `같은 종목의 구독과 해지가 겹쳐도 DB와 미러가 같은 상태로 끝난다`() {
+        val pool = Executors.newFixedThreadPool(2)
+        try {
+            repeat(10) { attempt ->
+                call(HttpMethod.DELETE, "/api/v1/watchlist/005930")
+                val barrier = CyclicBarrier(2)
+                val requests = listOf(HttpMethod.PUT, HttpMethod.DELETE).map { method ->
+                    pool.submit {
+                        barrier.await(10, TimeUnit.SECONDS)
+                        call(method, "/api/v1/watchlist/005930")
+                    }
+                }
+                requests.forEach { it.get(30, TimeUnit.SECONDS) }
+
+                val stored = jdbc.queryForObject(
+                    "SELECT EXISTS(SELECT 1 FROM watchlist WHERE user_id = ? AND code = '005930')",
+                    Boolean::class.java,
+                    userId,
+                )!!
+                assertEquals(stored, "005930" in mirroredCodes(), "시도 ${attempt + 1}에서 상태가 어긋났다")
+            }
+        } finally {
+            pool.shutdownNow()
+        }
     }
 
     @Test

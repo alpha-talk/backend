@@ -11,7 +11,7 @@ import kotlin.test.assertTrue
 class WatchlistServiceTest {
     private class FakeStore : WatchlistStore {
         var outcome = SubscribeOutcome.ADDED
-        var removes = true
+        var unsubscribeOutcome = UnsubscribeOutcome.REMOVED
         val subscribeCalls = mutableListOf<Triple<Long, String, Int>>()
 
         override fun list(userId: Long): List<WatchlistItem> = emptyList()
@@ -21,42 +21,29 @@ class WatchlistServiceTest {
             return outcome
         }
 
-        override fun unsubscribe(userId: Long, code: String): Boolean = removes
+        override fun unsubscribe(userId: Long, code: String): UnsubscribeOutcome = unsubscribeOutcome
+
+        override fun contains(userId: Long, code: String): Boolean = false
     }
 
-    private class RecordingBroadcaster : WatchlistMirror, WatchlistAnnouncer {
-        data class Announcement(val userId: Long, val added: List<String>, val removed: List<String>)
+    private class RecordingSynchronizer : WatchlistSynchronizer {
+        val calls = mutableListOf<Pair<Long, String>>()
 
-        val mirrored = linkedSetOf<Pair<Long, String>>()
-        val announcements = mutableListOf<Announcement>()
-
-        override fun add(userId: Long, code: String) {
-            mirrored += userId to code
-        }
-
-        override fun remove(userId: Long, code: String) {
-            mirrored -= userId to code
-        }
-
-        override fun announce(userId: Long, added: List<String>, removed: List<String>) {
-            announcements += Announcement(userId, added, removed)
+        override fun synchronize(userId: Long, code: String) {
+            calls += userId to code
         }
     }
 
     private val store = FakeStore()
-    private val broadcaster = RecordingBroadcaster()
-    private val service = WatchlistService(store, broadcaster, broadcaster)
+    private val synchronizer = RecordingSynchronizer()
+    private val service = WatchlistService(store, synchronizer)
 
     @Test
     fun `새 종목을 담으면 미러에 넣고 게이트웨이에 알린다`() {
         val created = service.subscribe(1L, "005930")
 
         assertTrue(created)
-        assertEquals(setOf(1L to "005930"), broadcaster.mirrored)
-        assertEquals(
-            RecordingBroadcaster.Announcement(1L, listOf("005930"), emptyList()),
-            broadcaster.announcements.single(),
-        )
+        assertEquals(listOf(1L to "005930"), synchronizer.calls)
     }
 
     @Test
@@ -73,23 +60,7 @@ class WatchlistServiceTest {
         val created = service.subscribe(1L, "005930")
 
         assertFalse(created)
-        assertEquals(
-            RecordingBroadcaster.Announcement(1L, listOf("005930"), emptyList()),
-            broadcaster.announcements.single(),
-        )
-    }
-
-    @Test
-    fun `재요청은 어긋난 미러를 되돌려 놓는다`() {
-        store.outcome = SubscribeOutcome.ALREADY_SUBSCRIBED
-
-        service.subscribe(1L, "005930")
-
-        assertEquals(setOf(1L to "005930"), broadcaster.mirrored, "미러가 복구되지 않았다")
-        assertEquals(
-            RecordingBroadcaster.Announcement(1L, listOf("005930"), emptyList()),
-            broadcaster.announcements.single(),
-        )
+        assertEquals(listOf(1L to "005930"), synchronizer.calls)
     }
 
     @Test
@@ -99,8 +70,7 @@ class WatchlistServiceTest {
         val failure = assertFailsWith<ApiException> { service.subscribe(1L, "999999") }
 
         assertEquals(ErrorCode.NOT_FOUND, failure.code)
-        assertTrue(broadcaster.mirrored.isEmpty())
-        assertTrue(broadcaster.announcements.isEmpty())
+        assertTrue(synchronizer.calls.isEmpty())
     }
 
     @Test
@@ -111,33 +81,36 @@ class WatchlistServiceTest {
 
         assertEquals(ErrorCode.LIMIT_EXCEEDED, failure.code)
         assertEquals(WatchlistService.MAX_ITEMS, failure.detail?.get("limit"))
-        assertTrue(broadcaster.mirrored.isEmpty())
-        assertTrue(broadcaster.announcements.isEmpty())
+        assertTrue(synchronizer.calls.isEmpty())
     }
 
     @Test
-    fun `해지하면 미러에서 빼고 알린다`() {
-        broadcaster.mirrored += 1L to "005930"
-
+    fun `해지하면 현재 상태를 동기화한다`() {
         service.unsubscribe(1L, "005930")
 
-        assertTrue(broadcaster.mirrored.isEmpty(), "미러에 종목이 남았다")
-        assertEquals(
-            RecordingBroadcaster.Announcement(1L, emptyList(), listOf("005930")),
-            broadcaster.announcements.single(),
-        )
+        assertEquals(listOf(1L to "005930"), synchronizer.calls)
     }
 
     @Test
-    fun `담지 않은 종목 해지도 게이트웨이에 다시 알린다`() {
-        store.removes = false
+    fun `담지 않은 종목 해지도 현재 상태를 동기화한다`() {
+        store.unsubscribeOutcome = UnsubscribeOutcome.ALREADY_REMOVED
 
         service.unsubscribe(1L, "005930")
 
-        assertEquals(
-            RecordingBroadcaster.Announcement(1L, emptyList(), listOf("005930")),
-            broadcaster.announcements.single(),
-        )
+        assertEquals(listOf(1L to "005930"), synchronizer.calls)
+    }
+
+    @Test
+    fun `사용자가 사라진 구독과 해지는 401이다`() {
+        store.outcome = SubscribeOutcome.OWNER_MISSING
+        val subscribeFailure = assertFailsWith<ApiException> { service.subscribe(1L, "005930") }
+
+        store.unsubscribeOutcome = UnsubscribeOutcome.OWNER_MISSING
+        val unsubscribeFailure = assertFailsWith<ApiException> { service.unsubscribe(1L, "005930") }
+
+        assertEquals(ErrorCode.UNAUTHORIZED, subscribeFailure.code)
+        assertEquals(ErrorCode.UNAUTHORIZED, unsubscribeFailure.code)
+        assertTrue(synchronizer.calls.isEmpty())
     }
 
     @Test
