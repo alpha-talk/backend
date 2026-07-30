@@ -6,9 +6,9 @@ import jakarta.persistence.GeneratedValue
 import jakarta.persistence.GenerationType
 import jakarta.persistence.Id
 import jakarta.persistence.Table
-import org.hibernate.annotations.DynamicUpdate
 import org.hibernate.annotations.JdbcTypeCode
 import org.hibernate.type.SqlTypes
+import org.springframework.dao.DataIntegrityViolationException
 import org.springframework.data.jpa.repository.JpaRepository
 import org.springframework.data.jpa.repository.Modifying
 import org.springframework.data.jpa.repository.Query
@@ -19,7 +19,6 @@ import java.time.Instant
 
 @Entity
 @Table(name = "batch_job_run")
-@DynamicUpdate
 class BatchJobRunEntity(
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
@@ -46,6 +45,7 @@ class BatchJobRunEntity(
 interface BatchJobRunJpaRepository : JpaRepository<BatchJobRunEntity, Long> {
     fun findByJobAndRunDate(job: String, runDate: String): BatchJobRunEntity?
 
+    @Transactional
     @Modifying(flushAutomatically = true, clearAutomatically = true)
     @Query(
         """
@@ -62,40 +62,73 @@ interface BatchJobRunJpaRepository : JpaRepository<BatchJobRunEntity, Long> {
         @Param("running") running: String,
         @Param("success") success: String,
     ): Int
+
+    @Transactional
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
+    @Query(
+        """
+        update BatchJobRunEntity r
+        set r.status = :status, r.okCount = :okCount, r.failCount = :failCount, r.finishedAt = :finishedAt
+        where r.id = :id
+        """,
+    )
+    fun finishCounted(
+        @Param("id") id: Long,
+        @Param("status") status: String,
+        @Param("okCount") okCount: Int,
+        @Param("failCount") failCount: Int,
+        @Param("finishedAt") finishedAt: Instant,
+    ): Int
+
+    @Transactional
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
+    @Query(
+        """
+        update BatchJobRunEntity r
+        set r.status = :status, r.error = :error, r.finishedAt = :finishedAt
+        where r.id = :id
+        """,
+    )
+    fun finishWithError(
+        @Param("id") id: Long,
+        @Param("status") status: String,
+        @Param("error") error: String,
+        @Param("finishedAt") finishedAt: Instant,
+    ): Int
 }
 
 @Repository
 class JpaBatchJobRunStore(
     private val repository: BatchJobRunJpaRepository,
 ) : BatchJobRunStore {
-    @Transactional
     override fun start(job: String, runDate: String, startedAt: Instant): Long? {
         val existing = repository.findByJobAndRunDate(job, runDate)
-            ?: return repository.save(
+            ?: return insertRunning(job, runDate, startedAt) ?: restartAfterLostRace(job, runDate, startedAt)
+        return if (restarted(job, runDate, startedAt)) existing.id else null
+    }
+
+    override fun succeed(id: Long, okCount: Int, failCount: Int, finishedAt: Instant) {
+        repository.finishCounted(id, SUCCESS, okCount, failCount, finishedAt)
+    }
+
+    override fun fail(id: Long, error: String, finishedAt: Instant) {
+        repository.finishWithError(id, FAILED, error.take(ERROR_MAX_LENGTH), finishedAt)
+    }
+
+    private fun insertRunning(job: String, runDate: String, startedAt: Instant): Long? =
+        try {
+            repository.save(
                 BatchJobRunEntity(job = job, runDate = runDate, status = RUNNING, startedAt = startedAt),
             ).id
-        val restarted = repository.restartUnlessSucceeded(job, runDate, startedAt, RUNNING, SUCCESS)
-        return if (restarted == 1) existing.id else null
-    }
-
-    @Transactional
-    override fun succeed(id: Long, okCount: Int, failCount: Int, finishedAt: Instant) {
-        repository.findById(id).ifPresent { run ->
-            run.status = SUCCESS
-            run.okCount = okCount
-            run.failCount = failCount
-            run.finishedAt = finishedAt
+        } catch (e: DataIntegrityViolationException) {
+            null
         }
-    }
 
-    @Transactional
-    override fun fail(id: Long, error: String, finishedAt: Instant) {
-        repository.findById(id).ifPresent { run ->
-            run.status = FAILED
-            run.error = error.take(ERROR_MAX_LENGTH)
-            run.finishedAt = finishedAt
-        }
-    }
+    private fun restartAfterLostRace(job: String, runDate: String, startedAt: Instant): Long? =
+        if (restarted(job, runDate, startedAt)) repository.findByJobAndRunDate(job, runDate)?.id else null
+
+    private fun restarted(job: String, runDate: String, startedAt: Instant): Boolean =
+        repository.restartUnlessSucceeded(job, runDate, startedAt, RUNNING, SUCCESS) == 1
 
     companion object {
         private const val RUNNING = "RUNNING"
