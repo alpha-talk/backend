@@ -12,6 +12,7 @@ import org.testcontainers.containers.PostgreSQLContainer
 import org.testcontainers.junit.jupiter.Container
 import org.testcontainers.junit.jupiter.Testcontainers
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNull
 
 @DataJpaTest(properties = ["spring.liquibase.change-log=classpath:db/changelog/price/db.changelog-price.yaml"])
@@ -71,6 +72,13 @@ class JpaDailyCandleStoreTest {
         val saved = repository.findById(DailyCandleId("005930", "20260724")).orElseThrow()
         assertEquals(71800, saved.close)
         assertEquals(87942671300, saved.tradedValue)
+    }
+
+    @Test
+    fun `INTEGER 범위를 넘는 시세는 조용히 잘리지 않고 예외로 실패한다`() {
+        assertFailsWith<ArithmeticException> {
+            store.upsert(listOf(candle("20260724", close = Int.MAX_VALUE + 1L)))
+        }
     }
 
     @Test
