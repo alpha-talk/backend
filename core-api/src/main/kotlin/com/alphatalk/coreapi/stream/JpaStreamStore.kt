@@ -8,7 +8,6 @@ import jakarta.persistence.Table
 import org.hibernate.annotations.Immutable
 import org.hibernate.annotations.JdbcTypeCode
 import org.hibernate.type.SqlTypes
-import org.springframework.data.domain.PageRequest
 import org.springframework.data.domain.Sort
 import org.springframework.data.jpa.domain.Specification
 import org.springframework.data.jpa.repository.JpaRepository
@@ -53,8 +52,11 @@ class JpaStreamStore(
             .and(ofTypes(query.types))
             .and(query.cursor?.let { if (ascending) newerThan(it) else olderThan(it) })
         val order = if (ascending) Sort.Direction.ASC else Sort.Direction.DESC
-        return events.findAll(spec, PageRequest.of(0, query.limit, Sort.by(order, "eventId")))
-            .content
+        return events.findBy<StreamEventEntity, List<StreamEventEntity>>(spec) {
+            it.sortBy(Sort.by(order, "eventId"))
+                .limit(query.limit)
+                .all()
+        }
             .map(::toItem)
     }
 

@@ -185,6 +185,16 @@ class StreamEndToEndTest {
     }
 
     @Test
+    fun `after에 cursor가 없으면 400 VALIDATION_FAILED`() {
+        val response = get("/api/v1/rooms/005930/stream?direction=after")
+
+        assertEquals(400, response.statusCode.value())
+        val error = json(response.body).path("error")
+        assertEquals("VALIDATION_FAILED", error.path("code").asText())
+        assertEquals("cursor", error.path("detail").path("field").asText())
+    }
+
+    @Test
     fun `이벤트가 없는 방은 빈 목록과 빈 pageInfo를 준다`() {
         val response = json(get("/api/v1/rooms/000660/stream").body)
 

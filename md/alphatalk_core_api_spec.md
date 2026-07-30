@@ -56,7 +56,7 @@ ULID 사전순이 곧 시간순이라는 성질을 이용한 **양방향 커서*
 | 파라미터 | 의미 |
 |---|---|
 | `cursor` | 기준 eventId/ULID (미지정 시 최신부터) |
-| `direction` | `before`(과거로, 기본) / `after`(cursor 이후 → **재접속 복구용**) |
+| `direction` | `before`(과거로, 기본) / `after`(cursor 필수, cursor 이후 → **재접속 복구용**) |
 | `limit` | 기본 50, 최대 100 |
 
 응답 공통 `pageInfo`:
