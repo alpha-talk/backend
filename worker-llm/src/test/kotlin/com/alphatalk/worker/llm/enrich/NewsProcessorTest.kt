@@ -12,6 +12,7 @@ import com.alphatalk.worker.llm.cluster.ClusterStatus
 import com.alphatalk.worker.llm.cluster.FakeEmbeddingClient
 import com.alphatalk.worker.llm.cluster.InMemoryClusterStore
 import com.alphatalk.worker.llm.cluster.NoopClusterLock
+import com.alphatalk.worker.llm.config.LlmProperties
 import com.alphatalk.worker.llm.persist.StreamEventStore
 import com.alphatalk.worker.llm.publish.StreamPublisher
 import com.alphatalk.worker.llm.sector.SectorDirectory
@@ -20,7 +21,6 @@ import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import org.junit.jupiter.api.Test
 import java.time.Clock
-import java.time.Duration
 import java.time.Instant
 import java.time.ZoneOffset
 import java.util.concurrent.CountDownLatch
@@ -67,7 +67,7 @@ class NewsProcessorTest {
         store = store,
         assigner = ClusterAssigner(
             store, FakeEmbeddingClient(64), NoopClusterLock(),
-            Duration.ofHours(72), 0.85,
+            LlmProperties(cluster = LlmProperties.Cluster(windowHours = 72, similarityThreshold = 0.85)),
             { "cl-${ids.incrementAndGet()}".padEnd(26, '0') }, clock,
         ),
         fetcher = ArticleFetcher { null },
@@ -78,9 +78,10 @@ class NewsProcessorTest {
         eventIds = { "ev-${ids.incrementAndGet()}".padEnd(26, '0') },
         mapper = jacksonObjectMapper(),
         meters = SimpleMeterRegistry(),
-        fanoutCap = fanoutCap,
-        coverageStocks = coverage,
         transactions = TransactionRunner { it() },
+        props = LlmProperties(
+            sector = LlmProperties.Sector(fanoutCap = fanoutCap, coverageStocks = coverage),
+        ),
         clock = clock,
     )
 

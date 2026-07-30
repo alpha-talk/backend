@@ -3,11 +3,11 @@ package com.alphatalk.worker.llm.persist
 import com.alphatalk.contracts.envelope.StreamData
 import com.fasterxml.jackson.databind.ObjectMapper
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate
-import org.springframework.stereotype.Component
+import org.springframework.stereotype.Repository
 import java.sql.Timestamp
 import java.time.Instant
 
-@Component
+@Repository
 class JdbcStreamEventStore(
     private val jdbc: NamedParameterJdbcTemplate,
     private val mapper: ObjectMapper,
