@@ -49,6 +49,14 @@ class JpaStockSearchStoreTest {
             ('000440', '중앙에너비스',  'KOSDAQ',    6227000, true)
             """.trimIndent(),
         )
+        jdbc.update(
+            """
+            INSERT INTO stock_master (code, name, market, shares_outstanding, is_active)
+            SELECT lpad((100000 + g)::text, 6, '0'), '가상종목' || g, 'KOSDAQ', g * 1000, true
+            FROM generate_series(1, 2600) g
+            """.trimIndent(),
+        )
+        jdbc.execute("ANALYZE stock_master")
     }
 
     @Test
@@ -129,6 +137,42 @@ class JpaStockSearchStoreTest {
             ).joinToString("\n")
 
             assertTrue("idx_stock_master_active_code" in plan, "인덱스가 계획에 없다:\n$plan")
+        } finally {
+            jdbc.execute("SET enable_seqscan = on")
+        }
+    }
+
+    @Test
+    fun `실제 검색 쿼리 모양은 순차 스캔 없이 코드 인덱스로 실행된다`() {
+        val namePlan = searchPlan(prefix = "삼성%", contains = "%삼성%")
+        val codePlan = searchPlan(prefix = "0059%", contains = "%0059%")
+
+        assertTrue("Seq Scan" !in namePlan, "이름 검색이 순차 스캔이다:\n$namePlan")
+        assertTrue("Seq Scan" !in codePlan, "코드 검색이 순차 스캔이다:\n$codePlan")
+        assertTrue("idx_stock_master_active_code" in codePlan, "코드 인덱스가 계획에 없다:\n$codePlan")
+    }
+
+    private fun searchPlan(prefix: String, contains: String): String {
+        jdbc.execute("SET enable_seqscan = off")
+        try {
+            return jdbc.queryForList(
+                """
+                EXPLAIN SELECT trim(BOTH FROM s.code), s.name, s.market
+                FROM stock_master s
+                WHERE s.is_active = true
+                  AND (s.code LIKE '$prefix' ESCAPE '!' OR s.name ILIKE '$contains' ESCAPE '!')
+                ORDER BY
+                    CASE
+                        WHEN s.code LIKE '$prefix' ESCAPE '!' THEN 0
+                        WHEN s.name ILIKE '$prefix' ESCAPE '!' THEN 1
+                        ELSE 2
+                    END,
+                    s.shares_outstanding DESC NULLS LAST,
+                    s.code
+                FETCH FIRST 10 ROWS ONLY
+                """.trimIndent(),
+                String::class.java,
+            ).joinToString("\n")
         } finally {
             jdbc.execute("SET enable_seqscan = on")
         }
