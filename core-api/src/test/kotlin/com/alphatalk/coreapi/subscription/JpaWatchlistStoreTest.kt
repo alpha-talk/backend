@@ -15,7 +15,6 @@ import java.util.concurrent.CyclicBarrier
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import kotlin.test.assertEquals
-import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import org.springframework.test.context.ActiveProfiles
 
@@ -128,9 +127,17 @@ class JpaWatchlistStoreTest {
     fun `해지하면 목록에서 빠진다`() {
         store.subscribe(userId, "005930", 100)
 
-        assertTrue(store.unsubscribe(userId, "005930"))
-        assertFalse(store.unsubscribe(userId, "005930"))
+        assertEquals(UnsubscribeOutcome.REMOVED, store.unsubscribe(userId, "005930"))
+        assertEquals(UnsubscribeOutcome.ALREADY_REMOVED, store.unsubscribe(userId, "005930"))
         assertTrue(store.list(userId).isEmpty())
+    }
+
+    @Test
+    fun `사용자가 사라진 뒤 구독과 해지는 인증 실패 결과를 준다`() {
+        jdbc.update("DELETE FROM users WHERE id = ?", userId)
+
+        assertEquals(SubscribeOutcome.OWNER_MISSING, store.subscribe(userId, "005930", 100))
+        assertEquals(UnsubscribeOutcome.OWNER_MISSING, store.unsubscribe(userId, "005930"))
     }
 
     @Test

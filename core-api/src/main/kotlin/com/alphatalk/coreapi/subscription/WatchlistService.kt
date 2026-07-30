@@ -7,8 +7,7 @@ import org.springframework.stereotype.Service
 @Service
 class WatchlistService(
     private val store: WatchlistStore,
-    private val mirror: WatchlistMirror,
-    private val announcer: WatchlistAnnouncer,
+    private val synchronizer: WatchlistSynchronizer,
 ) {
     fun list(userId: Long): List<WatchlistItem> = store.list(userId)
 
@@ -16,14 +15,12 @@ class WatchlistService(
         val code = normalize(rawCode)
         return when (store.subscribe(userId, code, MAX_ITEMS)) {
             SubscribeOutcome.ADDED -> {
-                mirror.add(userId, code)
-                announcer.announce(userId, added = listOf(code), removed = emptyList())
+                synchronizer.synchronize(userId, code)
                 true
             }
 
             SubscribeOutcome.ALREADY_SUBSCRIBED -> {
-                mirror.add(userId, code)
-                announcer.announce(userId, added = listOf(code), removed = emptyList())
+                synchronizer.synchronize(userId, code)
                 false
             }
 
@@ -36,14 +33,22 @@ class WatchlistService(
                     "관심목록은 최대 ${MAX_ITEMS}개까지 담을 수 있습니다",
                     mapOf("limit" to MAX_ITEMS),
                 )
+
+            SubscribeOutcome.OWNER_MISSING ->
+                throw ApiException(ErrorCode.UNAUTHORIZED, "인증이 필요합니다")
         }
     }
 
     fun unsubscribe(userId: Long, rawCode: String) {
         val code = normalize(rawCode)
-        store.unsubscribe(userId, code)
-        mirror.remove(userId, code)
-        announcer.announce(userId, added = emptyList(), removed = listOf(code))
+        when (store.unsubscribe(userId, code)) {
+            UnsubscribeOutcome.REMOVED,
+            UnsubscribeOutcome.ALREADY_REMOVED,
+            -> synchronizer.synchronize(userId, code)
+
+            UnsubscribeOutcome.OWNER_MISSING ->
+                throw ApiException(ErrorCode.UNAUTHORIZED, "인증이 필요합니다")
+        }
     }
 
     private fun normalize(rawCode: String): String {

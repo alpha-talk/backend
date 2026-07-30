@@ -12,6 +12,13 @@ enum class SubscribeOutcome {
     ALREADY_SUBSCRIBED,
     UNKNOWN_STOCK,
     LIMIT_EXCEEDED,
+    OWNER_MISSING,
+}
+
+enum class UnsubscribeOutcome {
+    REMOVED,
+    ALREADY_REMOVED,
+    OWNER_MISSING,
 }
 
 interface WatchlistStore {
@@ -19,5 +26,7 @@ interface WatchlistStore {
 
     fun subscribe(userId: Long, code: String, limit: Int): SubscribeOutcome
 
-    fun unsubscribe(userId: Long, code: String): Boolean
+    fun unsubscribe(userId: Long, code: String): UnsubscribeOutcome
+
+    fun contains(userId: Long, code: String): Boolean
 }
