@@ -18,10 +18,20 @@ class StreamService(
         limit: Int?,
         types: String?,
     ): StreamPage {
+        val validCode = validCode(code)
+        val validCursor = validCursor(cursor)
+        val validDirection = validDirection(direction)
+        if (validDirection == CursorDirection.AFTER && validCursor == null) {
+            throw ApiException(
+                ErrorCode.VALIDATION_FAILED,
+                "direction=after에는 cursor가 필요합니다",
+                mapOf("field" to "cursor"),
+            )
+        }
         val query = StreamQuery(
-            code = validCode(code),
-            cursor = validCursor(cursor),
-            direction = validDirection(direction),
+            code = validCode,
+            cursor = validCursor,
+            direction = validDirection,
             limit = validLimit(limit),
             types = parseTypes(types),
         )

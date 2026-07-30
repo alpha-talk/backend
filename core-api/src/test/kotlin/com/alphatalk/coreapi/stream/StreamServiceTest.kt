@@ -168,10 +168,20 @@ class StreamServiceTest {
     fun `direction은 before after만 받는다`() {
         val store = RecordingStreamStore()
 
-        service(store).read("005930", null, "after", null, null)
+        service(store).read("005930", "01J9Z800000000000000000001", "after", null, null)
         assertEquals(CursorDirection.AFTER, store.lastQuery!!.direction)
 
         assertFailsWith<ApiException> { service().read("005930", null, "sideways", null, null) }
+    }
+
+    @Test
+    fun `after에는 cursor가 필요하다`() {
+        val failure = assertFailsWith<ApiException> {
+            service().read("005930", null, "after", null, null)
+        }
+
+        assertEquals(ErrorCode.VALIDATION_FAILED, failure.code)
+        assertEquals("cursor", failure.detail?.get("field"))
     }
 
     @Test
