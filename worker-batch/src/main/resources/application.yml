@@ -9,6 +9,12 @@ spring:
     open-in-view: false
     hibernate:
       ddl-auto: validate
+    properties:
+      hibernate:
+        jdbc:
+          batch_size: 100
+        order_inserts: true
+        order_updates: true
   data:
     redis:                                      # ShedLock 락 저장소 — 다중 기동 시 잡 중복 실행 방지 (KIS 워커 명세 §3.2)
       host: ${REDIS_HOST:localhost}

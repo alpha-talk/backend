@@ -3,6 +3,7 @@ package com.alphatalk.worker.batch.master
 import com.alphatalk.kis.master.KisStockMaster
 import jakarta.persistence.Column
 import jakarta.persistence.Entity
+import jakarta.persistence.EntityManager
 import jakarta.persistence.Id
 import jakarta.persistence.Table
 import org.hibernate.annotations.JdbcTypeCode
@@ -55,6 +56,7 @@ interface StockMasterJpaRepository : JpaRepository<StockMasterEntity, String> {
 @Repository
 class JpaStockMasterStore(
     private val repository: StockMasterJpaRepository,
+    private val entityManager: EntityManager,
     private val clock: Clock = Clock.systemUTC(),
 ) : StockMasterStore {
     @Transactional
@@ -62,19 +64,18 @@ class JpaStockMasterStore(
         if (stocks.isEmpty()) return 0
         val now = clock.instant()
         val existing = repository.findAllById(stocks.map(KisStockMaster::code)).associateBy(StockMasterEntity::code)
-        repository.saveAll(
-            stocks.map { stock ->
-                (existing[stock.code] ?: StockMasterEntity(code = stock.code)).apply {
-                    name = stock.name
-                    market = stock.market.name
-                    sectorCode = stock.sectorCode
-                    sharesOutstanding = stock.sharesOutstanding
-                    isActive = true
-                    listedAt = stock.listedAt
-                    updatedAt = now
-                }
-            },
-        )
+        stocks.forEach { stock ->
+            val entity = existing[stock.code] ?: StockMasterEntity(code = stock.code).also(entityManager::persist)
+            entity.apply {
+                name = stock.name
+                market = stock.market.name
+                sectorCode = stock.sectorCode
+                sharesOutstanding = stock.sharesOutstanding
+                isActive = true
+                listedAt = stock.listedAt
+                updatedAt = now
+            }
+        }
         return stocks.size
     }
 
