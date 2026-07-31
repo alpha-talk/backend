@@ -15,13 +15,14 @@ import java.util.concurrent.CyclicBarrier
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import kotlin.test.assertEquals
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import org.springframework.test.context.ActiveProfiles
 
 @SpringBootTest
 @Testcontainers(disabledWithoutDocker = true)
 @ActiveProfiles("test")
-class JpaWatchlistStoreTest {
+class TransactionalWatchlistCommandTest {
     companion object {
         @Container
         @ServiceConnection
@@ -37,6 +38,9 @@ class JpaWatchlistStoreTest {
     }
 
     @Autowired
+    private lateinit var command: WatchlistCommand
+
+    @Autowired
     private lateinit var store: WatchlistStore
 
     @Autowired
@@ -47,6 +51,7 @@ class JpaWatchlistStoreTest {
     @BeforeEach
     fun seed() {
         jdbc.update("DELETE FROM watchlist")
+        jdbc.update("DELETE FROM watchlist_rev")
         jdbc.update("DELETE FROM users")
         jdbc.update("DELETE FROM stock_master")
         jdbc.update(
@@ -66,7 +71,7 @@ class JpaWatchlistStoreTest {
 
     @Test
     fun `담은 종목을 종목명과 함께 돌려준다`() {
-        assertEquals(SubscribeOutcome.ADDED, store.subscribe(userId, "005930", 100))
+        assertEquals(SubscribeOutcome.ADDED, command.subscribe(userId, "005930", 100).outcome)
 
         val item = store.list(userId).single()
         assertEquals("005930", item.code)
@@ -77,58 +82,65 @@ class JpaWatchlistStoreTest {
 
     @Test
     fun `최근에 담은 종목이 앞에 온다`() {
-        store.subscribe(userId, "005930", 100)
+        command.subscribe(userId, "005930", 100)
         Thread.sleep(5)
-        store.subscribe(userId, "000660", 100)
+        command.subscribe(userId, "000660", 100)
 
         assertEquals(listOf("000660", "005930"), store.list(userId).map { it.code })
     }
 
     @Test
     fun `같은 종목을 다시 담으면 이미 담긴 것으로 알린다`() {
-        store.subscribe(userId, "005930", 100)
+        command.subscribe(userId, "005930", 100)
 
-        assertEquals(SubscribeOutcome.ALREADY_SUBSCRIBED, store.subscribe(userId, "005930", 100))
+        assertEquals(SubscribeOutcome.ALREADY_SUBSCRIBED, command.subscribe(userId, "005930", 100).outcome)
         assertEquals(1, store.list(userId).size)
     }
 
     @Test
     fun `없거나 상장폐지된 종목은 담기지 않는다`() {
-        assertEquals(SubscribeOutcome.UNKNOWN_STOCK, store.subscribe(userId, "999999", 100))
-        assertEquals(SubscribeOutcome.UNKNOWN_STOCK, store.subscribe(userId, "001234", 100))
+        val unknown = command.subscribe(userId, "999999", 100)
+        val delisted = command.subscribe(userId, "001234", 100)
+
+        assertEquals(SubscribeOutcome.UNKNOWN_STOCK, unknown.outcome)
+        assertEquals(SubscribeOutcome.UNKNOWN_STOCK, delisted.outcome)
+        assertNull(unknown.state)
         assertTrue(store.list(userId).isEmpty())
     }
 
     @Test
     fun `이미 담은 종목이 상장폐지돼도 재요청은 통과한다`() {
-        store.subscribe(userId, "005930", 100)
+        command.subscribe(userId, "005930", 100)
         jdbc.update("UPDATE stock_master SET is_active = false WHERE code = '005930'")
 
-        assertEquals(SubscribeOutcome.ALREADY_SUBSCRIBED, store.subscribe(userId, "005930", 100))
+        assertEquals(SubscribeOutcome.ALREADY_SUBSCRIBED, command.subscribe(userId, "005930", 100).outcome)
     }
 
     @Test
     fun `한도를 채우면 더 담지 못한다`() {
-        store.subscribe(userId, "005930", 2)
-        store.subscribe(userId, "000660", 2)
+        command.subscribe(userId, "005930", 2)
+        command.subscribe(userId, "000660", 2)
 
-        assertEquals(SubscribeOutcome.LIMIT_EXCEEDED, store.subscribe(userId, "000440", 2))
+        val exceeded = command.subscribe(userId, "000440", 2)
+
+        assertEquals(SubscribeOutcome.LIMIT_EXCEEDED, exceeded.outcome)
+        assertNull(exceeded.state)
         assertEquals(2, store.list(userId).size)
     }
 
     @Test
     fun `한도가 찬 뒤에도 이미 담긴 종목 재요청은 통과한다`() {
-        store.subscribe(userId, "005930", 1)
+        command.subscribe(userId, "005930", 1)
 
-        assertEquals(SubscribeOutcome.ALREADY_SUBSCRIBED, store.subscribe(userId, "005930", 1))
+        assertEquals(SubscribeOutcome.ALREADY_SUBSCRIBED, command.subscribe(userId, "005930", 1).outcome)
     }
 
     @Test
     fun `해지하면 목록에서 빠진다`() {
-        store.subscribe(userId, "005930", 100)
+        command.subscribe(userId, "005930", 100)
 
-        assertEquals(UnsubscribeOutcome.REMOVED, store.unsubscribe(userId, "005930"))
-        assertEquals(UnsubscribeOutcome.ALREADY_REMOVED, store.unsubscribe(userId, "005930"))
+        assertEquals(UnsubscribeOutcome.REMOVED, command.unsubscribe(userId, "005930").outcome)
+        assertEquals(UnsubscribeOutcome.ALREADY_REMOVED, command.unsubscribe(userId, "005930").outcome)
         assertTrue(store.list(userId).isEmpty())
     }
 
@@ -136,8 +148,33 @@ class JpaWatchlistStoreTest {
     fun `사용자가 사라진 뒤 구독과 해지는 인증 실패 결과를 준다`() {
         jdbc.update("DELETE FROM users WHERE id = ?", userId)
 
-        assertEquals(SubscribeOutcome.OWNER_MISSING, store.subscribe(userId, "005930", 100))
-        assertEquals(UnsubscribeOutcome.OWNER_MISSING, store.unsubscribe(userId, "005930"))
+        val put = command.subscribe(userId, "005930", 100)
+        val delete = command.unsubscribe(userId, "005930")
+
+        assertEquals(SubscribeOutcome.OWNER_MISSING, put.outcome)
+        assertEquals(UnsubscribeOutcome.OWNER_MISSING, delete.outcome)
+        assertNull(put.state)
+        assertNull(delete.state)
+    }
+
+    @Test
+    fun `커밋된 변경마다 rev가 커밋 순서대로 증가하고 스냅샷과 함께 온다`() {
+        val first = command.subscribe(userId, "005930", 100).state!!
+        val second = command.subscribe(userId, "000660", 100).state!!
+        val repeated = command.subscribe(userId, "005930", 100).state!!
+        val removed = command.unsubscribe(userId, "005930").state!!
+        val removedAgain = command.unsubscribe(userId, "005930").state!!
+
+        assertEquals(listOf("005930"), first.codes)
+        assertEquals(setOf("005930", "000660"), second.codes.toSet())
+        assertEquals(setOf("005930", "000660"), repeated.codes.toSet())
+        assertEquals(listOf("000660"), removed.codes)
+        assertEquals(listOf("000660"), removedAgain.codes)
+        assertEquals(
+            listOf(first.rev, second.rev, repeated.rev, removed.rev, removedAgain.rev),
+            listOf(first.rev, second.rev, repeated.rev, removed.rev, removedAgain.rev).sorted(),
+        )
+        assertEquals(5, listOf(first.rev, second.rev, repeated.rev, removed.rev, removedAgain.rev).distinct().size)
     }
 
     @Test
@@ -146,20 +183,21 @@ class JpaWatchlistStoreTest {
             "INSERT INTO users (email, password_hash, nickname) VALUES ('x@y.z', 'x', '다른사람') RETURNING id",
             Long::class.java,
         )!!
-        store.subscribe(userId, "005930", 100)
-        store.subscribe(other, "000660", 100)
+        command.subscribe(userId, "005930", 100)
+        command.subscribe(other, "000660", 100)
 
         assertEquals(listOf("005930"), store.list(userId).map { it.code })
         assertEquals(listOf("000660"), store.list(other).map { it.code })
     }
 
     @Test
-    fun `탈퇴하면 관심목록도 함께 지워진다`() {
-        store.subscribe(userId, "005930", 100)
+    fun `탈퇴하면 관심목록과 rev도 함께 지워진다`() {
+        command.subscribe(userId, "005930", 100)
 
         jdbc.update("DELETE FROM users WHERE id = ?", userId)
 
         assertEquals(0, jdbc.queryForObject("SELECT count(*) FROM watchlist", Int::class.java))
+        assertEquals(0, jdbc.queryForObject("SELECT count(*) FROM watchlist_rev", Int::class.java))
     }
 
     @Test
@@ -170,7 +208,7 @@ class JpaWatchlistStoreTest {
             val attempts = listOf("005930", "000660").map { code ->
                 pool.submit<SubscribeOutcome> {
                     barrier.await(10, TimeUnit.SECONDS)
-                    store.subscribe(userId, code, 1)
+                    command.subscribe(userId, code, 1).outcome
                 }
             }
             val outcomes = attempts.map { it.get(30, TimeUnit.SECONDS) }

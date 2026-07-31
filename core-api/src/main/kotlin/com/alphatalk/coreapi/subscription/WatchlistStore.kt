@@ -7,26 +7,23 @@ data class WatchlistItem(
     val subscribedAt: Long,
 )
 
-enum class SubscribeOutcome {
-    ADDED,
-    ALREADY_SUBSCRIBED,
-    UNKNOWN_STOCK,
-    LIMIT_EXCEEDED,
-    OWNER_MISSING,
-}
-
-enum class UnsubscribeOutcome {
-    REMOVED,
-    ALREADY_REMOVED,
-    OWNER_MISSING,
-}
+data class WatchlistState(
+    val rev: Long,
+    val codes: List<String>,
+)
 
 interface WatchlistStore {
     fun list(userId: Long): List<WatchlistItem>
 
-    fun subscribe(userId: Long, code: String, limit: Int): SubscribeOutcome
-
-    fun unsubscribe(userId: Long, code: String): UnsubscribeOutcome
-
     fun contains(userId: Long, code: String): Boolean
+
+    fun count(userId: Long): Long
+
+    fun add(userId: Long, code: String)
+
+    fun remove(userId: Long, code: String): Boolean
+
+    fun codes(userId: Long): List<String>
+
+    fun nextRev(userId: Long): Long
 }
