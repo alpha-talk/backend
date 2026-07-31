@@ -1,6 +1,5 @@
 package com.alphatalk.coreapi.subscription
 
-import com.alphatalk.coreapi.auth.UserAccountLock
 import com.alphatalk.coreapi.search.StockCatalog
 import jakarta.persistence.Column
 import jakarta.persistence.Entity
@@ -14,7 +13,6 @@ import org.hibernate.type.SqlTypes
 import org.springframework.data.jpa.repository.JpaRepository
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Repository
-import org.springframework.transaction.annotation.Transactional
 import java.io.Serializable
 import java.time.Instant
 
@@ -39,6 +37,16 @@ class WatchlistEntity(
     var createdAt: Instant? = null,
 )
 
+@Entity
+@Table(name = "watchlist_rev")
+class WatchlistRevisionEntity(
+    @Id
+    @Column(name = "user_id")
+    var userId: Long = 0,
+    @Column(name = "rev", nullable = false)
+    var rev: Long = 0,
+)
+
 interface WatchlistJpaRepository : JpaRepository<WatchlistEntity, WatchlistId> {
     fun findByUserIdOrderByCreatedAtDescCodeAsc(userId: Long): List<WatchlistEntity>
 
@@ -49,11 +57,13 @@ interface WatchlistJpaRepository : JpaRepository<WatchlistEntity, WatchlistId> {
     fun deleteByUserIdAndCode(userId: Long, code: String): Long
 }
 
+interface WatchlistRevisionJpaRepository : JpaRepository<WatchlistRevisionEntity, Long>
+
 @Repository
 class JpaWatchlistStore(
     private val watchlist: WatchlistJpaRepository,
+    private val revisions: WatchlistRevisionJpaRepository,
     private val stocks: StockCatalog,
-    private val owners: UserAccountLock,
 ) : WatchlistStore {
     private val log = LoggerFactory.getLogger(javaClass)
 
@@ -79,26 +89,25 @@ class JpaWatchlistStore(
         }
     }
 
-    @Transactional
-    override fun subscribe(userId: Long, code: String, limit: Int): SubscribeOutcome {
-        if (!owners.acquire(userId)) return SubscribeOutcome.OWNER_MISSING
-        if (watchlist.existsByUserIdAndCode(userId, code)) return SubscribeOutcome.ALREADY_SUBSCRIBED
-        if (!stocks.existsActive(code)) return SubscribeOutcome.UNKNOWN_STOCK
-        if (watchlist.countByUserId(userId) >= limit) return SubscribeOutcome.LIMIT_EXCEEDED
-        watchlist.save(WatchlistEntity(userId = userId, code = code))
-        return SubscribeOutcome.ADDED
-    }
-
-    @Transactional
-    override fun unsubscribe(userId: Long, code: String): UnsubscribeOutcome {
-        if (!owners.acquire(userId)) return UnsubscribeOutcome.OWNER_MISSING
-        return if (watchlist.deleteByUserIdAndCode(userId, code) > 0) {
-            UnsubscribeOutcome.REMOVED
-        } else {
-            UnsubscribeOutcome.ALREADY_REMOVED
-        }
-    }
-
     override fun contains(userId: Long, code: String): Boolean =
         watchlist.existsByUserIdAndCode(userId, code)
+
+    override fun count(userId: Long): Long = watchlist.countByUserId(userId)
+
+    override fun add(userId: Long, code: String) {
+        watchlist.save(WatchlistEntity(userId = userId, code = code))
+    }
+
+    override fun remove(userId: Long, code: String): Boolean =
+        watchlist.deleteByUserIdAndCode(userId, code) > 0
+
+    override fun codes(userId: Long): List<String> =
+        watchlist.findByUserIdOrderByCreatedAtDescCodeAsc(userId).map { it.code.trim() }
+
+    override fun nextRev(userId: Long): Long {
+        val revision = revisions.findById(userId).orElseGet { WatchlistRevisionEntity(userId = userId, rev = 0) }
+        revision.rev += 1
+        revisions.save(revision)
+        return revision.rev
+    }
 }

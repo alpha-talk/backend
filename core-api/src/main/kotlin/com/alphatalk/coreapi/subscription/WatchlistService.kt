@@ -7,20 +7,22 @@ import org.springframework.stereotype.Service
 @Service
 class WatchlistService(
     private val store: WatchlistStore,
-    private val synchronizer: WatchlistSynchronizer,
+    private val command: WatchlistCommand,
+    private val mirror: WatchlistMirrorSync,
 ) {
     fun list(userId: Long): List<WatchlistItem> = store.list(userId)
 
     fun subscribe(userId: Long, rawCode: String): Boolean {
         val code = normalize(rawCode)
-        return when (store.subscribe(userId, code, MAX_ITEMS)) {
+        val change = command.subscribe(userId, code, MAX_ITEMS)
+        return when (change.outcome) {
             SubscribeOutcome.ADDED -> {
-                synchronizer.synchronize(userId, code)
+                mirror.sync(userId, MirrorChange(requireNotNull(change.state), addedCode = code))
                 true
             }
 
             SubscribeOutcome.ALREADY_SUBSCRIBED -> {
-                synchronizer.synchronize(userId, code)
+                mirror.sync(userId, MirrorChange(requireNotNull(change.state), addedCode = code))
                 false
             }
 
@@ -34,22 +36,23 @@ class WatchlistService(
                     mapOf("limit" to MAX_ITEMS),
                 )
 
-            SubscribeOutcome.OWNER_MISSING ->
-                throw ApiException(ErrorCode.UNAUTHORIZED, "인증이 필요합니다")
+            SubscribeOutcome.OWNER_MISSING -> throw unauthorized()
         }
     }
 
     fun unsubscribe(userId: Long, rawCode: String) {
         val code = normalize(rawCode)
-        when (store.unsubscribe(userId, code)) {
+        val change = command.unsubscribe(userId, code)
+        when (change.outcome) {
             UnsubscribeOutcome.REMOVED,
             UnsubscribeOutcome.ALREADY_REMOVED,
-            -> synchronizer.synchronize(userId, code)
+            -> mirror.sync(userId, MirrorChange(requireNotNull(change.state), removedCode = code))
 
-            UnsubscribeOutcome.OWNER_MISSING ->
-                throw ApiException(ErrorCode.UNAUTHORIZED, "인증이 필요합니다")
+            UnsubscribeOutcome.OWNER_MISSING -> throw unauthorized()
         }
     }
+
+    private fun unauthorized() = ApiException(ErrorCode.UNAUTHORIZED, "인증이 필요합니다")
 
     private fun normalize(rawCode: String): String {
         val code = rawCode.trim()
