@@ -332,7 +332,7 @@ stream/stockinfo ──(읽기)──► Redis price:{code} / 워커 적재 테�
 auth ◄── 전 모듈 (SecurityContext)
 ```
 
-- `stock_master`를 읽는 **JPA 매핑은 search 모듈이 단독 소유**한다. 관심목록도 스트림도 "이 종목이 실재하는가"를 물어야 하는데, 모듈마다 같은 테이블을 각자 매핑하면 매핑이 갈라진다. search가 `StockCatalog`(존재 확인·이름/시장 조회)를 노출하고 나머지는 이 포트만 쓴다. 검색 질의 자체는 `pg_trgm`·`ILIKE`·정렬 규칙 때문에 native SQL로 남는다(코딩 컨벤션 §4의 예외).
+- `stock_master`를 읽는 **JPA 매핑은 search 모듈이 단독 소유**한다. 관심목록도 스트림도 "이 종목이 실재하는가"를 물어야 하는데, 모듈마다 같은 테이블을 각자 매핑하면 매핑이 갈라진다. search가 `StockCatalog`(존재 확인·이름/시장 조회)를 노출하고 나머지는 이 포트만 쓴다. 검색 질의도 같은 엔티티 위의 JPQL(`ilike`·정렬 case 식)로 구현한다.
 - `stream_event` 테이블의 논리 소유자는 **stream 모듈**이다. community는 직접 INSERT하지 않고 노출된 `StreamEventAppender`를 호출한다(경계 테스트로 강제). worker-llm과 worker-batch(투자의견)는 별도 프로세스로 같은 테이블에 INSERT한다. 스키마는 `db-migrations` 모듈(Liquibase)이 단일 관리하고 외부 생산자는 `source_key` 멱등 계약을 지킨다.
 - 채널명·봉투는 `:contracts` 상수만 사용한다(문자열 하드코딩 금지).
 
