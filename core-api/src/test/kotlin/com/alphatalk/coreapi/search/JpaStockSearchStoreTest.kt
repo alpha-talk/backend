@@ -143,12 +143,12 @@ class JpaStockSearchStoreTest {
     }
 
     @Test
-    fun `실제 검색 쿼리 모양은 순차 스캔 없이 코드 인덱스로 실행된다`() {
+    fun `실제 검색 쿼리 모양은 인덱스로 실행될 수 있다`() {
         val namePlan = searchPlan(prefix = "삼성%", contains = "%삼성%")
         val codePlan = searchPlan(prefix = "0059%", contains = "%0059%")
 
-        assertTrue("Seq Scan" !in namePlan, "이름 검색이 순차 스캔이다:\n$namePlan")
-        assertTrue("Seq Scan" !in codePlan, "코드 검색이 순차 스캔이다:\n$codePlan")
+        assertTrue("Seq Scan" !in namePlan, "이름 검색을 처리할 인덱스 경로가 없다:\n$namePlan")
+        assertTrue("Seq Scan" !in codePlan, "코드 검색을 처리할 인덱스 경로가 없다:\n$codePlan")
         assertTrue("idx_stock_master_active_code" in codePlan, "코드 인덱스가 계획에 없다:\n$codePlan")
     }
 
