@@ -62,14 +62,28 @@ class JpaDailyCandleStore(
             .associateBy(DailyCandleEntity::id)
         candles.forEach { candle ->
             val id = DailyCandleId(code = candle.code, date = candle.date)
-            val entity = existing[id] ?: DailyCandleEntity(id = id).also(entityManager::persist)
-            entity.apply {
-                open = Math.toIntExact(candle.open)
-                high = Math.toIntExact(candle.high)
-                low = Math.toIntExact(candle.low)
-                close = Math.toIntExact(candle.close)
-                volume = candle.volume
-                tradedValue = candle.value
+            val entity = existing[id]
+            if (entity == null) {
+                entityManager.persist(
+                    DailyCandleEntity(
+                        id = id,
+                        open = Math.toIntExact(candle.open),
+                        high = Math.toIntExact(candle.high),
+                        low = Math.toIntExact(candle.low),
+                        close = Math.toIntExact(candle.close),
+                        volume = candle.volume,
+                        tradedValue = candle.value,
+                    ),
+                )
+            } else {
+                entity.apply {
+                    open = Math.toIntExact(candle.open)
+                    high = Math.toIntExact(candle.high)
+                    low = Math.toIntExact(candle.low)
+                    close = Math.toIntExact(candle.close)
+                    volume = candle.volume
+                    tradedValue = candle.value
+                }
             }
         }
         return candles.size
