@@ -121,6 +121,7 @@ class JpaBatchJobRunStore(
                 BatchJobRunEntity(job = job, runDate = runDate, status = RUNNING, startedAt = startedAt),
             ).id
         } catch (e: DataIntegrityViolationException) {
+            repository.findByJobAndRunDate(job, runDate) ?: throw e
             null
         }
 
