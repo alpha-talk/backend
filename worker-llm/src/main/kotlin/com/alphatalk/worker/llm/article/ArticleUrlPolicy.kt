@@ -1,9 +1,12 @@
 package com.alphatalk.worker.llm.article
 
+import com.alphatalk.worker.llm.config.LlmProperties
+import org.springframework.stereotype.Component
 import java.net.URI
 
-class ArticleUrlPolicy(allowedHostSuffixes: List<String>) {
-    private val suffixes = allowedHostSuffixes.map { it.lowercase().removePrefix(".") }
+@Component
+class ArticleUrlPolicy(props: LlmProperties) {
+    private val suffixes = props.article.allowedHostSuffixes.map { it.lowercase().removePrefix(".") }
 
     val enabled: Boolean = suffixes.isNotEmpty()
 

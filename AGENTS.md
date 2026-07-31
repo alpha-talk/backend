@@ -31,7 +31,7 @@
 - Kotlin 2.x / JVM 21 / Spring Boot 3.5.x (3.x 최신 패치)
 - WebSocket: **Spring MVC 스택 + `@EnableWebSocketMessageBroker`(SimpleBroker)** — WebFlux 아님 (v0.2에서 전환 결정)
 - Redis: Spring Data Redis (Lettuce), Pub/Sub 구독 전용
-- 관계형 DB 접근: DB를 사용하는 모든 서버 모듈은 **Spring Data JPA를 최우선**으로 사용한다. 우선순위는 `JpaRepository` 기본 CRUD·파생 쿼리 → JPQL → native SQL/raw SQL(`JdbcTemplate` 포함)이다. JPA/JPQL로 요구사항을 명확하게 충족할 수 없거나 PostgreSQL 전용 기능·복잡 집계·대량 처리·측정된 성능 병목이 있을 때만 raw SQL을 허용하며, 모든 쿼리는 파라미터를 바인딩한다.
+- 관계형 DB 접근: DB를 사용하는 모든 서버 모듈은 **Spring Data JPA를 기본이자 우선 구현으로 사용한다**. 우선순위는 `JpaRepository` 기본 CRUD·파생 쿼리(필요 시 projection·`@EntityGraph`) → `@Query` JPQL(DTO projection·fetch join 포함)이다. native query, `JdbcTemplate`, `JdbcClient`, 직접 JDBC와 문자열 SQL은 에이전트가 자체 판단으로 도입하지 않는다. 불가피하다고 판단하면 구현 전에 JPA/JPQL로 해결할 수 없는 근거와 측정 결과를 제시하고 사용자 합의를 받은 뒤 설계 문서에 예외를 기록한다.
 - 빌드: Gradle Kotlin DSL 멀티모듈 + `gradle/libs.versions.toml`
 - 테스트: JUnit5 + Testcontainers(Redis) + `WebSocketStompClient`
 
@@ -68,6 +68,7 @@ backend/
 5. **보안**: JWT는 STOMP CONNECT 헤더로만 받는다 (URL 쿼리파라미터 금지). 토큰 원문·시크릿 로그 금지. 시크릿은 환경변수 주입.
 6. **인메모리 상태는 DemandRegistry가 단일 소유**: 세션/수요 인덱스를 다른 곳에 중복 보관하지 않는다. 재기동 시 0에서 재구축이 전제 — 영속화하지 않는다. 외부에는 읽기용 `DemandQuery`·쓰기용 `DemandMutator` 역할 인터페이스로만 노출한다(단일 소유는 유지, ISP로 좁게 노출).
 7. **경계는 포트로 뒤집는다(DIP)**: 도메인 클래스가 `LettuceConnectionFactory`·`SimpMessagingTemplate`·JWT 라이브러리를 직접 import하지 않는다. 새 인프라 의존이 생기면 포트부터 정의한다 — 그래야 인프라 없이 단위 테스트된다.
+8. **운영 실패와 규모를 정상 조건으로 취급한다**: 모든 로직은 처리 중 프로세스 종료·부분 실패·타임아웃·중복·순서 역전·동시 실행·재기동·롤링 배포와 운영 데이터 규모를 검토한다. 재시도·멱등성·트랜잭션 경계·복구 방식·자원 상한·백프레셔·관측성·부하 검증은 [md/coding_convention.md](md/coding_convention.md) §5를 따른다. 단, 모든 경로에 전달 보장을 덧붙이지 않고 각 설계 문서의 전달 계약(best-effort 또는 at-least-once)을 우선한다.
 
 ## 빌드·실행
 
@@ -84,9 +85,12 @@ backend/
 
 ## 컨벤션
 
-- **코딩 컨벤션**: [md/coding_convention.md](md/coding_convention.md). 핵심 둘 —
+- **코딩 컨벤션**: [md/coding_convention.md](md/coding_convention.md). 핵심 —
   - **코드에 주석을 달지 않는다**(self-documenting code). 설계 근거·불변식·포트 계약은 코드가 아니라 `md/` 설계 문서가 소유하고, 코드에서는 테스트로 고정한다.
   - **빈은 컴포넌트 스캔으로 등록한다**. 우리가 만든 클래스는 `@Service`/`@Repository`/`@Component`를 붙이고, `@Configuration`+`@Bean` 손조립은 판단이 필요할 때만 쓴다(프레임워크 타입, 조건부·fail-closed 등록). 포트 인터페이스에는 어노테이션을 붙이지 않는다.
+  - **Spring Boot 3.5와 Kotlin의 현재 방식을 쓴다**. 생성자 주입·불변 객체·타입 안전 설정·얇은 컨트롤러·서비스 트랜잭션 경계를 기본으로 하고, deprecated API와 과거 Spring 관용구를 새 코드에 복사하지 않는다.
+  - **관계형 DB는 JPA로 구현한다**. native/raw SQL과 `JdbcTemplate`/`JdbcClient`/직접 JDBC는 사전 합의 없는 우회 수단으로 사용하지 않는다.
+  - **운영 실패와 규모를 정상 조건으로 설계한다**. 로직의 모든 외부 I/O·상태 전이에서 중단과 재실행 결과를 정하고, 중복·동시성·과부하·느린 의존성에 대한 안전장치와 이를 검증하는 테스트·메트릭을 함께 둔다.
 - **브랜치·커밋·PR 규칙**: [md/git_convention.md](md/git_convention.md). 핵심 — 브랜치 `type/scope/desc`, 커밋 `type(scope): 제목`, **scope=모듈명**(ws·contracts·auth-jwt·core-api·worker-*). main 직접 커밋 금지.
 - **AI 공동 저자 서명 금지**: 커밋 메시지·PR 본문에 `Co-Authored-By` 등 공동 저자(co-author) 트레일러를 **절대 넣지 않는다** — AI 도구(Claude·Codex 등) 서명 포함.
 - 커밋·PR은 계획서의 단계(S0~S7) 단위. PR 본문에 해당 단계와 DoD 충족 여부를 적는다.
