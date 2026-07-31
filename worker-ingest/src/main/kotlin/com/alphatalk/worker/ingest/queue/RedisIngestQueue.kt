@@ -5,9 +5,9 @@ import com.alphatalk.contracts.queue.IngestQueueEntry
 import com.alphatalk.worker.ingest.config.IngestProperties
 import org.springframework.data.redis.connection.stream.StreamRecords
 import org.springframework.data.redis.core.StringRedisTemplate
-import org.springframework.stereotype.Component
+import org.springframework.stereotype.Repository
 
-@Component
+@Repository
 class RedisIngestQueue(
     private val redis: StringRedisTemplate,
     props: IngestProperties,

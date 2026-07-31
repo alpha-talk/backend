@@ -2,9 +2,9 @@ package com.alphatalk.worker.llm.cluster
 
 import com.alphatalk.contracts.queue.IngestQueueEntry
 import com.alphatalk.contracts.queue.IngestType
+import com.alphatalk.worker.llm.config.LlmProperties
 import org.junit.jupiter.api.Test
 import java.time.Clock
-import java.time.Duration
 import java.time.Instant
 import java.time.ZoneOffset
 import kotlin.test.assertEquals
@@ -14,13 +14,15 @@ import kotlin.test.assertTrue
 class ClusterAssignerTest {
     private val store = InMemoryClusterStore()
     private val clock = Clock.fixed(Instant.parse("2026-07-16T09:00:00Z"), ZoneOffset.UTC)
+    private val clusterProps = LlmProperties(
+        cluster = LlmProperties.Cluster(windowHours = 72, similarityThreshold = 0.85),
+    )
     private var idCounter = 0
     private val assigner = ClusterAssigner(
         store = store,
         embeddings = FakeEmbeddingClient(4096),
         lock = NoopClusterLock(),
-        window = Duration.ofHours(72),
-        similarityThreshold = 0.85,
+        props = clusterProps,
         clusterIds = { "cluster-${++idCounter}".padEnd(26, '0') },
         clock = clock,
     )
@@ -139,8 +141,7 @@ class ClusterAssignerTest {
             racingStore,
             FakeEmbeddingClient(4096),
             NoopClusterLock(),
-            Duration.ofHours(72),
-            0.85,
+            clusterProps,
             { "loser".padEnd(26, '0') },
             clock,
         )

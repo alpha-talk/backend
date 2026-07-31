@@ -3,13 +3,13 @@ package com.alphatalk.worker.llm.cluster
 import com.alphatalk.contracts.envelope.SourceRef
 import com.alphatalk.contracts.envelope.StreamCategory
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate
-import org.springframework.stereotype.Component
+import org.springframework.stereotype.Repository
 import org.springframework.transaction.annotation.Transactional
 import java.sql.ResultSet
 import java.sql.Timestamp
 import java.time.Instant
 
-@Component
+@Repository
 @Transactional
 class JdbcClusterStore(
     private val jdbc: NamedParameterJdbcTemplate,

@@ -2,21 +2,27 @@ package com.alphatalk.worker.ingest.scheduler
 
 import com.alphatalk.contracts.queue.IngestQueueEntry
 import com.alphatalk.contracts.queue.IngestType
+import com.alphatalk.worker.ingest.config.IngestConfig
+import com.alphatalk.worker.ingest.config.IngestProperties
 import com.alphatalk.worker.ingest.dedup.SeenMarker
 import com.alphatalk.worker.ingest.normalize.ArticleNormalizer
 import com.alphatalk.worker.ingest.queue.IngestQueue
 import com.alphatalk.worker.ingest.source.FetchedArticle
 import com.alphatalk.worker.ingest.source.NewsSource
 import org.slf4j.LoggerFactory
+import org.springframework.beans.factory.annotation.Qualifier
+import org.springframework.stereotype.Service
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executor
 
+@Service
 class IngestPoller(
     private val sources: List<NewsSource>,
     private val seen: SeenMarker,
     private val queue: IngestQueue,
-    private val excerptMaxLength: Int,
-    private val fetchExecutor: Executor = Executor { it.run() },
+    private val props: IngestProperties,
+    @Qualifier(IngestConfig.FETCH_EXECUTOR_BEAN)
+    private val fetchExecutor: Executor,
     private val clock: () -> Long = System::currentTimeMillis,
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
@@ -56,7 +62,7 @@ class IngestPoller(
             codes = codes,
             title = article.title,
             url = url,
-            body = article.excerpt?.take(excerptMaxLength),
+            body = article.excerpt?.take(props.excerptMaxLength),
             fetchedAt = article.publishedAt ?: clock(),
         )
         runCatching { queue.enqueue(entry) }

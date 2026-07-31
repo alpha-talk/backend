@@ -4,10 +4,10 @@ import com.alphatalk.contracts.Keys
 import com.alphatalk.ws.config.WsProperties
 import org.slf4j.LoggerFactory
 import org.springframework.data.redis.core.StringRedisTemplate
-import org.springframework.stereotype.Component
+import org.springframework.stereotype.Repository
 import java.time.Duration
 
-@Component
+@Repository
 class RedisPresenceService(
     private val redis: StringRedisTemplate,
     props: WsProperties,
