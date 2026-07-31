@@ -6,11 +6,15 @@ import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabas
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection
 import org.springframework.context.annotation.Import
+import org.springframework.dao.DataIntegrityViolationException
+import org.springframework.transaction.annotation.Propagation
+import org.springframework.transaction.annotation.Transactional
 import org.testcontainers.containers.PostgreSQLContainer
 import org.testcontainers.junit.jupiter.Container
 import org.testcontainers.junit.jupiter.Testcontainers
 import java.time.Instant
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 
@@ -52,6 +56,14 @@ class JpaBatchJobRunStoreTest {
         assertNotNull(second)
         assertEquals(first, second)
         assertEquals("RUNNING", repository.findById(second).orElseThrow().status)
+    }
+
+    @Test
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    fun `무결성 오류는 경합으로 오인되지 않고 전달된다`() {
+        assertFailsWith<DataIntegrityViolationException> {
+            runs.start("stock_master_sync", "202607290", Instant.now())
+        }
     }
 
     @Test

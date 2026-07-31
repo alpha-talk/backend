@@ -65,15 +65,30 @@ class JpaStockMasterStore(
         val now = clock.instant()
         val existing = repository.findAllById(stocks.map(KisStockMaster::code)).associateBy(StockMasterEntity::code)
         stocks.forEach { stock ->
-            val entity = existing[stock.code] ?: StockMasterEntity(code = stock.code).also(entityManager::persist)
-            entity.apply {
-                name = stock.name
-                market = stock.market.name
-                sectorCode = stock.sectorCode
-                sharesOutstanding = stock.sharesOutstanding
-                isActive = true
-                listedAt = stock.listedAt
-                updatedAt = now
+            val entity = existing[stock.code]
+            if (entity == null) {
+                entityManager.persist(
+                    StockMasterEntity(
+                        code = stock.code,
+                        name = stock.name,
+                        market = stock.market.name,
+                        sectorCode = stock.sectorCode,
+                        sharesOutstanding = stock.sharesOutstanding,
+                        isActive = true,
+                        listedAt = stock.listedAt,
+                        updatedAt = now,
+                    ),
+                )
+            } else {
+                entity.apply {
+                    name = stock.name
+                    market = stock.market.name
+                    sectorCode = stock.sectorCode
+                    sharesOutstanding = stock.sharesOutstanding
+                    isActive = true
+                    listedAt = stock.listedAt
+                    updatedAt = now
+                }
             }
         }
         return stocks.size
