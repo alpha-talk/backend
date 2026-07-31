@@ -7,6 +7,8 @@ object Keys {
 
     fun watchlist(userId: Long) = "watchlist:$userId"
 
+    fun watchlistRev(userId: Long) = "watchlist:rev:$userId"
+
     fun seenIngest(sourceId: String) = "seen:ingest:$sourceId"
     fun clusterLock(code: String) = "lock:cluster:$code"
     fun articleFetchRate(host: String) = "rate:article-fetch:$host"

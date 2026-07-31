@@ -5,6 +5,12 @@ import kotlin.test.assertEquals
 
 class KeysQueuesTest {
     @Test
+    fun `관심목록 미러 키 생성 - Redis 계약 §3`() {
+        assertEquals("watchlist:123", Keys.watchlist(123))
+        assertEquals("watchlist:rev:123", Keys.watchlistRev(123))
+    }
+
+    @Test
     fun `뉴스 파이프라인 키 생성`() {
         assertEquals("seen:ingest:hankyung:a1b2", Keys.seenIngest("hankyung:a1b2"))
         assertEquals("lock:cluster:005930", Keys.clusterLock("005930"))
