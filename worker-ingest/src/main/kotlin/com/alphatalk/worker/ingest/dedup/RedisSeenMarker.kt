@@ -3,9 +3,9 @@ package com.alphatalk.worker.ingest.dedup
 import com.alphatalk.contracts.Keys
 import com.alphatalk.worker.ingest.config.IngestProperties
 import org.springframework.data.redis.core.StringRedisTemplate
-import org.springframework.stereotype.Component
+import org.springframework.stereotype.Repository
 
-@Component
+@Repository
 class RedisSeenMarker(
     private val redis: StringRedisTemplate,
     props: IngestProperties,

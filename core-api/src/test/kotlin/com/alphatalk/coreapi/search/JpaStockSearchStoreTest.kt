@@ -1,64 +1,63 @@
 package com.alphatalk.coreapi.search
 
-import liquibase.Contexts
-import liquibase.LabelExpression
-import liquibase.Liquibase
-import liquibase.database.DatabaseFactory
-import liquibase.database.jvm.JdbcConnection
-import liquibase.resource.ClassLoaderResourceAccessor
-import org.junit.jupiter.api.BeforeAll
+import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
+import org.springframework.beans.factory.annotation.Autowired
+import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase
+import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest
+import org.springframework.boot.testcontainers.service.connection.ServiceConnection
+import org.springframework.context.annotation.Import
 import org.springframework.jdbc.core.JdbcTemplate
-import org.springframework.jdbc.datasource.DriverManagerDataSource
 import org.testcontainers.containers.PostgreSQLContainer
 import org.testcontainers.junit.jupiter.Container
 import org.testcontainers.junit.jupiter.Testcontainers
 import org.testcontainers.utility.DockerImageName
-import java.sql.DriverManager
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
+@DataJpaTest
+@AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
+@Import(JpaStockSearchStore::class)
 @Testcontainers(disabledWithoutDocker = true)
-class JdbcStockSearchStoreTest {
+class JpaStockSearchStoreTest {
     companion object {
-        private const val MASTER_CHANGELOG = "db/changelog/db.changelog-master.yaml"
-
         @Container
+        @ServiceConnection
         @JvmStatic
         val postgres = PostgreSQLContainer(
             DockerImageName.parse("pgvector/pgvector:pg16").asCompatibleSubstituteFor("postgres"),
         )
-
-        private val jdbc by lazy {
-            JdbcTemplate(DriverManagerDataSource(postgres.jdbcUrl, postgres.username, postgres.password))
-        }
-
-        @Suppress("DEPRECATION")
-        @BeforeAll
-        @JvmStatic
-        fun migrateAndSeed() {
-            DriverManager.getConnection(postgres.jdbcUrl, postgres.username, postgres.password).use { connection ->
-                val database = DatabaseFactory.getInstance()
-                    .findCorrectDatabaseImplementation(JdbcConnection(connection))
-                Liquibase(MASTER_CHANGELOG, ClassLoaderResourceAccessor(), database)
-                    .update(Contexts(), LabelExpression())
-            }
-            jdbc.update(
-                """
-                INSERT INTO stock_master (code, name, market, shares_outstanding, is_active) VALUES
-                ('005930', '삼성전자',      'KOSPI',  5846278000, true),
-                ('005935', '삼성전자우',    'KOSPI',   822886000, true),
-                ('000660', 'SK하이닉스',    'KOSPI',   712702000, true),
-                ('006400', '삼성SDI',       'KOSPI',    68764000, true),
-                ('001234', '폐지된삼성',    'KOSPI',    10000000, false),
-                ('035720', '카카오',        'KOSPI',  4432000000, true),
-                ('000440', '중앙에너비스',  'KOSDAQ',    6227000, true)
-                """.trimIndent(),
-            )
-        }
     }
 
-    private val store by lazy { JdbcStockSearchStore(jdbc) }
+    @Autowired
+    private lateinit var store: JpaStockSearchStore
+
+    @Autowired
+    private lateinit var jdbc: JdbcTemplate
+
+    @BeforeEach
+    fun seed() {
+        jdbc.update(
+            """
+            INSERT INTO stock_master (code, name, market, shares_outstanding, is_active) VALUES
+            ('005930', '삼성전자',      'KOSPI',  5846278000, true),
+            ('005935', '삼성전자우',    'KOSPI',   822886000, true),
+            ('000660', 'SK하이닉스',    'KOSPI',   712702000, true),
+            ('006400', '삼성SDI',       'KOSPI',    68764000, true),
+            ('001234', '폐지된삼성',    'KOSPI',    10000000, false),
+            ('035720', '카카오',        'KOSPI',  4432000000, true),
+            ('000440', '중앙에너비스',  'KOSDAQ',    6227000, true)
+            """.trimIndent(),
+        )
+        jdbc.update(
+            """
+            INSERT INTO stock_master (code, name, market, shares_outstanding, is_active)
+            SELECT lpad((100000 + g)::text, 6, '0'), '가상종목' || g, 'KOSDAQ', g * 1000, true
+            FROM generate_series(1, 2600) g
+            """.trimIndent(),
+        )
+        jdbc.execute("ANALYZE stock_master")
+    }
 
     @Test
     fun `이름 일부로 찾는다`() {
@@ -138,6 +137,42 @@ class JdbcStockSearchStoreTest {
             ).joinToString("\n")
 
             assertTrue("idx_stock_master_active_code" in plan, "인덱스가 계획에 없다:\n$plan")
+        } finally {
+            jdbc.execute("SET enable_seqscan = on")
+        }
+    }
+
+    @Test
+    fun `실제 검색 쿼리 모양은 인덱스로 실행될 수 있다`() {
+        val namePlan = searchPlan(prefix = "삼성%", contains = "%삼성%")
+        val codePlan = searchPlan(prefix = "0059%", contains = "%0059%")
+
+        assertTrue("Seq Scan" !in namePlan, "이름 검색을 처리할 인덱스 경로가 없다:\n$namePlan")
+        assertTrue("Seq Scan" !in codePlan, "코드 검색을 처리할 인덱스 경로가 없다:\n$codePlan")
+        assertTrue("idx_stock_master_active_code" in codePlan, "코드 인덱스가 계획에 없다:\n$codePlan")
+    }
+
+    private fun searchPlan(prefix: String, contains: String): String {
+        jdbc.execute("SET enable_seqscan = off")
+        try {
+            return jdbc.queryForList(
+                """
+                EXPLAIN SELECT trim(BOTH FROM s.code), s.name, s.market
+                FROM stock_master s
+                WHERE s.is_active = true
+                  AND (s.code LIKE '$prefix' ESCAPE '!' OR s.name ILIKE '$contains' ESCAPE '!')
+                ORDER BY
+                    CASE
+                        WHEN s.code LIKE '$prefix' ESCAPE '!' THEN 0
+                        WHEN s.name ILIKE '$prefix' ESCAPE '!' THEN 1
+                        ELSE 2
+                    END,
+                    s.shares_outstanding DESC NULLS LAST,
+                    s.code
+                FETCH FIRST 10 ROWS ONLY
+                """.trimIndent(),
+                String::class.java,
+            ).joinToString("\n")
         } finally {
             jdbc.execute("SET enable_seqscan = on")
         }
