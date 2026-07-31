@@ -1,0 +1,4 @@
+CREATE TABLE IF NOT EXISTS watchlist_rev (
+    user_id BIGINT PRIMARY KEY REFERENCES users (id) ON DELETE CASCADE,
+    rev     BIGINT NOT NULL DEFAULT 0
+);
