@@ -12,6 +12,7 @@ import org.springframework.data.domain.PageRequest
 import org.springframework.data.domain.Sort
 import org.springframework.data.jpa.repository.JpaRepository
 import org.springframework.stereotype.Repository
+import org.springframework.transaction.annotation.Transactional
 import java.io.Serializable
 
 data class InvestorFlowId(
@@ -45,6 +46,7 @@ interface InvestorFlowJpaRepository : JpaRepository<InvestorFlowEntity, Investor
 }
 
 @Repository
+@Transactional(readOnly = true)
 class JpaInvestorFlowStore(
     private val flows: InvestorFlowJpaRepository,
 ) : InvestorFlowStore {

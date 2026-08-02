@@ -4,17 +4,20 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import org.springframework.data.domain.PageRequest
 import org.springframework.data.domain.Sort
 import org.springframework.data.jpa.domain.Specification
+import org.springframework.data.jpa.repository.JpaRepository
+import org.springframework.data.jpa.repository.JpaSpecificationExecutor
 import org.springframework.data.jpa.repository.Query
 import org.springframework.data.repository.query.Param
 import org.springframework.stereotype.Repository
+import org.springframework.transaction.annotation.Transactional
 
 interface StreamEventIdView {
     val eventId: String
 }
 
 interface StreamInboxJpaRepository :
-    org.springframework.data.jpa.repository.JpaRepository<StreamEventEntity, String>,
-    org.springframework.data.jpa.repository.JpaSpecificationExecutor<StreamEventEntity> {
+    JpaRepository<StreamEventEntity, String>,
+    JpaSpecificationExecutor<StreamEventEntity> {
     fun findByCodeAndEventIdGreaterThan(code: String, eventId: String, pageable: PageRequest): List<StreamEventIdView>
 
     fun findByCode(code: String, pageable: PageRequest): List<StreamEventIdView>
@@ -36,6 +39,7 @@ interface StreamInboxJpaRepository :
 }
 
 @Repository
+@Transactional(readOnly = true)
 class JpaStreamInbox(
     private val events: StreamInboxJpaRepository,
     private val mapper: ObjectMapper,

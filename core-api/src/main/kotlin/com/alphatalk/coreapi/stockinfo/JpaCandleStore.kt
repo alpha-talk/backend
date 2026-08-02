@@ -12,6 +12,7 @@ import org.springframework.data.domain.PageRequest
 import org.springframework.data.domain.Sort
 import org.springframework.data.jpa.repository.JpaRepository
 import org.springframework.stereotype.Repository
+import org.springframework.transaction.annotation.Transactional
 import java.io.Serializable
 
 data class StockInfoCandleId(
@@ -53,6 +54,7 @@ interface StockInfoCandleJpaRepository : JpaRepository<StockInfoCandleEntity, St
 }
 
 @Repository
+@Transactional(readOnly = true)
 class JpaCandleStore(
     private val candles: StockInfoCandleJpaRepository,
 ) : CandleStore {

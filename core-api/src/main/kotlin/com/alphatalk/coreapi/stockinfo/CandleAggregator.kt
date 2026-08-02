@@ -3,6 +3,7 @@ package com.alphatalk.coreapi.stockinfo
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
 import java.time.temporal.WeekFields
+import java.util.Locale
 
 enum class CandlePeriod(val token: String) {
     DAILY("D"),
@@ -53,10 +54,10 @@ object CandleAggregator {
             CandlePeriod.DAILY -> date
             CandlePeriod.WEEKLY -> {
                 val week = WeekFields.ISO
-                "%04d-W%02d".format(day.get(week.weekBasedYear()), day.get(week.weekOfWeekBasedYear()))
+                "%04d-W%02d".format(Locale.ROOT, day.get(week.weekBasedYear()), day.get(week.weekOfWeekBasedYear()))
             }
 
-            CandlePeriod.MONTHLY -> "%04d-%02d".format(day.year, day.monthValue)
+            CandlePeriod.MONTHLY -> "%04d-%02d".format(Locale.ROOT, day.year, day.monthValue)
         }
     }
 
