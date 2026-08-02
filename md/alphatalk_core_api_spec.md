@@ -150,11 +150,24 @@ ULID 사전순이 곧 시간순이라는 성질을 이용한 **양방향 커서*
 - `include=price` → Redis `price:{code}` 조회. 미스면 최신 일봉 종가에 `"delayed": true`를 붙인다.
 - `include=unread` → notification 모듈에 집계를 위임한다 (§6). 미지정 시 해당 필드를 생략해 응답을 가볍게 유지한다.
 
-**PUT /watchlist/{code}** → 201(신규)/200(기존). 한도 100개 초과 시 422. 없는 종목은 404.
+> 구현 현황: 목록·구독·해지와 아래 부수효과는 동작한다. `include`는 시세를 가진 stream 모듈(§5)과 미읽음을 가진 notification 모듈(§6)이 붙는 시점에 함께 연다.
 
-**DELETE /watchlist/{code}** → 204.
+**PUT /watchlist/{code}** → 201(신규)/200(기존). 새로 담을 종목이 없거나 상장폐지됐으면 404, 한도 100개를 넘기면 422, 6자리 숫자가 아닌 코드는 400이다. 이미 담긴 종목은 이후 상장폐지됐거나 한도를 채웠어도 200 — 현재 상태를 다시 요청하는 PUT의 멱등성을 유지한다.
 
-**부수효과(Redis 계약 §1.1)**: 변경 커밋 후 `PUBLISH watchlist:updated` `{ "userId": 123, "added": ["005930"], "removed": [], "ts": ... }` → 게이트웨이가 접속 세션의 서버 해소 구독과 **수요 카운트**를 조정한다.
+**DELETE /watchlist/{code}** → 204. 담은 적 없는 종목이어도 204다.
+
+**한도 검사는 사용자 단위로 직렬화한다.** 99개를 가진 사용자가 서로 다른 두 종목을 동시에 PUT하면, 두 요청 모두 "99개"를 읽고 통과해 101개가 된다. `(user_id, code)` 기본키는 같은 종목의 중복만 막을 뿐 서로 다른 종목끼리의 경쟁은 막지 못한다. 그래서 구독·해지 트랜잭션은 auth 모듈의 `UserAccountLock` 포트로 사용자 엔티티를 `PESSIMISTIC_WRITE` 잠근 뒤 상태 확인과 변경을 끝낸다. subscription은 `users` 테이블이나 auth의 JPA 엔티티를 직접 알지 않는다. 잠글 사용자가 이미 사라졌으면 유효하지 않은 인증 주체이므로 401을 반환한다. 수락된 요청은 멱등 재요청이라도 커밋 전에 사용자별 `watchlist_rev`를 1 올리고 변경 후 전체 스냅샷을 함께 돌려준다 — 잠금이 트랜잭션을 직렬화하므로 **rev 순서가 곧 커밋 순서**다.
+
+**부수효과 (Redis 계약 §1.1·§3)**: 관심목록의 진실은 core-api의 DB지만, 게이트웨이는 CONNECT 때 Redis Set `watchlist:{userId}`만 읽는다. DB 변경과 rev 증가는 서비스 트랜잭션에서 끝내고, **Redis는 트랜잭션과 잠금 밖(커밋 후)에서만 호출한다**(코딩 컨벤션 §6 — DB 트랜잭션 안에서 느린 외부 I/O 금지. Redis 지연이 DB 커넥션·잠금 점유로 전이되지 않는다). 커밋 후 동기화는 (rev, 전체 스냅샷, 이 요청의 변경)을 Lua 스크립트 하나로 원자 반영한다.
+
+1. 미러의 `watchlist:rev:{userId}`보다 새 rev일 때만 Set `watchlist:{userId}`를 스냅샷으로 통째 교체한다 — 오래된 동기화는 폐기되어 최신 상태를 과거로 덮지 못한다
+2. 같은 스크립트 안에서 미러 전이 diff에 이 요청의 변경을 합쳐 `PUBLISH watchlist:updated` `{ "userId": 123, "added": ["005930"], "removed": [], "ts": ... }`한다 — 반영과 발행이 원자적이고 스크립트는 Redis에서 직렬화되므로 **발행 순서도 rev 순서와 일치**한다. 폐기된 동기화는 발행도 생략한다(더 새로운 동기화가 그 상태 전이를 이미 발행했다)
+
+이미 접속한 세션은 발행된 diff를 멱등 적용해 구독과 **수요 카운트**를 조정하고, 발행 직후 재접속한 세션도 같은 상태의 Set을 해소한다.
+
+**동기화는 멱등 재요청에도 매번 반복한다.** 멱등 재요청도 rev를 올리므로 동기화가 폐기되지 않고, 미러가 이미 맞아도 이 요청의 diff를 재발행해 접속 중인 게이트웨이까지 복구한다. DB 커밋 뒤 동기화에서 실패하면 요청은 500을 반환하지만 DB 변경은 유지된다 — 클라는 같은 PUT/DELETE를 재요청한다. 최초 PUT이 500 뒤 재요청되면 DB에는 이미 행이 있으므로 재요청의 정상 응답은 200이다.
+
+미러가 통째로 사라져도(Redis 초기화 등) 동기화가 전체 스냅샷을 반영하므로 **그 사용자의 다음 요청 한 번으로 미러 전체가 복구된다**. 사용자 활동 없이 전 사용자를 일괄 재구축하는 경로는 여전히 없다.
 
 ---
 
@@ -312,12 +325,14 @@ ULID 사전순이 곧 시간순이라는 성질을 이용한 **양방향 커서*
 
 ```
 community ──(StreamEventAppender 포트)──► stream   # POST 이벤트 기록
-subscription ──(RedisPublisher)──► watchlist:updated
+subscription ──(WatchlistBroadcaster 포트)──► watchlist:{userId} 미러 + watchlist:updated
+subscription/stream ──(StockCatalog 포트)──► search   # 종목 존재 확인·이름 조회
 notification ──(읽기)──► stream(이벤트 조회) + subscription(관심목록)
 stream/stockinfo ──(읽기)──► Redis price:{code} / 워커 적재 테이블
 auth ◄── 전 모듈 (SecurityContext)
 ```
 
+- `stock_master`를 읽는 **JPA 매핑은 search 모듈이 단독 소유**한다. 관심목록도 스트림도 "이 종목이 실재하는가"를 물어야 하는데, 모듈마다 같은 테이블을 각자 매핑하면 매핑이 갈라진다. search가 `StockCatalog`(존재 확인·이름/시장 조회)를 노출하고 나머지는 이 포트만 쓴다. 검색 질의도 같은 엔티티 위의 JPQL(`ilike`·정렬 case 식)로 구현한다.
 - `stream_event` 테이블의 논리 소유자는 **stream 모듈**이다. community는 직접 INSERT하지 않고 노출된 `StreamEventAppender`를 호출한다(경계 테스트로 강제). worker-llm과 worker-batch(투자의견)는 별도 프로세스로 같은 테이블에 INSERT한다. 스키마는 `db-migrations` 모듈(Liquibase)이 단일 관리하고 외부 생산자는 `source_key` 멱등 계약을 지킨다.
 - 채널명·봉투는 `:contracts` 상수만 사용한다(문자열 하드코딩 금지).
 

@@ -1,7 +1,8 @@
-# Alpha Talk — Redis 계약 (`:contracts`) v0.7
+# Alpha Talk — Redis 계약 (`:contracts`) v0.8
 
 게이트웨이 · 워커(price/batch/ingest/llm) · 메인서버가 공유하는 Redis 키/채널/스트림 규약이다. 서버끼리는 코드로 의존하지 않고 이 계약으로만 통신하므로, 채널명·키·봉투 스키마·소유권은 이 문서가 서비스 간 단일 진실이다. 새 채널·키가 필요하면 코드보다 먼저 여기에 합의 내용을 반영한다. 클라이언트 쪽 계약은 별도 문서 몫이다 — 게이트웨이↔클라 STOMP는 WS API 명세, 메인서버↔클라 REST는 core-api 명세가 다룬다.
 
+> v0.8 (2026-07-31): `watchlist:rev:{userId}` 키 추가 — 메인서버 전용, 미러 동기화의 최신성 판정(rev)에 사용하며 게이트웨이는 읽지 않는다. 메인서버의 미러 교체와 `watchlist:updated` 발행은 하나의 Lua 스크립트에서 원자적으로 수행되어, 오래된 동기화는 폐기되고 발행 순서가 rev(커밋) 순서를 따른다.
 > v0.7 (2026-07-27): 증권사 투자의견 직접 발행 반영([KIS 워커 명세](alphatalk_kis_worker_spec.md) §3.3) — **batch-worker를 `stream:{code}` 공동 발행자로 추가**. DB에는 멱등 저장하고 같은 `eventId`로 Pub/Sub 통보를 재시도한다. 실시간 전달은 best-effort이며 REST가 복구를 담당한다. price·batch가 공유하는 KIS 계정의 합산 유량은 `rate:kis-rest:{keyId}`로 제한한다.
 > v0.6 (2026-07-26): 수집 측 텍스트 매칭 완전 제거 — 종목명 사전·매크로 키워드 매핑 코드를 걷어내고 `codes`는 소스가 아는 후보(네이버 쿼리·DART 등)만 싣는다. `macroHint`는 예약 필드로 유지하되 수집기가 더 이상 적재하지 않는다(소비 측은 원래 미사용).
 > v0.5 (2026-07-24): 전량 LLM 판정 전환 — `queue:ingest`의 `codes`를 `macroHint` 없이도 공란 허용(수집 측 종목 매칭 게이트 제거). 관련 종목 판정은 llm-worker LLM 전담([뉴스 워커 명세](alphatalk_news_worker_spec.md) §2.4). `digest` 엔트리만 `codes` 1개 필수 유지(§2.3).
@@ -47,6 +48,7 @@ Redis를 세 가지 용도로 쓴다. **이름이 비슷해도 메커니즘이 �
 - `{code}` = 종목코드(예: `005930`). **유저로 키하지 않는다** — 채널 수는 종목 수(~2,600)로 고정되고 유저 수와 무관하다.
 - 같은 종목을 N명이 봐도 게이트웨이는 채널을 **한 번만 구독**하고 N명에게 fan-out한다(중복 제거).
 - 유저별 채널을 만들면 채널이 폭증하므로 `watchlist:updated`만 **단일 전역 채널 + broadcast-and-filter**다. 발행 빈도가 낮아 전원 수신·필터로 충분하다.
+- 게이트웨이는 `watchlist:updated`의 diff를 멱등 적용한다. 이미 들어 있는 코드의 `added`와 들어 있지 않은 코드의 `removed`를 허용하며, 이런 중복 diff는 세션 구독이나 수요 refcount를 중복 변경하지 않는다.
 
 ### 1.2 메시지 스키마 (Pub/Sub payload)
 
@@ -141,6 +143,7 @@ ingest-worker 스케줄러(싱글턴)가 매일 18:00 KST에 적재하고 같은
 | `presence:{userId}` | Set(+멤버 TTL) | 접속 세션 집합(멀티디바이스) | 게이트웨이 | 게이트웨이 | 하트비트로 갱신 |
 | `cursor:{userId}:{code}` | String | 마지막 읽은 `eventId`(읽음 위치) | 메인서버(REST) | 메인서버 | 없음 |
 | `watchlist:{userId}` | Set | 관심목록 미러 — 게이트웨이 CONNECT 시 해소용 (진실은 메인서버 DB) | 메인서버 | 게이트웨이 | 없음 |
+| `watchlist:rev:{userId}` | String | 미러 최신성 판정 rev — 이보다 새 rev의 동기화만 미러를 교체·발행 (메인서버 전용) | 메인서버 | 메인서버 | 없음 |
 | `seen:ingest:{sourceId}` | String | 수집 중복 제거 마커 | ingest/llm-worker | ingest/llm-worker | 며칠 |
 | `lock:cluster:{code}` | String (`SET NX PX 3000`) | 뉴스 클러스터 판정 직렬화 락(뉴스 워커 명세 §3.3) | llm-worker | llm-worker | 3초 |
 | `rate:article-fetch:{host}` | String (`SET PX`) | robots.txt·원문 fetch의 호스트별 다음 요청 간격을 llm-worker 인스턴스 간 직렬화 | llm-worker | llm-worker | 요청 간격(기본 1초) |
@@ -167,6 +170,7 @@ ingest-worker 스케줄러(싱글턴)가 매일 18:00 KST에 적재하고 같은
 | `presence:{userId}` (자료구조) | — | — | — | — | — | **WRITE/READ** |
 | `cursor:{userId}:{code}` | — | — | — | — | **WRITE/READ** | — |
 | `watchlist:{userId}` (자료구조) | — | — | — | — | **WRITE** | **READ** |
+| `watchlist:rev:{userId}` (자료구조) | — | — | — | — | **WRITE/READ** | — |
 | `seen:ingest:{sourceId}` | — | — | WRITE | WRITE/READ | — | — |
 | `lock:cluster:{code}` | — | — | — | **WRITE/READ** | — | — |
 | `rate:article-fetch:{host}` | — | — | — | **WRITE/READ** | — | — |
