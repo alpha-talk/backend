@@ -49,9 +49,9 @@ interface PostStore {
 
     fun hasNewerThan(code: String, postId: String): Boolean
 
-    fun update(id: String, title: String, content: String, at: Instant)
+    fun updateIfActive(id: String, title: String, content: String, at: Instant): Boolean
 
-    fun softDelete(id: String, at: Instant)
+    fun softDeleteIfActive(id: String, at: Instant): Boolean
 
     fun incrementCommentCount(id: String): Int
 

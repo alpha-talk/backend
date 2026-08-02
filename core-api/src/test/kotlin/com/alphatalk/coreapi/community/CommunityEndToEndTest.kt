@@ -86,6 +86,7 @@ class CommunityEndToEndTest {
     @BeforeEach
     fun seed() {
         redisTemplate.connectionFactory!!.connection.use { it.serverCommands().flushDb() }
+        jdbc.update("DELETE FROM idempotency_record")
         jdbc.update("DELETE FROM report")
         jdbc.update("DELETE FROM post_like")
         jdbc.update("DELETE FROM comment")
@@ -230,6 +231,38 @@ class CommunityEndToEndTest {
         val replay = createPost(idempotencyKey = key)
 
         assertEquals(first.path("postId").asText(), replay.path("postId").asText())
+        assertEquals(1, jdbc.queryForObject("SELECT count(*) FROM post", Long::class.java))
+        assertEquals(
+            1,
+            jdbc.queryForObject("SELECT count(*) FROM idempotency_record", Long::class.java),
+        )
+    }
+
+    @Test
+    fun `같은 Idempotency-Key가 병렬로 겹쳐도 글은 하나고 응답은 같다`() {
+        val key = "01JA00000000000000000000AB"
+        val workers = 4
+        val pool = Executors.newFixedThreadPool(workers)
+        val postIds = try {
+            val ready = CyclicBarrier(workers)
+            (1..workers).map {
+                pool.submit<String> {
+                    ready.await(10, TimeUnit.SECONDS)
+                    val response = post(
+                        "/api/v1/rooms/005930/posts",
+                        """{"title":"병렬 멱등","content":"본문"}""",
+                        authorToken,
+                        mapOf("Idempotency-Key" to key),
+                    )
+                    assertEquals(201, response.statusCode.value(), response.body ?: "")
+                    json(response.body).path("postId").asText()
+                }
+            }.map { it.get(30, TimeUnit.SECONDS) }
+        } finally {
+            pool.shutdownNow()
+        }
+
+        assertEquals(1, postIds.distinct().size, "병렬 재시도가 서로 다른 글을 만들었다: $postIds")
         assertEquals(1, jdbc.queryForObject("SELECT count(*) FROM post", Long::class.java))
     }
 
@@ -390,6 +423,34 @@ class CommunityEndToEndTest {
         val detail = json(get("/api/v1/posts/$postId").body)
         assertEquals(0, detail.path("commentCount").asInt())
         assertEquals(0, detail.path("comments").path("items").size())
+    }
+
+    @Test
+    fun `댓글은 커서로 다음 페이지를 이어 읽는다`() {
+        val postId = createPost().path("postId").asText()
+        val commentIds = (1..3).map {
+            json(post("/api/v1/posts/$postId/comments", """{"content":"댓글 $it"}""", readerToken).body)
+                .path("commentId").asText()
+        }
+
+        val first = json(get("/api/v1/posts/$postId/comments?limit=2").body)
+        assertEquals(commentIds.take(2), first.path("items").map { it.path("commentId").asText() })
+        assertEquals(true, first.path("pageInfo").path("hasMoreAfter").asBoolean())
+
+        val next = json(get("/api/v1/posts/$postId/comments?limit=2&cursor=${commentIds[1]}").body)
+        assertEquals(listOf(commentIds[2]), next.path("items").map { it.path("commentId").asText() })
+        assertEquals(false, next.path("pageInfo").path("hasMoreAfter").asBoolean())
+        assertEquals(true, next.path("pageInfo").path("hasMoreBefore").asBoolean())
+    }
+
+    @Test
+    fun `삭제된 글에는 댓글도 수정도 공감도 붙지 않는다`() {
+        val postId = createPost().path("postId").asText()
+        exchange(HttpMethod.DELETE, "/api/v1/posts/$postId", null, authorToken)
+
+        assertEquals(404, post("/api/v1/posts/$postId/comments", """{"content":"늦은 댓글"}""", readerToken).statusCode.value())
+        assertEquals(404, exchange(HttpMethod.PATCH, "/api/v1/posts/$postId", """{"title":"늦은 수정"}""", authorToken).statusCode.value())
+        assertEquals(404, exchange(HttpMethod.PUT, "/api/v1/posts/$postId/like", null, readerToken).statusCode.value())
     }
 
     @Test

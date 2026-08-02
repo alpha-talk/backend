@@ -71,6 +71,27 @@ interface PostJpaRepository : JpaRepository<PostEntity, String> {
 
     @Transactional
     @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Query(
+        """
+        update PostEntity p
+        set p.title = :title, p.content = :content, p.updatedAt = :at
+        where p.id = :id and p.deletedAt is null
+        """,
+    )
+    fun updateIfActive(
+        @Param("id") id: String,
+        @Param("title") title: String,
+        @Param("content") content: String,
+        @Param("at") at: Instant,
+    ): Int
+
+    @Transactional
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Query("update PostEntity p set p.deletedAt = :at where p.id = :id and p.deletedAt is null")
+    fun softDeleteIfActive(@Param("id") id: String, @Param("at") at: Instant): Int
+
+    @Transactional
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
     @Query("update PostEntity p set p.commentCount = p.commentCount + 1 where p.id = :id and p.deletedAt is null")
     fun incrementCommentCount(@Param("id") id: String): Int
 
@@ -141,21 +162,11 @@ class JpaPostStore(
     override fun hasNewerThan(code: String, postId: String): Boolean =
         posts.existsByCodeAndDeletedAtIsNullAndIdGreaterThan(code, postId)
 
-    override fun update(id: String, title: String, content: String, at: Instant) {
-        posts.findById(id).orElse(null)?.let {
-            it.title = title
-            it.content = content
-            it.updatedAt = at
-            posts.save(it)
-        }
-    }
+    override fun updateIfActive(id: String, title: String, content: String, at: Instant): Boolean =
+        posts.updateIfActive(id, title, content, at) > 0
 
-    override fun softDelete(id: String, at: Instant) {
-        posts.findById(id).orElse(null)?.let {
-            it.deletedAt = at
-            posts.save(it)
-        }
-    }
+    override fun softDeleteIfActive(id: String, at: Instant): Boolean =
+        posts.softDeleteIfActive(id, at) > 0
 
     override fun incrementCommentCount(id: String): Int = posts.incrementCommentCount(id)
 

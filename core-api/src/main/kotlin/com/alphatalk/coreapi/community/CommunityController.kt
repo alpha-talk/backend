@@ -61,6 +61,14 @@ class CommunityController(
         @RequestHeader(name = IDEMPOTENCY_KEY, required = false) idempotencyKey: String?,
     ): CreateCommentResponse = community.createComment(CurrentUser.id(), postId, request, idempotencyKey)
 
+    @GetMapping("/posts/{postId}/comments")
+    fun comments(
+        @PathVariable postId: String,
+        @RequestParam(required = false) cursor: String?,
+        @RequestParam(required = false) direction: String?,
+        @RequestParam(required = false) limit: Int?,
+    ): CommentPage = community.comments(postId, cursor, direction, limit)
+
     @DeleteMapping("/comments/{commentId}")
     @ResponseStatus(HttpStatus.NO_CONTENT)
     fun deleteComment(@PathVariable commentId: String) {

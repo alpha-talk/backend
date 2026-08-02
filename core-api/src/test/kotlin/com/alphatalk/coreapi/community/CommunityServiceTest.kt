@@ -11,6 +11,7 @@ import com.alphatalk.coreapi.support.RateLimitDecision
 import com.alphatalk.coreapi.support.RateLimitExceededException
 import com.alphatalk.coreapi.support.RateLimiter
 import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import java.time.Duration
 import java.time.Instant
 import kotlin.test.Test
@@ -22,14 +23,15 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class CommunityServiceTest {
-    private val mapper = ObjectMapper()
+    private val mapper = jacksonObjectMapper()
 
-    private class RecordingCommand : CommunityCommand {
-        var createPostOutcome = CreatePostOutcome.CREATED
-        var createCommentOutcome = CreateCommentOutcome.CREATED
+    private class RecordingCommand(private val ledger: InMemoryLedger? = null) : CommunityCommand {
+        var createPostResult: CreatePostResult? = null
+        var createCommentResult: CreateCommentResult? = null
         var mutateOutcome = MutatePostOutcome.DONE
         var likeOutcome = LikeOutcome.CHANGED
         val calls = mutableListOf<String>()
+        private val commandMapper = jacksonObjectMapper()
 
         override fun createPost(
             userId: Long,
@@ -38,14 +40,27 @@ class CommunityServiceTest {
             content: String,
             quotedEventId: String?,
             postId: String,
-        ): CreatePostOutcome {
+            idempotencyKey: String?,
+        ): CreatePostResult {
             calls += "createPost:$code:$postId:$quotedEventId"
-            return createPostOutcome
+            createPostResult?.let { return it }
+            val response = CreatePostResponse(postId, postId)
+            idempotencyKey?.let {
+                ledger?.claim(userId, it, IdempotencyActions.POST_CREATE)
+                ledger?.complete(userId, it, commandMapper.writeValueAsString(response))
+            }
+            return CreatePostResult.Created(response)
         }
 
-        override fun createComment(userId: Long, postId: String, content: String, commentId: String): CreateCommentOutcome {
+        override fun createComment(
+            userId: Long,
+            postId: String,
+            content: String,
+            commentId: String,
+            idempotencyKey: String?,
+        ): CreateCommentResult {
             calls += "createComment:$postId:$commentId"
-            return createCommentOutcome
+            return createCommentResult ?: CreateCommentResult.Created(CreateCommentResponse(commentId))
         }
 
         override fun updatePost(userId: Long, postId: String, title: String?, content: String?): MutatePostOutcome {
@@ -85,6 +100,23 @@ class CommunityServiceTest {
         }
     }
 
+    private class InMemoryLedger : IdempotencyLedger {
+        val rows = mutableMapOf<String, IdempotencyRecord>()
+
+        override fun find(userId: Long, key: String): IdempotencyRecord? = rows["$userId:$key"]
+
+        override fun claim(userId: Long, key: String, action: String): Boolean {
+            if (rows.containsKey("$userId:$key")) return false
+            rows["$userId:$key"] = IdempotencyRecord(action, null)
+            return true
+        }
+
+        override fun complete(userId: Long, key: String, response: String) {
+            val id = "$userId:$key"
+            rows[id] = requireNotNull(rows[id]).copy(response = response)
+        }
+    }
+
     private class FakePostStore(
         private val rows: MutableMap<String, PostRowWithAuthor> = mutableMapOf(),
     ) : PostStore {
@@ -109,9 +141,9 @@ class CommunityServiceTest {
 
         override fun hasNewerThan(code: String, postId: String) = newer
 
-        override fun update(id: String, title: String, content: String, at: Instant) = throw UnsupportedOperationException()
+        override fun updateIfActive(id: String, title: String, content: String, at: Instant) = throw UnsupportedOperationException()
 
-        override fun softDelete(id: String, at: Instant) = throw UnsupportedOperationException()
+        override fun softDeleteIfActive(id: String, at: Instant) = throw UnsupportedOperationException()
 
         override fun incrementCommentCount(id: String) = 0
         override fun decrementCommentCount(id: String) = 0
@@ -122,11 +154,20 @@ class CommunityServiceTest {
     private class FakeCommentStore(
         private val pages: Map<String, List<CommentRowWithAuthor>> = emptyMap(),
     ) : CommentStore {
+        var lastQuery: CommentListQuery? = null
+        var newer = false
+
         override fun create(id: String, postId: String, authorId: Long, content: String) = throw UnsupportedOperationException()
         override fun find(id: String): CommentRecord? = null
-        override fun listFirstPage(postId: String, limit: Int) = pages[postId].orEmpty().take(limit)
-        override fun hasNewerThan(postId: String, commentId: String) = false
-        override fun softDelete(id: String, at: Instant) = throw UnsupportedOperationException()
+
+        override fun list(query: CommentListQuery): List<CommentRowWithAuthor> {
+            lastQuery = query
+            return pages[query.postId].orEmpty().take(query.limit)
+        }
+
+        override fun hasOlderThan(postId: String, commentId: String) = false
+        override fun hasNewerThan(postId: String, commentId: String) = newer
+        override fun softDeleteIfActive(id: String, at: Instant) = throw UnsupportedOperationException()
     }
 
     private class FakeLikeStore(private val liked: Set<Pair<String, Long>> = emptySet()) : LikeStore {
@@ -153,17 +194,6 @@ class CommunityServiceTest {
         override fun tryAcquire(action: String, key: String, limit: Int, window: Duration): RateLimitDecision {
             attempts += Triple(action, key, limit)
             return RateLimitDecision(allowed, retryAfterSeconds = 17)
-        }
-    }
-
-    private class InMemoryIdempotency : IdempotencyCache {
-        val rows = mutableMapOf<String, Any>()
-
-        override fun <T : Any> find(userId: Long, key: String, type: Class<T>): T? =
-            rows["$userId:$key"]?.let(type::cast)
-
-        override fun store(userId: Long, key: String, response: Any) {
-            rows.putIfAbsent("$userId:$key", response)
         }
     }
 
@@ -198,8 +228,8 @@ class CommunityServiceTest {
         stream: StreamStore = FakeStreamStore(),
         ids: CommunityIdGenerator = SequenceIds(POST_ID, COMMENT_ID),
         rateLimiter: RateLimiter = FakeRateLimiter(),
-        idempotency: IdempotencyCache = InMemoryIdempotency(),
-    ) = CommunityService(command, posts, comments, likes, stream, ids, rateLimiter, idempotency)
+        ledger: IdempotencyLedger = InMemoryLedger(),
+    ) = CommunityService(command, posts, comments, likes, stream, ids, rateLimiter, ledger, mapper)
 
     @Test
     fun `글을 만들면 postId와 eventId가 같은 ULID다`() {
@@ -232,13 +262,15 @@ class CommunityServiceTest {
     }
 
     @Test
-    fun `같은 Idempotency-Key 재요청은 처음 응답을 재반환하고 다시 실행하지 않는다`() {
-        val command = RecordingCommand()
-        val idempotency = InMemoryIdempotency()
+    fun `기록된 Idempotency-Key 재요청은 원장 응답을 재생하고 커맨드도 유량도 건드리지 않는다`() {
+        val ledger = InMemoryLedger()
+        val command = RecordingCommand(ledger)
+        val limiter = FakeRateLimiter()
         val target = service(
             command = command,
             ids = SequenceIds(POST_ID, "01JA000000000000000000000B"),
-            idempotency = idempotency,
+            rateLimiter = limiter,
+            ledger = ledger,
         )
 
         val first = target.createPost(1, "005930", CreatePostRequest("제목", "본문"), IDEM_KEY)
@@ -246,6 +278,32 @@ class CommunityServiceTest {
 
         assertEquals(first, replay)
         assertEquals(1, command.calls.size)
+        assertEquals(1, limiter.attempts.size, "재생인데 유량을 소비했다")
+    }
+
+    @Test
+    fun `같은 키가 다른 요청 종류에 쓰이면 409다`() {
+        val ledger = InMemoryLedger().apply {
+            claim(1, IDEM_KEY, IdempotencyActions.COMMENT_CREATE)
+            complete(1, IDEM_KEY, """{"commentId":"01JA0000000000000000000002"}""")
+        }
+
+        val e = assertFailsWith<ApiException> {
+            service(ledger = ledger).createPost(1, "005930", CreatePostRequest("제목", "본문"), IDEM_KEY)
+        }
+
+        assertEquals(ErrorCode.CONFLICT, e.code)
+    }
+
+    @Test
+    fun `커맨드가 원장 재생을 돌려주면 그 응답을 그대로 준다`() {
+        val command = RecordingCommand().apply {
+            createPostResult = CreatePostResult.Replayed("""{"postId":"$POST_ID","eventId":"$POST_ID"}""")
+        }
+
+        val response = service(command = command).createPost(1, "005930", CreatePostRequest("제목", "본문"), IDEM_KEY)
+
+        assertEquals(POST_ID, response.postId)
     }
 
     @Test
@@ -259,7 +317,7 @@ class CommunityServiceTest {
 
     @Test
     fun `없는 방에 글을 쓰면 404고 인용이 깨지면 400이다`() {
-        val unknownStock = RecordingCommand().apply { createPostOutcome = CreatePostOutcome.UNKNOWN_STOCK }
+        val unknownStock = RecordingCommand().apply { createPostResult = CreatePostResult.UnknownStock }
         assertEquals(
             ErrorCode.NOT_FOUND,
             assertFailsWith<ApiException> {
@@ -267,7 +325,7 @@ class CommunityServiceTest {
             }.code,
         )
 
-        val badQuote = RecordingCommand().apply { createPostOutcome = CreatePostOutcome.QUOTED_NOT_FOUND }
+        val badQuote = RecordingCommand().apply { createPostResult = CreatePostResult.QuotedNotFound }
         val e = assertFailsWith<ApiException> {
             service(command = badQuote)
                 .createPost(1, "005930", CreatePostRequest("제목", "본문", quotedEventId = QUOTED_ID), null)
@@ -329,6 +387,32 @@ class CommunityServiceTest {
         val e = assertFailsWith<ApiException> { service().postDetail(1, POST_ID) }
 
         assertEquals(ErrorCode.NOT_FOUND, e.code)
+    }
+
+    @Test
+    fun `댓글 목록의 기본 방향은 처음부터 오름차순이다`() {
+        val posts = FakePostStore().apply { put(post()) }
+        val comments = FakeCommentStore()
+
+        service(posts = posts, comments = comments).comments(POST_ID, null, null, null)
+
+        assertEquals(CommentListQuery(POST_ID, null, ascending = true, limit = 50), comments.lastQuery)
+    }
+
+    @Test
+    fun `댓글 목록은 커서와 방향을 검증하고 없는 글은 404다`() {
+        val posts = FakePostStore().apply { put(post()) }
+
+        assertEquals(
+            ErrorCode.VALIDATION_FAILED,
+            assertFailsWith<ApiException> {
+                service(posts = posts).comments(POST_ID, "bad-cursor", null, null)
+            }.code,
+        )
+        assertEquals(
+            ErrorCode.NOT_FOUND,
+            assertFailsWith<ApiException> { service().comments(POST_ID, null, null, null) }.code,
+        )
     }
 
     @Test
