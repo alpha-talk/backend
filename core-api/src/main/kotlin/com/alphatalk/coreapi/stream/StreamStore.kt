@@ -4,4 +4,5 @@ interface StreamStore {
     fun find(query: StreamQuery): List<StreamItem>
     fun hasOlderThan(code: String, eventId: String, types: List<StreamEventType>): Boolean
     fun hasNewerThan(code: String, eventId: String, types: List<StreamEventType>): Boolean
+    fun findInRoom(code: String, eventId: String): StreamItem?
 }
