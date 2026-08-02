@@ -41,3 +41,10 @@ databaseChangeLog:
         - sqlFile:
             path: sql/0006_community.sql
             relativeToChangelogFile: true
+  - changeSet:
+      id: 0007-idempotency
+      author: core-api
+      changes:
+        - sqlFile:
+            path: sql/0007_idempotency.sql
+            relativeToChangelogFile: true
