@@ -199,7 +199,7 @@ class TransactionalCommunityCommand(
     override fun updatePost(userId: Long, postId: String, title: String?, content: String?): MutatePostOutcome {
         val post = posts.find(postId)?.takeIf { it.deletedAt == null } ?: return MutatePostOutcome.NOT_FOUND
         if (post.authorId != userId) return MutatePostOutcome.FORBIDDEN
-        val updated = posts.updateIfActive(postId, title ?: post.title, content ?: post.content, clock.instant())
+        val updated = posts.updateIfActive(postId, title, content, clock.instant())
         return if (updated) MutatePostOutcome.DONE else MutatePostOutcome.NOT_FOUND
     }
 

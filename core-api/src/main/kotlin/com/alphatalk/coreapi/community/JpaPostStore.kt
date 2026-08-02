@@ -74,14 +74,14 @@ interface PostJpaRepository : JpaRepository<PostEntity, String> {
     @Query(
         """
         update PostEntity p
-        set p.title = :title, p.content = :content, p.updatedAt = :at
+        set p.title = coalesce(:title, p.title), p.content = coalesce(:content, p.content), p.updatedAt = :at
         where p.id = :id and p.deletedAt is null
         """,
     )
     fun updateIfActive(
         @Param("id") id: String,
-        @Param("title") title: String,
-        @Param("content") content: String,
+        @Param("title") title: String?,
+        @Param("content") content: String?,
         @Param("at") at: Instant,
     ): Int
 
@@ -162,7 +162,7 @@ class JpaPostStore(
     override fun hasNewerThan(code: String, postId: String): Boolean =
         posts.existsByCodeAndDeletedAtIsNullAndIdGreaterThan(code, postId)
 
-    override fun updateIfActive(id: String, title: String, content: String, at: Instant): Boolean =
+    override fun updateIfActive(id: String, title: String?, content: String?, at: Instant): Boolean =
         posts.updateIfActive(id, title, content, at) > 0
 
     override fun softDeleteIfActive(id: String, at: Instant): Boolean =
