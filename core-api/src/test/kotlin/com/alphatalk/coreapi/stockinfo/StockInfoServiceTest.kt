@@ -121,8 +121,8 @@ class StockInfoServiceTest {
         val rows = listOf(
             FinancialRecord(2026, "11013", "CFS", 79_000_000_000_000, null, null, null, null, null, Instant.parse("2026-05-15T00:00:00Z")),
             FinancialRecord(2025, "11011", "CFS", 302_000_000_000_000, 35_000_000_000_000, 28_000_000_000_000, null, null, null, Instant.parse("2026-04-01T00:00:00Z")),
-            FinancialRecord(2025, "11014", "CFS", 76_000_000_000_000, null, null, null, null, null, null),
-            FinancialRecord(2024, "11011", "CFS", 280_000_000_000_000, null, null, null, null, null, null),
+            FinancialRecord(2025, "11014", "CFS", 76_000_000_000_000, null, null, null, null, null, Instant.parse("2025-10-30T00:00:00Z")),
+            FinancialRecord(2024, "11011", "CFS", 280_000_000_000_000, null, null, null, null, null, Instant.parse("2025-04-01T00:00:00Z")),
         )
 
         val financials = service(financials = FakeFinancialsStore(rows)).financials("005930", 3)
