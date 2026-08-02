@@ -69,16 +69,15 @@ class NotificationServiceTest {
         override fun find(userId: Long, codes: Collection<String>): Map<String, String> =
             codes.mapNotNull { code -> rows[userId to code]?.let { code to it } }.toMap()
 
-        override fun advance(userId: Long, code: String, eventId: String): Boolean {
+        override fun advance(userId: Long, code: String, eventId: String): String {
             val current = rows[userId to code]
-            if (current != null && current >= eventId) return false
+            if (current != null && current >= eventId) return current
             rows[userId to code] = eventId
-            return true
+            return eventId
         }
 
-        override fun advanceAll(userId: Long, cursors: Map<String, String>) {
-            cursors.forEach { (code, eventId) -> advance(userId, code, eventId) }
-        }
+        override fun advanceAll(userId: Long, cursors: Map<String, String>): Map<String, String> =
+            cursors.entries.associate { (code, eventId) -> code to advance(userId, code, eventId) }
     }
 
     private class FakeCursorCache(
@@ -238,6 +237,17 @@ class NotificationServiceTest {
         assertEquals("01J9Z800000000000000000005", cursorStore.rows[1L to "005930"])
         assertEquals("01J9Z800000000000000000005", cursorCache.rows[1L to "005930"])
         assertNull(badgeCache.rows[1])
+    }
+
+    @Test
+    fun `역행 요청이 와도 캐시에는 DB의 최종 커서를 기록한다`() {
+        val cursorStore = FakeCursorStore(initial = mapOf((1L to "005930") to "01J9Z800000000000000000007"))
+        val cursorCache = FakeCursorCache()
+
+        service(cursorStore = cursorStore, cursorCache = cursorCache)
+            .advanceCursor(1, "005930", "01J9Z800000000000000000002")
+
+        assertEquals("01J9Z800000000000000000007", cursorCache.rows[1L to "005930"])
     }
 
     @Test
