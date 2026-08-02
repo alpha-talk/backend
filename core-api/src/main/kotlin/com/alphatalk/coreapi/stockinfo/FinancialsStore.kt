@@ -12,7 +12,7 @@ data class FinancialRecord(
     val assets: Long?,
     val liabilities: Long?,
     val equity: Long?,
-    val disclosedAt: Instant?,
+    val disclosedAt: Instant,
 )
 
 interface FinancialsStore {

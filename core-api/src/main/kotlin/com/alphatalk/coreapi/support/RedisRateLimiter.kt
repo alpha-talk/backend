@@ -1,5 +1,6 @@
 package com.alphatalk.coreapi.support
 
+import com.alphatalk.contracts.Keys
 import org.slf4j.LoggerFactory
 import org.springframework.data.redis.core.StringRedisTemplate
 import org.springframework.data.redis.core.script.DefaultRedisScript
@@ -20,7 +21,7 @@ class RedisRateLimiter(
         require(windowSeconds > 0) { "window must be at least a second" }
         val nowSeconds = clock.instant().epochSecond
         val windowIndex = nowSeconds / windowSeconds
-        val windowKey = "rl:$action:$key:$windowIndex"
+        val windowKey = Keys.rateLimitWindow(action, key, windowIndex)
         val count = runCatching {
             redis.execute(INCR_WITH_TTL, listOf(windowKey), windowSeconds.toString())
         }.getOrElse {

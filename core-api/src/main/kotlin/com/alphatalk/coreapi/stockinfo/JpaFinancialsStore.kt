@@ -51,8 +51,8 @@ class FinancialSummaryEntity(
     val liabilities: Long? = null,
     @Column(name = "equity")
     val equity: Long? = null,
-    @Column(name = "disclosed_at")
-    val disclosedAt: Instant? = null,
+    @Column(name = "disclosed_at", nullable = false)
+    val disclosedAt: Instant = Instant.EPOCH,
 )
 
 interface FinancialSummaryJpaRepository : JpaRepository<FinancialSummaryEntity, FinancialSummaryId> {
