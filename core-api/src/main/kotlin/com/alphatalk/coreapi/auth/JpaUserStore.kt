@@ -32,10 +32,16 @@ class UserEntity(
     var createdAt: Instant? = null,
 )
 
+interface UserNicknameView {
+    val id: Long
+    val nickname: String
+}
+
 interface UserJpaRepository : JpaRepository<UserEntity, Long> {
     fun findByEmail(email: String): UserEntity?
     fun existsByEmail(email: String): Boolean
     fun existsByNickname(nickname: String): Boolean
+    fun findByIdIn(ids: Collection<Long>): List<UserNicknameView>
 
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("select u from UserEntity u where u.id = :userId")
@@ -70,6 +76,11 @@ class JpaUserStore(
 
     override fun existsByNickname(nickname: String): Boolean =
         users.existsByNickname(nickname)
+
+    override fun nicknames(ids: Collection<Long>): Map<Long, String> {
+        if (ids.isEmpty()) return emptyMap()
+        return users.findByIdIn(ids).associate { it.id to it.nickname }
+    }
 
     private fun UserEntity.toRecord() = UserRecord(
         id = requireNotNull(id),
