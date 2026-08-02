@@ -7,6 +7,7 @@ import com.alphatalk.coreapi.support.ApiException
 import com.alphatalk.coreapi.support.ErrorCode
 import com.alphatalk.coreapi.support.RateLimitExceededException
 import com.alphatalk.coreapi.support.RateLimiter
+import com.fasterxml.jackson.databind.ObjectMapper
 import org.springframework.stereotype.Service
 import java.time.Duration
 
@@ -19,47 +20,49 @@ class CommunityService(
     private val stream: StreamStore,
     private val ids: CommunityIdGenerator,
     private val rateLimiter: RateLimiter,
-    private val idempotency: IdempotencyCache,
+    private val ledger: IdempotencyLedger,
+    private val mapper: ObjectMapper,
 ) {
     fun createPost(userId: Long, rawCode: String, request: CreatePostRequest, idempotencyKey: String?): CreatePostResponse {
         val code = validCode(rawCode)
         val quotedEventId = request.quotedEventId?.let(::validUlid)
         val key = idempotencyKey?.let(::validIdempotencyKey)
-        key?.let { idempotency.find(userId, it, CreatePostResponse::class.java) }?.let { return it }
+        key?.let { replayIfRecorded(userId, it, IdempotencyActions.POST_CREATE, CreatePostResponse::class.java) }
+            ?.let { return it }
         checkRate(POST_ACTION, userId, POST_LIMIT_PER_MINUTE)
         val postId = ids.next()
-        val outcome = command.createPost(userId, code, request.title, request.content, quotedEventId, postId)
-        val response = when (outcome) {
-            CreatePostOutcome.CREATED -> CreatePostResponse(postId = postId, eventId = postId)
-            CreatePostOutcome.UNKNOWN_STOCK ->
+        return when (val result = command.createPost(userId, code, request.title, request.content, quotedEventId, postId, key)) {
+            is CreatePostResult.Created -> result.response
+            is CreatePostResult.Replayed -> parse(result.responseJson, CreatePostResponse::class.java)
+            CreatePostResult.UnknownStock ->
                 throw ApiException(ErrorCode.NOT_FOUND, "존재하지 않는 종목입니다", mapOf("code" to code))
 
-            CreatePostOutcome.QUOTED_NOT_FOUND ->
+            CreatePostResult.QuotedNotFound ->
                 throw ApiException(
                     ErrorCode.VALIDATION_FAILED,
                     "인용한 이벤트가 이 방에 없습니다",
                     mapOf("field" to "quotedEventId"),
                 )
 
-            CreatePostOutcome.AUTHOR_MISSING -> throw unauthorized()
+            CreatePostResult.AuthorMissing -> throw unauthorized()
+            CreatePostResult.KeyActionMismatch -> throw keyActionMismatch()
         }
-        key?.let { idempotency.store(userId, it, response) }
-        return response
     }
 
     fun createComment(userId: Long, rawPostId: String, request: CreateCommentRequest, idempotencyKey: String?): CreateCommentResponse {
         val postId = validUlid(rawPostId)
         val key = idempotencyKey?.let(::validIdempotencyKey)
-        key?.let { idempotency.find(userId, it, CreateCommentResponse::class.java) }?.let { return it }
+        key?.let { replayIfRecorded(userId, it, IdempotencyActions.COMMENT_CREATE, CreateCommentResponse::class.java) }
+            ?.let { return it }
         checkRate(COMMENT_ACTION, userId, COMMENT_LIMIT_PER_MINUTE)
         val commentId = ids.next()
-        val response = when (command.createComment(userId, postId, request.content, commentId)) {
-            CreateCommentOutcome.CREATED -> CreateCommentResponse(commentId)
-            CreateCommentOutcome.POST_NOT_FOUND -> throw postNotFound(postId)
-            CreateCommentOutcome.AUTHOR_MISSING -> throw unauthorized()
+        return when (val result = command.createComment(userId, postId, request.content, commentId, key)) {
+            is CreateCommentResult.Created -> result.response
+            is CreateCommentResult.Replayed -> parse(result.responseJson, CreateCommentResponse::class.java)
+            CreateCommentResult.PostNotFound -> throw postNotFound(postId)
+            CreateCommentResult.AuthorMissing -> throw unauthorized()
+            CreateCommentResult.KeyActionMismatch -> throw keyActionMismatch()
         }
-        key?.let { idempotency.store(userId, it, response) }
-        return response
     }
 
     fun postDetail(userId: Long, rawPostId: String): PostDetailView {
@@ -67,25 +70,7 @@ class CommunityService(
         val row = posts.findWithAuthor(postId) ?: throw postNotFound(postId)
         val post = row.post
         val deleted = post.deletedAt != null
-        val commentRows = comments.listFirstPage(postId, COMMENT_PAGE_SIZE)
-        val commentViews = commentRows.map {
-            CommentView(
-                commentId = it.comment.id,
-                author = AuthorView(it.comment.authorId, it.authorNickname),
-                content = it.comment.content,
-                createdAt = it.comment.createdAt.toEpochMilli(),
-            )
-        }
-        val commentPage = CommentPage(
-            items = commentViews,
-            pageInfo = PageInfo(
-                oldest = commentViews.firstOrNull()?.commentId,
-                newest = commentViews.lastOrNull()?.commentId,
-                hasMoreBefore = false,
-                hasMoreAfter = commentViews.lastOrNull()
-                    ?.let { comments.hasNewerThan(postId, it.commentId) } == true,
-            ),
-        )
+        val commentPage = commentPage(postId, cursor = null, direction = null, limit = COMMENT_PAGE_SIZE)
         val quoted = if (deleted) {
             null
         } else {
@@ -107,6 +92,45 @@ class CommunityService(
             createdAt = post.createdAt.toEpochMilli(),
             updatedAt = post.updatedAt?.toEpochMilli(),
             deleted = deleted,
+        )
+    }
+
+    fun comments(rawPostId: String, cursor: String?, direction: String?, limit: Int?): CommentPage {
+        val postId = validUlid(rawPostId)
+        if (posts.find(postId) == null) throw postNotFound(postId)
+        return commentPage(
+            postId,
+            cursor = cursor?.trim().orEmpty().ifEmpty { null }?.let(::validUlid),
+            direction = direction,
+            limit = validLimit(limit),
+        )
+    }
+
+    private fun commentPage(postId: String, cursor: String?, direction: String?, limit: Int): CommentPage {
+        val ascending = validCommentDirection(direction) == CursorDirection.AFTER
+        val rows = comments.list(CommentListQuery(postId, cursor, ascending, limit))
+        val items = rows.map {
+            CommentView(
+                commentId = it.comment.id,
+                author = AuthorView(it.comment.authorId, it.authorNickname),
+                content = it.comment.content,
+                createdAt = it.comment.createdAt.toEpochMilli(),
+            )
+        }
+        if (items.isEmpty()) {
+            return CommentPage(items, PageInfo(oldest = null, newest = null, hasMoreBefore = false, hasMoreAfter = false))
+        }
+        val commentIds = items.map(CommentView::commentId)
+        val oldest = commentIds.min()
+        val newest = commentIds.max()
+        return CommentPage(
+            items,
+            PageInfo(
+                oldest = oldest,
+                newest = newest,
+                hasMoreBefore = comments.hasOlderThan(postId, oldest),
+                hasMoreAfter = comments.hasNewerThan(postId, newest),
+            ),
         )
     }
 
@@ -224,6 +248,17 @@ class CommunityService(
         return CreateReportResponse(reportId)
     }
 
+    private fun <T : Any> replayIfRecorded(userId: Long, key: String, action: String, type: Class<T>): T? {
+        val record = ledger.find(userId, key) ?: return null
+        if (record.action != action) throw keyActionMismatch()
+        return record.response?.let { parse(it, type) }
+    }
+
+    private fun <T : Any> parse(json: String, type: Class<T>): T = mapper.readValue(json, type)
+
+    private fun keyActionMismatch() =
+        ApiException(ErrorCode.CONFLICT, "Idempotency-Key가 다른 요청에 이미 사용되었습니다", mapOf("field" to "Idempotency-Key"))
+
     private fun checkRate(action: String, userId: Long, limit: Int) {
         val decision = rateLimiter.tryAcquire(action, userId.toString(), limit, Duration.ofMinutes(1))
         if (!decision.allowed) throw RateLimitExceededException(action, decision.retryAfterSeconds)
@@ -266,6 +301,17 @@ class CommunityService(
     private fun validDirection(direction: String?): CursorDirection {
         val trimmed = direction?.trim().orEmpty()
         if (trimmed.isEmpty()) return CursorDirection.BEFORE
+        return CursorDirection.fromToken(trimmed)
+            ?: throw ApiException(
+                ErrorCode.VALIDATION_FAILED,
+                "direction은 before 또는 after여야 합니다",
+                mapOf("field" to "direction"),
+            )
+    }
+
+    private fun validCommentDirection(direction: String?): CursorDirection {
+        val trimmed = direction?.trim().orEmpty()
+        if (trimmed.isEmpty()) return CursorDirection.AFTER
         return CursorDirection.fromToken(trimmed)
             ?: throw ApiException(
                 ErrorCode.VALIDATION_FAILED,
