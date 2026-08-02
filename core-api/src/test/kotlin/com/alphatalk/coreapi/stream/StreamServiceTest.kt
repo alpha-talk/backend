@@ -33,6 +33,8 @@ class StreamServiceTest {
             newerAsked = true
             return false
         }
+
+        override fun findInRoom(code: String, eventId: String): StreamItem? = null
     }
 
     private class StubQuoteStore(

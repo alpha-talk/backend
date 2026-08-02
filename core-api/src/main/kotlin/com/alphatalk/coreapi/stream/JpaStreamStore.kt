@@ -66,6 +66,11 @@ class JpaStreamStore(
     override fun hasNewerThan(code: String, eventId: String, types: List<StreamEventType>): Boolean =
         events.exists(inRoom(code).and(ofTypes(types)).and(newerThan(eventId)))
 
+    override fun findInRoom(code: String, eventId: String): StreamItem? =
+        events.findById(eventId).orElse(null)
+            ?.takeIf { it.code.trim() == code }
+            ?.let(::toItem)
+
     private fun inRoom(code: String) = Specification<StreamEventEntity> { root, _, builder ->
         builder.equal(root.get<String>("code"), code)
     }

@@ -41,6 +41,7 @@ dependencies {
     implementation("com.fasterxml.jackson.module:jackson-module-kotlin")
     implementation("org.jetbrains.kotlin:kotlin-reflect")
     implementation(libs.spring.modulith.core)
+    implementation(libs.ulid.creator)
     runtimeOnly("org.postgresql:postgresql")
 
     testImplementation(kotlin("test"))
