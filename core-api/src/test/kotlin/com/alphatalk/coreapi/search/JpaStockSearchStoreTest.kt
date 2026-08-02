@@ -160,12 +160,23 @@ class JpaStockSearchStoreTest {
 
     @Test
     fun `실제 검색 쿼리 모양은 인덱스로 실행될 수 있다`() {
+        jdbc.update(
+            """
+            INSERT INTO valuation_daily (code, date, per, pbr, eps, bps, market_cap)
+            SELECT code, '20260707', NULL, NULL, NULL, NULL, COALESCE(shares_outstanding, 0) * 70000
+            FROM stock_master
+            """.trimIndent(),
+        )
+        jdbc.execute("ANALYZE valuation_daily")
+
         val namePlan = searchPlan(prefix = "삼성%", contains = "%삼성%")
         val codePlan = searchPlan(prefix = "0059%", contains = "%0059%")
 
         assertTrue("Seq Scan" !in namePlan, "이름 검색을 처리할 인덱스 경로가 없다:\n$namePlan")
         assertTrue("Seq Scan" !in codePlan, "코드 검색을 처리할 인덱스 경로가 없다:\n$codePlan")
         assertTrue("idx_stock_master_active_code" in codePlan, "코드 인덱스가 계획에 없다:\n$codePlan")
+        assertTrue("valuation_daily_pkey" in namePlan, "최신 시총 조회가 PK 인덱스를 안 탄다:\n$namePlan")
+        assertTrue("valuation_daily_pkey" in codePlan, "최신 시총 조회가 PK 인덱스를 안 탄다:\n$codePlan")
     }
 
     private fun searchPlan(prefix: String, contains: String): String {
@@ -183,6 +194,9 @@ class JpaStockSearchStoreTest {
                         WHEN s.name ILIKE '$prefix' ESCAPE '!' THEN 1
                         ELSE 2
                     END,
+                    (SELECT v.market_cap FROM valuation_daily v
+                     WHERE v.code = s.code
+                       AND v.date = (SELECT max(v2.date) FROM valuation_daily v2 WHERE v2.code = s.code)) DESC NULLS LAST,
                     s.shares_outstanding DESC NULLS LAST,
                     s.code
                 FETCH FIRST 10 ROWS ONLY
