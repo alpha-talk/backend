@@ -230,13 +230,16 @@ ULID 사전순이 곧 시간순이라는 성질을 이용한 **양방향 커서*
 
 **GET /notifications/badge** → 200 `{ "total": 27, "byCode": { "005930": 12, "000660": 15 } }`
 
-- 관심 종목마다 `count(event_id > cursor)`를 센다. 종목당 상한 99로 캡(`LIMIT 100` 카운트)해 비용을 고정한다. 결과는 10초 Redis 캐시.
+- 관심 종목마다 `count(event_id > cursor)`를 센다. 종목당 상한 99로 캡(`LIMIT 100` 카운트)해 비용을 고정한다. 결과는 10초 Redis 캐시(`badge:{userId}` — 메인서버 전용 키, Redis 계약 §3 주석). 커서 전진·모두 읽음 시 캐시를 지워 읽음 처리 직후의 배지가 캐시 신선도에 묶이지 않게 한다. 미읽음이 0인 종목은 `byCode`에서 생략한다.
+- 커서가 없는 종목(구독 직후 등)은 전부 미읽음으로 센다. 커서 조회는 Redis가 fast path고, 미스·장애 시 DB `read_cursor` 미러에서 읽어 Redis에 되채운다(기획안 §5.4).
 
 **GET /notifications?types=&cursor=&limit=30** → 스트림과 동일한 item 형태에 `code`별 혼합, `eventId` 내림차순. 항목 클릭 시 클라는 `/rooms/{code}` 화면에서 해당 `eventId`로 점프한다.
 
+- 응답 봉투는 §1.4 공통 `pageInfo`와 동일하다. `limit` 기본 30·최대 100. 과거 페이지는 `cursor`(내림차순 `before` 의미)로 넘긴다.
+
 **PUT /rooms/{code}/cursor** — req `{ "lastEventId": "01J9Z8..." }` → 204
 
-- 현재 커서보다 **작은 값(역행)은 무시**한다. Redis SET + DB upsert(write-through). 방 열람 중 주기적/이탈 시 호출한다.
+- 현재 커서보다 **작은 값(역행)은 무시**한다. DB upsert 후 Redis SET(write-through — DB가 진실, Redis는 fast path). 방 열람 중 주기적/이탈 시 호출한다. `lastEventId`는 ULID 형식을 검증하고, 없는 종목은 404.
 
 **POST /notifications/read-all** → 204 — 관심 종목 각각의 커서를 해당 종목 최신 `eventId`로 옮긴다.
 
@@ -268,6 +271,12 @@ ULID 사전순이 곧 시간순이라는 성질을 이용한 **양방향 커서*
 
 **더블라이트 순서 (ADR A6)** — 한 트랜잭션: ① `post` INSERT ② `stream_event`(type=POST, `event_id`=postId 재사용) INSERT → 커밋 → ③ `@TransactionalEventListener(AFTER_COMMIT)`로 `PUBLISH post:{code}` (봉투는 Redis 계약 §1.2). 발행에 실패해도 무시한다 — 클라가 REST 복구로 보강한다(§1.4). `quotedEventId`는 같은 방의 실존 이벤트인지 검증한다.
 
+- 검증: `title` 1~100자, `content` 1~2000자, 댓글 `content` 1~1000자, 신고 `detail` 500자 이하.
+- `stream_event`의 POST payload는 §5 예시 형태(`postId`·`kind`·`author`·`preview`(본문 100자)·`likeCount`·`commentCount`)로 **작성 시점 스냅샷**을 저장한다. 이후 공감·댓글 수 변동은 payload에 재반영하지 않는다 — 최신 수치는 글 상세/목록 REST가 진실이다.
+- 댓글 발행 봉투: `eventId`=댓글 ULID, `data.kind="comment"`, `data.postId`=댓글 자신의 ULID, `data.parentId`=부모 글 ULID (WS 명세 §4.4의 `parentId` 해석 — 글은 `parentId: null`).
+- 방 글 목록(`GET /rooms/{code}/posts`)은 §1.4 커서 규약(`cursor`·`direction`·`limit` 기본 50)을 따르고 item은 `{ postId, code, author, title, preview, likeCount, commentCount, createdAt }`이다. 소프트 삭제된 글은 목록에서 제외한다(삭제 흔적 표시는 스트림의 `deleted` 마킹 몫).
+- PATCH 요청은 `{ "title?", "content?" }` 부분 수정이고 응답은 GET 상세와 같은 형태다. 삭제된 글의 수정·댓글·공감·신고는 404.
+
 **GET /posts/{postId}** → 200
 
 ```json
@@ -279,8 +288,8 @@ ULID 사전순이 곧 시간순이라는 성질을 이용한 **양방향 커서*
   "createdAt": 1719..., "updatedAt": null, "deleted": false }
 ```
 
-- **삭제 정책**: 소프트 삭제다. 스트림에서는 해당 StreamEvent payload에 `"deleted": true`를 마킹한다(재발행 없음 — 클라가 목록에서 "삭제된 글"로 표시). 댓글 작성 시에도 `post:{code}`에 `kind=comment`를 발행한다(같은 봉투).
-- 공감: `post_like` upsert + `like_count` 원자 증감. 신고: `{ "reason": "SPAM|ABUSE|MANIPULATION|ETC", "detail?" }` → 201. 신고 상태(접수/처리)는 운영 도구 범위다.
+- **삭제 정책**: 소프트 삭제다. 스트림에서는 해당 StreamEvent payload에 `"deleted": true`를 마킹한다(재발행 없음 — 클라가 목록에서 "삭제된 글"로 표시). 삭제된 글의 상세는 `deleted: true`에 `title`/`content`를 비워 반환한다(댓글 스레드는 유지). 댓글 작성 시에도 `post:{code}`에 `kind=comment`를 발행한다(같은 봉투).
+- 공감: `post_like` upsert + `like_count` 원자 증감. 응답은 204(등록·해제 동일, 멱등). 신고: `{ "reason": "SPAM|ABUSE|MANIPULATION|ETC", "detail?" }` → 201 `{ "reportId": "01JA..." }`. 신고 상태(접수/처리)는 운영 도구 범위다.
 
 ---
 
@@ -298,6 +307,8 @@ ULID 사전순이 곧 시간순이라는 성질을 이용한 **양방향 커서*
 
 **GET /stocks/{code}** → `{ "code", "name", "market", "sector", "sharesOutstanding", "listedAt", "updatedAt" }`
 
+- `sector`는 `sector` 테이블을 조인한 업종 **이름**(미분류면 null), `listedAt`은 `yyyyMMdd` 문자열(null 허용), `updatedAt`은 epoch ms. 상장폐지(`is_active=false`)·미존재 종목은 이 모듈 전 엔드포인트에서 404.
+
 **GET /stocks/{code}/candles?period=D|W|M&count=100&to=20260707** → 200
 
 ```json
@@ -308,6 +319,7 @@ ULID 사전순이 곧 시간순이라는 성질을 이용한 **양방향 커서*
 
 - 저장은 **일봉만**(수정주가) 한다. `W`/`M`은 조회 시 일봉을 집계한다(ADR A8: 주=ISO주, 월=역월; open=첫날 시가, close=마지막 종가, high/low=극값, volume=합). `to` 이전 `count`건은 내림차순이 아니라 **오름차순 반환**(차트 라이브러리 관행).
 - 미적재 과거 구간은 있는 만큼 반환하고 `hasMoreBefore:false`를 준다(백필은 batch 잡).
+- `W`/`M` 버킷의 `date`는 버킷 안 **마지막 거래일**이고 `value`도 합산한다. `count` 기본 100·최대 500. 집계용 일봉 조회는 `count × 버킷당 최대 일수(주 7·월 31)+1`로 상한을 고정하고, 상한에 걸려 잘렸을 수 있는 가장 오래된 버킷은 버린 뒤 `hasMoreBefore:true`로 알린다 — 부분 버킷을 완전한 봉처럼 주지 않기 위해서다.
 
 **GET /stocks/{code}/valuation** → `{ "per": 12.3, "pbr": 1.1, "eps": 5800, "bps": 65000, "marketCap": 4250000, "asOf": "20260706" }` (marketCap 단위 억원 — 프론트 합의)
 
@@ -322,6 +334,10 @@ ULID 사전순이 곧 시간순이라는 성질을 이용한 **양방향 커서*
 **GET /stocks/{code}/investors?days=20** → `{ "items": [ { "date": "20260706", "individual": -12000, "foreign": 8000, "institution": 4000 } ] }` (순매수, 단위 백만원 — 워커 명세와 합의)
 
 모든 지표 응답에 `asOf` 필수(기획안 데이터 신선도 요구).
+
+- **단위 규약**: 워커는 금액을 원 단위로 적재하고(KIS 워커 명세 §4) API 단위 변환은 core-api 몫이다 — `marketCap`과 재무 금액(`revenue`·`operatingProfit` 등)은 **억원**(1e8로 내림 나눗셈), 수급은 적재 단위 그대로 백만원.
+- 재무의 `period`는 연간(`reprt_code=11011`)이 `"2025"`, 분기가 `"2026Q1"`(11013=Q1·11012=Q2·11014=Q3)이다. `years` 기본 3·최대 10 — 최신 `years`개 연도의 연간·분기 행을 준다. `fs_div`는 워커가 연결(CFS) 우선으로 한 행만 적재하므로 응답에 드러내지 않는다. `asOf`는 공시 시각(`disclosed_at`)의 KST 날짜다.
+- `investors`는 최신 영업일부터 내림차순, `days` 기본 20·최대 250. 데이터가 없으면 `financials`/`investors`는 빈 배열로 200, 단일 객체인 `valuation`은 404다.
 
 ---
 
