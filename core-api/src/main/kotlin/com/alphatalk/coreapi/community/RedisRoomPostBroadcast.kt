@@ -39,8 +39,14 @@ class RedisRoomPostBroadcast(
 class PostCommitBroadcaster(
     private val broadcast: RoomPostBroadcast,
 ) {
+    private val log = LoggerFactory.getLogger(javaClass)
+
     @TransactionalEventListener
     fun on(event: PostCommitted) {
-        broadcast.publish(event.code, event.eventId, event.data)
+        runCatching {
+            broadcast.publish(event.code, event.eventId, event.data)
+        }.onFailure {
+            log.warn("post broadcast listener failed (best-effort): code={} eventId={}", event.code, event.eventId, it)
+        }
     }
 }

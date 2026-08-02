@@ -7,11 +7,13 @@ import jakarta.persistence.IdClass
 import jakarta.persistence.Table
 import org.hibernate.annotations.JdbcTypeCode
 import org.hibernate.type.SqlTypes
-import org.springframework.dao.DataIntegrityViolationException
 import org.springframework.data.jpa.repository.JpaRepository
+import org.springframework.data.jpa.repository.Modifying
+import org.springframework.data.jpa.repository.Query
+import org.springframework.data.repository.query.Param
 import org.springframework.stereotype.Repository
+import org.springframework.transaction.annotation.Transactional
 import java.io.Serializable
-import java.sql.SQLException
 import java.time.Clock
 import java.time.Instant
 
@@ -36,6 +38,21 @@ class PostLikeEntity(
 )
 
 interface PostLikeJpaRepository : JpaRepository<PostLikeEntity, PostLikeId> {
+    @Transactional
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Query(
+        """
+        insert into PostLikeEntity (postId, userId, createdAt)
+        values (:postId, :userId, :at)
+        on conflict do nothing
+        """,
+    )
+    fun insertIfAbsent(
+        @Param("postId") postId: String,
+        @Param("userId") userId: Long,
+        @Param("at") at: Instant,
+    ): Int
+
     fun deleteByPostIdAndUserId(postId: String, userId: Long): Long
 
     fun existsByPostIdAndUserId(postId: String, userId: Long): Boolean
@@ -46,24 +63,13 @@ class JpaLikeStore(
     private val likes: PostLikeJpaRepository,
     private val clock: Clock = Clock.systemUTC(),
 ) : LikeStore {
-    override fun add(postId: String, userId: Long): Boolean {
-        if (likes.existsByPostIdAndUserId(postId, userId)) return false
-        return try {
-            likes.saveAndFlush(PostLikeEntity(postId = postId, userId = userId, createdAt = clock.instant()))
-            true
-        } catch (e: DataIntegrityViolationException) {
-            if ((e.mostSpecificCause as? SQLException)?.sqlState != UNIQUE_VIOLATION_SQL_STATE) throw e
-            false
-        }
-    }
+    override fun add(postId: String, userId: Long): Boolean =
+        likes.insertIfAbsent(postId, userId, clock.instant()) > 0
 
     override fun remove(postId: String, userId: Long): Boolean =
         likes.deleteByPostIdAndUserId(postId, userId) > 0
 
+    @Transactional(readOnly = true)
     override fun exists(postId: String, userId: Long): Boolean =
         likes.existsByPostIdAndUserId(postId, userId)
-
-    companion object {
-        private const val UNIQUE_VIOLATION_SQL_STATE = "23505"
-    }
 }
