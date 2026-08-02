@@ -37,6 +37,8 @@ class AuthServiceTest {
         override fun findById(id: Long) = rows[id]
         override fun existsByEmail(email: String) = rows.values.any { it.email == email }
         override fun existsByNickname(nickname: String) = rows.values.any { it.nickname == nickname }
+        override fun nicknames(ids: Collection<Long>) =
+            rows.filterKeys(ids::contains).mapValues { (_, user) -> user.nickname }
     }
 
     private class InMemoryRefreshStore : RefreshTokenStore {

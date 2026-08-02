@@ -16,6 +16,7 @@ interface UserStore {
     fun findById(id: Long): UserRecord?
     fun existsByEmail(email: String): Boolean
     fun existsByNickname(nickname: String): Boolean
+    fun nicknames(ids: Collection<Long>): Map<Long, String>
 }
 
 class DuplicateUserException(cause: Throwable) : RuntimeException(cause)

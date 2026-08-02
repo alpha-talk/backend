@@ -1,5 +1,6 @@
 package com.alphatalk.coreapi.community
 
+import com.alphatalk.coreapi.auth.UserStore
 import com.alphatalk.coreapi.stream.CursorDirection
 import jakarta.persistence.Column
 import jakarta.persistence.Entity
@@ -15,6 +16,7 @@ import org.springframework.data.jpa.repository.Query
 import org.springframework.data.repository.query.Param
 import org.springframework.stereotype.Repository
 import org.springframework.transaction.annotation.Transactional
+import java.time.Clock
 import java.time.Instant
 
 @Entity
@@ -48,26 +50,11 @@ class PostEntity(
     var deletedAt: Instant? = null,
 )
 
-data class PostAuthorRow(
-    val entity: PostEntity,
-    val nickname: String,
-)
-
 interface PostJpaRepository : JpaRepository<PostEntity, String> {
     @Query(
         """
-        select new com.alphatalk.coreapi.community.PostAuthorRow(p, u.nickname)
-        from PostEntity p, com.alphatalk.coreapi.auth.UserEntity u
-        where u.id = p.authorId and p.id = :id
-        """,
-    )
-    fun findWithAuthor(@Param("id") id: String): PostAuthorRow?
-
-    @Query(
-        """
-        select new com.alphatalk.coreapi.community.PostAuthorRow(p, u.nickname)
-        from PostEntity p, com.alphatalk.coreapi.auth.UserEntity u
-        where u.id = p.authorId and p.code = :code and p.deletedAt is null
+        select p from PostEntity p
+        where p.code = :code and p.deletedAt is null
           and (:cursor is null or (:ascending = true and p.id > :cursor) or (:ascending = false and p.id < :cursor))
         """,
     )
@@ -76,7 +63,7 @@ interface PostJpaRepository : JpaRepository<PostEntity, String> {
         @Param("cursor") cursor: String?,
         @Param("ascending") ascending: Boolean,
         pageable: PageRequest,
-    ): List<PostAuthorRow>
+    ): List<PostEntity>
 
     fun existsByCodeAndDeletedAtIsNullAndIdLessThan(code: String, id: String): Boolean
 
@@ -106,7 +93,8 @@ interface PostJpaRepository : JpaRepository<PostEntity, String> {
 @Repository
 class JpaPostStore(
     private val posts: PostJpaRepository,
-    private val clock: java.time.Clock = java.time.Clock.systemUTC(),
+    private val users: UserStore,
+    private val clock: Clock = Clock.systemUTC(),
 ) : PostStore {
     override fun create(
         id: String,
@@ -132,15 +120,19 @@ class JpaPostStore(
     override fun find(id: String): PostRecord? =
         posts.findById(id).orElse(null)?.toRecord()
 
-    override fun findWithAuthor(id: String): PostRowWithAuthor? =
-        posts.findWithAuthor(id)?.let { PostRowWithAuthor(it.entity.toRecord(), it.nickname) }
+    override fun findWithAuthor(id: String): PostRowWithAuthor? {
+        val post = find(id) ?: return null
+        val nickname = users.nicknames(listOf(post.authorId)).getValue(post.authorId)
+        return PostRowWithAuthor(post, nickname)
+    }
 
     override fun list(query: PostListQuery): List<PostRowWithAuthor> {
         val ascending = query.direction == CursorDirection.AFTER
         val order = if (ascending) Sort.Direction.ASC else Sort.Direction.DESC
         val page = PageRequest.of(0, query.limit, Sort.by(order, "id"))
-        return posts.listRoom(query.code, query.cursor, ascending, page)
-            .map { PostRowWithAuthor(it.entity.toRecord(), it.nickname) }
+        val rows = posts.listRoom(query.code, query.cursor, ascending, page).map { it.toRecord() }
+        val nicknames = users.nicknames(rows.map(PostRecord::authorId).distinct())
+        return rows.map { PostRowWithAuthor(it, nicknames.getValue(it.authorId)) }
     }
 
     override fun hasOlderThan(code: String, postId: String): Boolean =
