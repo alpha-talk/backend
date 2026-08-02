@@ -111,7 +111,7 @@ class StockInfoService(
         liabilities = liabilities?.let { it / WON_PER_EOK },
         equity = equity?.let { it / WON_PER_EOK },
         source = FINANCIALS_SOURCE,
-        asOf = disclosedAt?.atZone(SEOUL)?.toLocalDate()?.format(DATE_FORMAT),
+        asOf = disclosedAt.atZone(SEOUL).toLocalDate().format(DATE_FORMAT),
     )
 
     private fun requireActive(code: String) {

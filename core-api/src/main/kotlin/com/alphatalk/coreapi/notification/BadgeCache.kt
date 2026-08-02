@@ -1,5 +1,6 @@
 package com.alphatalk.coreapi.notification
 
+import com.alphatalk.contracts.Keys
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.readValue
 import org.slf4j.LoggerFactory
@@ -45,7 +46,7 @@ class RedisBadgeCache(
         }
     }
 
-    private fun key(userId: Long) = "badge:$userId"
+    private fun key(userId: Long) = Keys.badge(userId)
 
     companion object {
         private val TTL: Duration = Duration.ofSeconds(10)

@@ -18,6 +18,13 @@ class KeysQueuesTest {
     }
 
     @Test
+    fun `메인서버 전용 키 생성 - Redis 계약 §3 주석`() {
+        assertEquals("cursor:123:005930", Keys.cursor(123, "005930"))
+        assertEquals("rl:post:123:29552131", Keys.rateLimitWindow("post", "123", 29552131))
+        assertEquals("badge:123", Keys.badge(123))
+    }
+
+    @Test
     fun `큐 상수 - Redis 계약 §2`() {
         assertEquals("queue:ingest", Queues.INGEST)
         assertEquals("queue:ingest:dlq", Queues.INGEST_DLQ)

@@ -12,4 +12,8 @@ object Keys {
     fun seenIngest(sourceId: String) = "seen:ingest:$sourceId"
     fun clusterLock(code: String) = "lock:cluster:$code"
     fun articleFetchRate(host: String) = "rate:article-fetch:$host"
+
+    fun rateLimitWindow(action: String, key: String, windowIndex: Long) = "rl:$action:$key:$windowIndex"
+
+    fun badge(userId: Long) = "badge:$userId"
 }

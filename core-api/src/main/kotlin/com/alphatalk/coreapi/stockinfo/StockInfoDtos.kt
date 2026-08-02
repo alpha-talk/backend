@@ -46,7 +46,7 @@ data class FinancialRow(
     val liabilities: Long?,
     val equity: Long?,
     val source: String,
-    val asOf: String?,
+    val asOf: String,
 )
 
 data class FinancialsResponse(
