@@ -11,6 +11,12 @@ import org.springframework.web.method.annotation.HandlerMethodValidationExceptio
 class ApiExceptionHandler {
     private val log = LoggerFactory.getLogger(javaClass)
 
+    @ExceptionHandler(RateLimitExceededException::class)
+    fun handleRateLimit(e: RateLimitExceededException): ResponseEntity<ApiErrorResponse> =
+        ResponseEntity.status(e.code.status)
+            .header("Retry-After", e.retryAfterSeconds.toString())
+            .body(ApiErrorResponse(ApiErrorBody(e.code.name, e.message, e.detail)))
+
     @ExceptionHandler(ApiException::class)
     fun handleApi(e: ApiException): ResponseEntity<ApiErrorResponse> =
         respond(e.code, e.message, e.detail)

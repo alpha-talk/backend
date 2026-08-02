@@ -3,12 +3,15 @@ package com.alphatalk.coreapi.auth
 import com.alphatalk.auth.TokenIssuer
 import com.alphatalk.coreapi.support.ApiException
 import com.alphatalk.coreapi.support.ErrorCode
+import com.alphatalk.coreapi.support.RateLimitExceededException
+import com.alphatalk.coreapi.support.RateLimiter
 import org.slf4j.LoggerFactory
 import org.springframework.security.crypto.password.PasswordEncoder
 import org.springframework.stereotype.Service
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.time.Clock
+import java.time.Duration
 import java.util.Base64
 
 @Service
@@ -18,6 +21,7 @@ class AuthService(
     private val issuer: TokenIssuer,
     private val passwords: PasswordEncoder,
     private val props: AuthProperties,
+    private val rateLimiter: RateLimiter,
     private val clock: Clock = Clock.systemUTC(),
     private val random: SecureRandom = SecureRandom(),
 ) {
@@ -37,7 +41,14 @@ class AuthService(
         }
     }
 
-    fun login(request: LoginRequest): TokenPair {
+    fun login(request: LoginRequest, clientIp: String): TokenPair {
+        val decision = rateLimiter.tryAcquire(
+            action = LOGIN_ACTION,
+            key = "$clientIp:${request.email}",
+            limit = props.loginAttemptsPerMinute,
+            window = Duration.ofMinutes(1),
+        )
+        if (!decision.allowed) throw RateLimitExceededException(LOGIN_ACTION, decision.retryAfterSeconds)
         val user = users.findByEmail(request.email)
         if (user == null || !passwords.matches(request.password, user.passwordHash)) {
             throw ApiException(ErrorCode.UNAUTHORIZED, "이메일 또는 비밀번호가 올바르지 않습니다")
@@ -102,5 +113,6 @@ class AuthService(
 
     companion object {
         private const val REFRESH_TOKEN_BYTES = 32
+        private const val LOGIN_ACTION = "login"
     }
 }
