@@ -14,6 +14,9 @@ import org.testcontainers.containers.PostgreSQLContainer
 import org.testcontainers.junit.jupiter.Container
 import org.testcontainers.junit.jupiter.Testcontainers
 import org.testcontainers.utility.DockerImageName
+import java.util.concurrent.CyclicBarrier
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
@@ -110,6 +113,30 @@ class ReadCursorIntegrationTest {
         assertEquals(
             mapOf("005930" to "01J9Z800000000000000000005"),
             cursorCache.read(userId, listOf("005930", "000660")),
+        )
+    }
+
+    @Test
+    fun `동시 전진 경합에서도 커서는 최댓값으로 수렴하고 행은 하나다`() {
+        val eventIds = (1..16).map { "01J9Z8000000000000000000%02d".format(it) }
+        val pool = Executors.newFixedThreadPool(8)
+        try {
+            val ready = CyclicBarrier(8)
+            val futures = eventIds.shuffled().chunked(2).map { chunk ->
+                pool.submit {
+                    ready.await(10, TimeUnit.SECONDS)
+                    chunk.forEach { cursorStore.advance(userId, "005930", it) }
+                }
+            }
+            futures.forEach { it.get(30, TimeUnit.SECONDS) }
+        } finally {
+            pool.shutdownNow()
+        }
+
+        assertEquals(mapOf("005930" to eventIds.max()), cursorStore.find(userId, listOf("005930")))
+        assertEquals(
+            1,
+            jdbc.queryForObject("SELECT count(*) FROM read_cursor WHERE user_id = ?", Long::class.java, userId),
         )
     }
 

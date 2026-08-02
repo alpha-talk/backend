@@ -7,7 +7,6 @@ import jakarta.persistence.IdClass
 import jakarta.persistence.Table
 import org.hibernate.annotations.JdbcTypeCode
 import org.hibernate.type.SqlTypes
-import org.springframework.dao.DataIntegrityViolationException
 import org.springframework.data.jpa.repository.JpaRepository
 import org.springframework.data.jpa.repository.Modifying
 import org.springframework.data.jpa.repository.Query
@@ -44,8 +43,6 @@ class ReadCursorEntity(
 interface ReadCursorJpaRepository : JpaRepository<ReadCursorEntity, ReadCursorId> {
     fun findByUserIdAndCodeIn(userId: Long, codes: Collection<String>): List<ReadCursorEntity>
 
-    fun existsByUserIdAndCode(userId: Long, code: String): Boolean
-
     @Transactional
     @Modifying(clearAutomatically = true, flushAutomatically = true)
     @Query(
@@ -61,6 +58,22 @@ interface ReadCursorJpaRepository : JpaRepository<ReadCursorEntity, ReadCursorId
         @Param("eventId") eventId: String,
         @Param("at") at: Instant,
     ): Int
+
+    @Transactional
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Query(
+        """
+        insert into ReadCursorEntity (userId, code, lastEventId, updatedAt)
+        values (:userId, :code, :eventId, :at)
+        on conflict do nothing
+        """,
+    )
+    fun insertIfAbsent(
+        @Param("userId") userId: Long,
+        @Param("code") code: String,
+        @Param("eventId") eventId: String,
+        @Param("at") at: Instant,
+    ): Int
 }
 
 @Repository
@@ -68,6 +81,7 @@ class JpaReadCursorStore(
     private val cursors: ReadCursorJpaRepository,
     private val clock: Clock = Clock.systemUTC(),
 ) : ReadCursorStore {
+    @Transactional(readOnly = true)
     override fun find(userId: Long, codes: Collection<String>): Map<String, String> {
         if (codes.isEmpty()) return emptyMap()
         return cursors.findByUserIdAndCodeIn(userId, codes)
@@ -77,20 +91,8 @@ class JpaReadCursorStore(
     override fun advance(userId: Long, code: String, eventId: String): Boolean {
         val now = clock.instant()
         if (cursors.advanceIfNewer(userId, code, eventId, now) > 0) return true
-        if (cursors.existsByUserIdAndCode(userId, code)) return false
-        return try {
-            cursors.saveAndFlush(
-                ReadCursorEntity(
-                    userId = userId,
-                    code = code,
-                    lastEventId = eventId,
-                    updatedAt = now,
-                ),
-            )
-            true
-        } catch (e: DataIntegrityViolationException) {
-            cursors.advanceIfNewer(userId, code, eventId, now) > 0
-        }
+        if (cursors.insertIfAbsent(userId, code, eventId, now) > 0) return true
+        return cursors.advanceIfNewer(userId, code, eventId, now) > 0
     }
 
     override fun advanceAll(userId: Long, cursors: Map<String, String>) {

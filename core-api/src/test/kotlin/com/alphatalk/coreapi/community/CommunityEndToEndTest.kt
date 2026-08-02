@@ -1,6 +1,7 @@
 package com.alphatalk.coreapi.community
 
 import com.alphatalk.contracts.Channels
+import com.alphatalk.contracts.envelope.PostData
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
 import org.junit.jupiter.api.AfterEach
@@ -10,6 +11,7 @@ import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.boot.test.web.client.TestRestTemplate
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection
+import org.springframework.context.ApplicationEventPublisher
 import org.springframework.data.redis.connection.RedisConnectionFactory
 import org.springframework.data.redis.core.StringRedisTemplate
 import org.springframework.data.redis.listener.ChannelTopic
@@ -20,11 +22,15 @@ import org.springframework.http.HttpMethod
 import org.springframework.http.MediaType
 import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.test.context.ActiveProfiles
+import org.springframework.transaction.PlatformTransactionManager
+import org.springframework.transaction.support.TransactionTemplate
 import org.testcontainers.containers.GenericContainer
 import org.testcontainers.containers.PostgreSQLContainer
 import org.testcontainers.junit.jupiter.Container
 import org.testcontainers.junit.jupiter.Testcontainers
 import org.testcontainers.utility.DockerImageName
+import java.util.concurrent.CyclicBarrier
+import java.util.concurrent.Executors
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import kotlin.test.assertEquals
@@ -63,6 +69,12 @@ class CommunityEndToEndTest {
 
     @Autowired
     private lateinit var connectionFactory: RedisConnectionFactory
+
+    @Autowired
+    private lateinit var transactionManager: PlatformTransactionManager
+
+    @Autowired
+    private lateinit var applicationEvents: ApplicationEventPublisher
 
     private val mapper = ObjectMapper()
     private val published = LinkedBlockingQueue<String>()
@@ -251,6 +263,53 @@ class CommunityEndToEndTest {
         assertEquals(1, detail.path("commentCount").asInt())
         assertEquals("첫 댓글", detail.path("comments").path("items")[0].path("content").asText())
         assertEquals("독자", detail.path("comments").path("items")[0].path("author").path("nickname").asText())
+    }
+
+    @Test
+    fun `동시에 몰린 공감 요청도 공감 수를 1로 유지한다`() {
+        val postId = createPost().path("postId").asText()
+        val workers = 8
+        val pool = Executors.newFixedThreadPool(workers)
+        try {
+            val ready = CyclicBarrier(workers)
+            val futures = (1..workers).map {
+                pool.submit<Int> {
+                    ready.await(10, TimeUnit.SECONDS)
+                    exchange(HttpMethod.PUT, "/api/v1/posts/$postId/like", null, readerToken).statusCode.value()
+                }
+            }
+            futures.forEach { assertEquals(204, it.get(30, TimeUnit.SECONDS)) }
+        } finally {
+            pool.shutdownNow()
+        }
+
+        assertEquals(1, jdbc.queryForObject("SELECT count(*) FROM post_like WHERE post_id = ?", Long::class.java, postId))
+        assertEquals(1, jdbc.queryForObject("SELECT like_count FROM post WHERE id = ?", Int::class.java, postId))
+    }
+
+    @Test
+    fun `트랜잭션이 롤백되면 post 채널로 발행하지 않는다`() {
+        TransactionTemplate(transactionManager).execute { status ->
+            applicationEvents.publishEvent(
+                PostCommitted(
+                    code = "005930",
+                    eventId = "01JA0000000000000000000009",
+                    data = PostData(
+                        kind = "post",
+                        postId = "01JA0000000000000000000009",
+                        author = PostData.Author(authorId, "글쓴이"),
+                        content = "롤백될 본문",
+                        createdAt = 1719600000000,
+                    ),
+                ),
+            )
+            status.setRollbackOnly()
+        }
+
+        assertNull(
+            generateSequence { published.poll(500, TimeUnit.MILLISECONDS) }.firstOrNull { it != PROBE },
+            "롤백된 트랜잭션의 이벤트가 발행됐다",
+        )
     }
 
     @Test
