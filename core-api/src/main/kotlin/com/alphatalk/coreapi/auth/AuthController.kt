@@ -1,6 +1,7 @@
 package com.alphatalk.coreapi.auth
 
 import com.alphatalk.coreapi.support.CurrentUser
+import jakarta.servlet.http.HttpServletRequest
 import jakarta.validation.Valid
 import org.springframework.http.HttpStatus
 import org.springframework.web.bind.annotation.PostMapping
@@ -20,8 +21,8 @@ class AuthController(
         SignupResponse(auth.signup(request))
 
     @PostMapping("/login")
-    fun login(@Valid @RequestBody request: LoginRequest): TokenPair =
-        auth.login(request)
+    fun login(@Valid @RequestBody request: LoginRequest, http: HttpServletRequest): TokenPair =
+        auth.login(request, http.remoteAddr ?: "unknown")
 
     @PostMapping("/refresh")
     fun refresh(@Valid @RequestBody request: RefreshRequest): TokenPair =
