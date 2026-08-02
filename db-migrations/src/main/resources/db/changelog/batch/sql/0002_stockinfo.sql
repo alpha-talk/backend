@@ -29,6 +29,6 @@ CREATE TABLE IF NOT EXISTS financial_summary (
     assets           BIGINT      NULL,
     liabilities      BIGINT      NULL,
     equity           BIGINT      NULL,
-    disclosed_at     TIMESTAMPTZ NULL,
+    disclosed_at     TIMESTAMPTZ NOT NULL,
     PRIMARY KEY (code, year, reprt_code)
 );
