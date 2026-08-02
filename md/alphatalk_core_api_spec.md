@@ -77,12 +77,12 @@ ULID 사전순이 곧 시간순이라는 성질을 이용한 **양방향 커서*
 | 공감 토글 | 60회/분 | userId |
 | 로그인 시도 | 10회/분 | IP+email |
 
-구현: Redis 고정 윈도 카운터(`INCR`+`EXPIRE`). 초과 시 429 + `Retry-After`.
+구현: Redis 고정 윈도 카운터(`INCR`+`EXPIRE` Lua 원자화). 초과 시 429 + `Retry-After`. Redis 장애 시에는 요청을 막지 않는다(fail-open — 유량 제한이 가용성보다 우선하지 않음). 로그인 키의 IP는 `remoteAddr` 기준이므로 프록시/LB 뒤 배포 시 `server.forward-headers-strategy` 설정이 전제다(M6 배포 체크리스트).
 
 ### 1.6 멱등성
 
-- 글/댓글 POST는 `Idempotency-Key` 헤더(선택, ULID)를 지원한다: 10분 내 같은 키로 재요청하면 최초 응답을 재반환한다(Redis 캐시).
-- 공감/구독은 PUT/DELETE 의미론이라 자연 멱등이다.
+- 글/댓글 POST는 `Idempotency-Key` 헤더(선택, ULID)를 지원한다: 10분 내 같은 키로 재요청하면 최초 응답을 재반환한다(Redis 캐시). 캐시는 성공 응답만 선점 저장(`SET NX`)하므로 **순차 재시도**의 중복 생성을 막는 장치다 — 같은 키가 완료 전에 병렬로 겹치면 둘 다 실행될 수 있다(클라 재시도 패턴은 순차 전제).
+- 공감/구독은 PUT/DELETE 의미론이라 자연 멱등이다. 공감 등록·읽음 커서 생성은 조건부 INSERT(`ON CONFLICT DO NOTHING`)로 동시 요청에서도 정확히 한 번만 반영된다.
 
 ---
 
