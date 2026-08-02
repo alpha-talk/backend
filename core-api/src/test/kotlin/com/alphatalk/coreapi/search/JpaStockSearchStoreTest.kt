@@ -90,6 +90,22 @@ class JpaStockSearchStoreTest {
     }
 
     @Test
+    fun `최신 시총이 있으면 발행주식수 근사보다 앞선다`() {
+        jdbc.update(
+            """
+            INSERT INTO valuation_daily (code, date, per, pbr, eps, bps, market_cap) VALUES
+            ('005935', '20260707', NULL, NULL, NULL, NULL, 500000000000000),
+            ('005935', '20260706', NULL, NULL, NULL, NULL,   1000000000000),
+            ('005930', '20260707', NULL, NULL, NULL, NULL, 400000000000000)
+            """.trimIndent(),
+        )
+
+        val found = store.search("삼성", 10)
+
+        assertEquals(listOf("005935", "005930", "006400"), found.map { it.code })
+    }
+
+    @Test
     fun `상장폐지 종목은 결과에서 빠진다`() {
         val found = store.search("삼성", 30)
 

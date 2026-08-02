@@ -3,6 +3,7 @@ package com.alphatalk.coreapi.search
 import jakarta.persistence.Column
 import jakarta.persistence.Entity
 import jakarta.persistence.Id
+import jakarta.persistence.IdClass
 import jakarta.persistence.Table
 import org.hibernate.annotations.Immutable
 import org.hibernate.annotations.JdbcTypeCode
@@ -14,6 +15,7 @@ import org.springframework.data.jpa.repository.Query
 import org.springframework.data.repository.query.Param
 import org.springframework.stereotype.Repository
 import org.springframework.transaction.annotation.Transactional
+import java.io.Serializable
 
 @Entity
 @Immutable
@@ -33,6 +35,28 @@ class StockMasterEntity(
     val isActive: Boolean = true,
 )
 
+data class SearchValuationId(
+    val code: String = "",
+    val date: String = "",
+) : Serializable
+
+@Entity(name = "SearchValuation")
+@Immutable
+@Table(name = "valuation_daily")
+@IdClass(SearchValuationId::class)
+class SearchValuationEntity(
+    @Id
+    @JdbcTypeCode(SqlTypes.CHAR)
+    @Column(name = "code", length = 6, columnDefinition = "char(6)")
+    val code: String = "",
+    @Id
+    @JdbcTypeCode(SqlTypes.CHAR)
+    @Column(name = "date", length = 8, columnDefinition = "char(8)")
+    val date: String = "",
+    @Column(name = "market_cap")
+    val marketCap: Long? = null,
+)
+
 interface StockSearchJpaRepository : JpaRepository<StockMasterEntity, String> {
     @Query(
         """
@@ -46,6 +70,11 @@ interface StockSearchJpaRepository : JpaRepository<StockMasterEntity, String> {
                 when s.name ilike :prefix escape '!' then 1
                 else 2
             end,
+            (
+                select v.marketCap from SearchValuation v
+                where v.code = s.code
+                  and v.date = (select max(v2.date) from SearchValuation v2 where v2.code = s.code)
+            ) desc nulls last,
             s.sharesOutstanding desc nulls last,
             s.code
         """,
