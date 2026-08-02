@@ -387,6 +387,31 @@ class CommunityEndToEndTest {
     }
 
     @Test
+    fun `서로 다른 필드의 동시 부분 수정은 서로를 되돌리지 않는다`() {
+        val postId = createPost().path("postId").asText()
+        val pool = Executors.newFixedThreadPool(2)
+        try {
+            val ready = CyclicBarrier(2)
+            val patches = listOf(
+                """{"title":"동시 수정 제목"}""",
+                """{"content":"동시 수정 본문"}""",
+            ).map { body ->
+                pool.submit<Int> {
+                    ready.await(10, TimeUnit.SECONDS)
+                    exchange(HttpMethod.PATCH, "/api/v1/posts/$postId", body, authorToken).statusCode.value()
+                }
+            }
+            patches.forEach { assertEquals(200, it.get(30, TimeUnit.SECONDS)) }
+        } finally {
+            pool.shutdownNow()
+        }
+
+        val detail = json(get("/api/v1/posts/$postId").body)
+        assertEquals("동시 수정 제목", detail.path("title").asText())
+        assertEquals("동시 수정 본문", detail.path("content").asText())
+    }
+
+    @Test
     fun `소프트 삭제하면 스트림 이벤트에 deleted가 마킹된다`() {
         val postId = createPost().path("postId").asText()
 
