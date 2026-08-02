@@ -27,3 +27,17 @@ databaseChangeLog:
         - sqlFile:
             path: sql/0004_watchlist_rev.sql
             relativeToChangelogFile: true
+  - changeSet:
+      id: 0005-read-cursor
+      author: core-api
+      changes:
+        - sqlFile:
+            path: sql/0005_read_cursor.sql
+            relativeToChangelogFile: true
+  - changeSet:
+      id: 0006-community
+      author: core-api
+      changes:
+        - sqlFile:
+            path: sql/0006_community.sql
+            relativeToChangelogFile: true

@@ -6,3 +6,10 @@ databaseChangeLog:
         - sqlFile:
             path: sql/0001_stock_master.sql
             relativeToChangelogFile: true
+  - changeSet:
+      id: 0002-stockinfo
+      author: worker-batch
+      changes:
+        - sqlFile:
+            path: sql/0002_stockinfo.sql
+            relativeToChangelogFile: true
