@@ -81,7 +81,7 @@ ULID 사전순이 곧 시간순이라는 성질을 이용한 **양방향 커서*
 
 ### 1.6 멱등성
 
-- 글/댓글 POST는 `Idempotency-Key` 헤더(선택, ULID)를 지원한다: 10분 내 같은 키로 재요청하면 최초 응답을 재반환한다(Redis 캐시). 캐시는 성공 응답만 선점 저장(`SET NX`)하므로 **순차 재시도**의 중복 생성을 막는 장치다 — 같은 키가 완료 전에 병렬로 겹치면 둘 다 실행될 수 있다(클라 재시도 패턴은 순차 전제).
+- 글/댓글 POST는 `Idempotency-Key` 헤더(선택, ULID)를 지원한다: 같은 키로 재요청하면 최초 성공 응답을 재반환한다. 구현은 **DB 원장**(`idempotency_record`)이다 — 본문 검증 통과 후 글·댓글 INSERT와 **같은 트랜잭션**에서 키를 조건부 INSERT(`ON CONFLICT DO NOTHING`)로 선점하고 응답을 함께 영속한다. 커밋과 키 기록이 원자적이라 커밋 직후 프로세스 종료·순차 재시도·병렬 중복(선점 대기 후 재생) 모두에서 중복 생성이 없다. 같은 키를 다른 요청 종류에 쓰면 409. 원장 보존 정리는 배치 몫(M6).
 - 공감/구독은 PUT/DELETE 의미론이라 자연 멱등이다. 공감 등록·읽음 커서 생성은 조건부 INSERT(`ON CONFLICT DO NOTHING`)로 동시 요청에서도 정확히 한 번만 반영된다.
 
 ---
@@ -124,7 +124,7 @@ ULID 사전순이 곧 시간순이라는 성질을 이용한 **양방향 커서*
 ```
 
 - 매칭: 코드 prefix OR 이름 부분일치(`ILIKE` + `pg_trgm` GIN 인덱스). 정렬: 코드 prefix 일치 우선 → 이름 일치 → **규모 내림차순** → 코드.
-- 규모 기준은 원래 시가총액이지만 `stock_master`에 가격이 없어 지금은 **`shares_outstanding`(발행주식수)로 근사**한다. 발행주식수는 시총과 다르므로 저가·다주식 종목이 고가 우량주보다 앞설 수 있다. `valuation_daily.market_cap`이 들어오는 M5에서 시총으로 교체한다 — 정렬 기준은 응답에 드러나지 않으므로 그때도 **API 계약은 그대로**다.
+- 규모 기준(M5부터): **최신 `valuation_daily.market_cap` 내림차순**. 아직 밸류에이션이 미적재인 종목은 `shares_outstanding`(발행주식수) 근사로 폴백한다(nulls last → 폴백 정렬). 정렬 기준은 응답에 드러나지 않으므로 **API 계약은 그대로**다.
 - `q`는 1자 이상. 데이터 원천은 batch-worker의 `stock_master`이고 `is_active=true`만 조회한다. Phase 3에서 OpenSearch(형태소/초성)로 승격하되 **API 계약은 불변**.
 
 ---
@@ -257,6 +257,7 @@ ULID 사전순이 곧 시간순이라는 성질을 이용한 **양방향 커서*
 | PATCH | `/posts/{postId}` | 수정 (작성자) |
 | DELETE | `/posts/{postId}` | 소프트 삭제 (작성자) |
 | POST | `/posts/{postId}/comments` | 댓글(1뎁스) |
+| GET | `/posts/{postId}/comments` | 댓글 목록 (커서) |
 | DELETE | `/comments/{commentId}` | 댓글 삭제 |
 | PUT / DELETE | `/posts/{postId}/like` | 공감 등록/해제 (멱등) |
 | POST | `/posts/{postId}/report` | 신고 (FR-18) |
@@ -275,6 +276,7 @@ ULID 사전순이 곧 시간순이라는 성질을 이용한 **양방향 커서*
 - `stream_event`의 POST payload는 §5 예시 형태(`postId`·`kind`·`author`·`preview`(본문 100자)·`likeCount`·`commentCount`)로 **작성 시점 스냅샷**을 저장한다. 이후 공감·댓글 수 변동은 payload에 재반영하지 않는다 — 최신 수치는 글 상세/목록 REST가 진실이다.
 - 댓글 발행 봉투: `eventId`=댓글 ULID, `data.kind="comment"`, `data.postId`=댓글 자신의 ULID, `data.parentId`=부모 글 ULID (WS 명세 §4.4의 `parentId` 해석 — 글은 `parentId: null`).
 - 방 글 목록(`GET /rooms/{code}/posts`)은 §1.4 커서 규약(`cursor`·`direction`·`limit` 기본 50)을 따르고 item은 `{ postId, code, author, title, preview, likeCount, commentCount, createdAt }`이다. 소프트 삭제된 글은 목록에서 제외한다(삭제 흔적 표시는 스트림의 `deleted` 마킹 몫).
+- 댓글 목록(`GET /posts/{postId}/comments?cursor=&direction=&limit=50`)은 §1.4 파라미터를 쓰되 스레드 관행에 맞춰 **기본 방향이 `after`(cursor 미지정 시 가장 오래된 댓글부터 오름차순)**다. `direction=before`는 내림차순 과거 조회. item은 상세 응답의 comments.items와 같고 `commentId` 오름차순이 시간순이다. 51번째 이후 댓글과 놓친 `kind=comment` 푸시(WS 명세 §6)는 이 API의 `cursor=마지막 commentId`로 복구한다. 글 상세의 `comments`는 이 API의 첫 페이지(기본 방향, 50건)와 동일하다.
 - PATCH 요청은 `{ "title?", "content?" }` 부분 수정이고 응답은 GET 상세와 같은 형태다. 삭제된 글의 수정·댓글·공감·신고는 404.
 
 **GET /posts/{postId}** → 200
@@ -354,6 +356,7 @@ auth ◄── 전 모듈 (SecurityContext)
 
 - `stock_master`를 읽는 **JPA 매핑은 search 모듈이 단독 소유**한다. 관심목록도 스트림도 "이 종목이 실재하는가"를 물어야 하는데, 모듈마다 같은 테이블을 각자 매핑하면 매핑이 갈라진다. search가 `StockCatalog`(존재 확인·이름/시장 조회)를 노출하고 나머지는 이 포트만 쓴다. 검색 질의도 같은 엔티티 위의 JPQL(`ilike`·정렬 case 식)로 구현한다.
 - `stream_event` 테이블의 논리 소유자는 **stream 모듈**이다. community는 직접 INSERT하지 않고 노출된 `StreamEventAppender`를 호출한다(경계 테스트로 강제). worker-llm과 worker-batch(투자의견)는 별도 프로세스로 같은 테이블에 INSERT한다. 스키마는 `db-migrations` 모듈(Liquibase)이 단일 관리하고 외부 생산자는 `source_key` 멱등 계약을 지킨다.
+- **워커 적재 테이블(읽기 전용)의 매핑 소유권**: `stock_master`·`daily_candle`·`valuation_daily`·`financial_summary`·`investor_flow_daily`처럼 워커가 쓰고 core-api는 읽기만 하는 테이블은 core-api 안에 단독 소유 모듈을 두지 않는다 — 읽는 모듈(search·stream·stockinfo)이 각자 `@Immutable` 읽기 전용 매핑을 갖는다(엔티티 이름만 구분). 단일 소유는 DDL의 `db-migrations`뿐이다. core-api가 쓰는 테이블(users·post·stream_event 등)은 기존대로 소유 모듈의 포트로만 접근한다.
 - 채널명·봉투는 `:contracts` 상수만 사용한다(문자열 하드코딩 금지).
 
 ## 10. 보안 체크리스트
@@ -375,11 +378,13 @@ comment(id CHAR(26) PK, post_id FK, author_id FK, content, created_at, deleted_a
 post_like(post_id, user_id, created_at, PK(post_id, user_id))
 report(id, target_type, target_id, reporter_id, reason, detail, status, created_at)
 read_cursor(user_id, code, last_event_id, updated_at, PK(user_id, code))   -- Redis 미러
+idempotency_record(user_id, idem_key CHAR(26), action, response JSONB NULL, created_at,
+     PK(user_id, idem_key))   -- §1.6 멱등 원장 (글·댓글 커밋과 동일 트랜잭션)
 -- 워커 소유 테이블(stock_master, daily_candle, valuation_daily, investor_flow_daily,
 -- financial_summary 등)은 「KIS 수집 워커 명세」 §4 참조. 마이그레이션은 db-migrations 모듈(Liquibase) 단일 관리.
 ```
 
-### 전체 엔드포인트 요약 (22개)
+### 전체 엔드포인트 요약 (23개)
 
 | 모듈 | 엔드포인트 |
 |---|---|
@@ -388,7 +393,7 @@ read_cursor(user_id, code, last_event_id, updated_at, PK(user_id, code))   -- Re
 | subscription (3) | GET /watchlist, PUT·DELETE /watchlist/{code} |
 | stream (2) | GET /rooms/{code}/stream, GET /rooms/{code}/quote |
 | notification (4) | GET badge, GET /notifications, PUT /rooms/{code}/cursor, POST read-all |
-| community (9) | posts CRUD(4)+목록, comments(2), like(PUT/DELETE=1), report |
+| community (10) | posts CRUD(4)+목록, comments(POST·GET·DELETE=3), like(PUT/DELETE=1), report |
 | stockinfo (5) | GET /stocks/{code} + candles·valuation·financials·investors |
 
 ---
