@@ -10,6 +10,7 @@ import org.hibernate.annotations.JdbcTypeCode
 import org.hibernate.type.SqlTypes
 import org.springframework.data.jpa.repository.JpaRepository
 import org.springframework.stereotype.Repository
+import org.springframework.transaction.annotation.Transactional
 import java.io.Serializable
 import java.time.Instant
 
@@ -59,6 +60,7 @@ interface FinancialSummaryJpaRepository : JpaRepository<FinancialSummaryEntity, 
 }
 
 @Repository
+@Transactional(readOnly = true)
 class JpaFinancialsStore(
     private val financials: FinancialSummaryJpaRepository,
 ) : FinancialsStore {

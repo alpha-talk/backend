@@ -10,6 +10,7 @@ import org.hibernate.annotations.JdbcTypeCode
 import org.hibernate.type.SqlTypes
 import org.springframework.data.jpa.repository.JpaRepository
 import org.springframework.stereotype.Repository
+import org.springframework.transaction.annotation.Transactional
 import java.io.Serializable
 import java.math.BigDecimal
 
@@ -48,6 +49,7 @@ interface ValuationDailyJpaRepository : JpaRepository<ValuationDailyEntity, Valu
 }
 
 @Repository
+@Transactional(readOnly = true)
 class JpaValuationStore(
     private val valuations: ValuationDailyJpaRepository,
 ) : ValuationStore {
