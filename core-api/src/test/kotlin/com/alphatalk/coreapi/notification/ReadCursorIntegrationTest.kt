@@ -70,9 +70,9 @@ class ReadCursorIntegrationTest {
 
     @Test
     fun `커서가 없으면 만들고 있으면 앞으로만 움직인다`() {
-        assertTrue(cursorStore.advance(userId, "005930", "01J9Z800000000000000000003"))
-        assertTrue(cursorStore.advance(userId, "005930", "01J9Z800000000000000000005"))
-        assertFalse(cursorStore.advance(userId, "005930", "01J9Z800000000000000000004"))
+        assertEquals("01J9Z800000000000000000003", cursorStore.advance(userId, "005930", "01J9Z800000000000000000003"))
+        assertEquals("01J9Z800000000000000000005", cursorStore.advance(userId, "005930", "01J9Z800000000000000000005"))
+        assertEquals("01J9Z800000000000000000005", cursorStore.advance(userId, "005930", "01J9Z800000000000000000004"))
 
         assertEquals(
             mapOf("005930" to "01J9Z800000000000000000005"),
@@ -81,10 +81,10 @@ class ReadCursorIntegrationTest {
     }
 
     @Test
-    fun `일괄 전진은 종목마다 독립적으로 역행을 무시한다`() {
+    fun `일괄 전진은 종목마다 독립적으로 역행을 무시하고 최종 커서를 돌려준다`() {
         cursorStore.advance(userId, "005930", "01J9Z800000000000000000005")
 
-        cursorStore.advanceAll(
+        val finalCursors = cursorStore.advanceAll(
             userId,
             mapOf(
                 "005930" to "01J9Z800000000000000000002",
@@ -97,8 +97,9 @@ class ReadCursorIntegrationTest {
                 "005930" to "01J9Z800000000000000000005",
                 "000660" to "01J9Z800000000000000000007",
             ),
-            cursorStore.find(userId, listOf("005930", "000660")),
+            finalCursors,
         )
+        assertEquals(finalCursors, cursorStore.find(userId, listOf("005930", "000660")))
     }
 
     @Test

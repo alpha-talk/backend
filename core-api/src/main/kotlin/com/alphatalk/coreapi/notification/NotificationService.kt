@@ -59,8 +59,8 @@ class NotificationService(
         if (!stocks.existsActive(code)) {
             throw ApiException(ErrorCode.NOT_FOUND, "존재하지 않는 종목입니다", mapOf("code" to code))
         }
-        cursorStore.advance(userId, code, eventId)
-        cursorCache.advance(userId, code, eventId)
+        val finalCursor = cursorStore.advance(userId, code, eventId)
+        cursorCache.advance(userId, code, finalCursor)
         badgeCache.evict(userId)
     }
 
@@ -69,8 +69,8 @@ class NotificationService(
         if (codes.isEmpty()) return
         val latest = inbox.latestEventIds(codes)
         if (latest.isEmpty()) return
-        cursorStore.advanceAll(userId, latest)
-        cursorCache.advanceAll(userId, latest)
+        val finalCursors = cursorStore.advanceAll(userId, latest)
+        cursorCache.advanceAll(userId, finalCursors)
         badgeCache.evict(userId)
     }
 

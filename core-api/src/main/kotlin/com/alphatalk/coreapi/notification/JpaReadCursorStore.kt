@@ -88,14 +88,14 @@ class JpaReadCursorStore(
             .associate { it.code.trim() to it.lastEventId.trim() }
     }
 
-    override fun advance(userId: Long, code: String, eventId: String): Boolean {
+    override fun advance(userId: Long, code: String, eventId: String): String {
         val now = clock.instant()
-        if (cursors.advanceIfNewer(userId, code, eventId, now) > 0) return true
-        if (cursors.insertIfAbsent(userId, code, eventId, now) > 0) return true
-        return cursors.advanceIfNewer(userId, code, eventId, now) > 0
+        if (cursors.advanceIfNewer(userId, code, eventId, now) > 0) return eventId
+        if (cursors.insertIfAbsent(userId, code, eventId, now) > 0) return eventId
+        if (cursors.advanceIfNewer(userId, code, eventId, now) > 0) return eventId
+        return find(userId, listOf(code))[code] ?: eventId
     }
 
-    override fun advanceAll(userId: Long, cursors: Map<String, String>) {
-        cursors.forEach { (code, eventId) -> advance(userId, code, eventId) }
-    }
+    override fun advanceAll(userId: Long, cursors: Map<String, String>): Map<String, String> =
+        cursors.entries.associate { (code, eventId) -> code to advance(userId, code, eventId) }
 }
