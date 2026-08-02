@@ -277,7 +277,7 @@ ULID 사전순이 곧 시간순이라는 성질을 이용한 **양방향 커서*
 - 댓글 발행 봉투: `eventId`=댓글 ULID, `data.kind="comment"`, `data.postId`=댓글 자신의 ULID, `data.parentId`=부모 글 ULID (WS 명세 §4.4의 `parentId` 해석 — 글은 `parentId: null`).
 - 방 글 목록(`GET /rooms/{code}/posts`)은 §1.4 커서 규약(`cursor`·`direction`·`limit` 기본 50)을 따르고 item은 `{ postId, code, author, title, preview, likeCount, commentCount, createdAt }`이다. 소프트 삭제된 글은 목록에서 제외한다(삭제 흔적 표시는 스트림의 `deleted` 마킹 몫).
 - 댓글 목록(`GET /posts/{postId}/comments?cursor=&direction=&limit=50`)은 §1.4 파라미터를 쓰되 스레드 관행에 맞춰 **기본 방향이 `after`(cursor 미지정 시 가장 오래된 댓글부터 오름차순)**다. `direction=before`는 내림차순 과거 조회. item은 상세 응답의 comments.items와 같고 `commentId` 오름차순이 시간순이다. 51번째 이후 댓글과 놓친 `kind=comment` 푸시(WS 명세 §6)는 이 API의 `cursor=마지막 commentId`로 복구한다. 글 상세의 `comments`는 이 API의 첫 페이지(기본 방향, 50건)와 동일하다.
-- PATCH 요청은 `{ "title?", "content?" }` 부분 수정이고 응답은 GET 상세와 같은 형태다. 삭제된 글의 수정·댓글·공감·신고는 404.
+- PATCH 요청은 `{ "title?", "content?" }` 부분 수정이고 응답은 GET 상세와 같은 형태다. 생략한 필드는 **DB 현재값 기준(coalesce)으로 유지**된다 — 서로 다른 필드를 동시에 수정해도 늦은 쪽이 상대 필드를 옛 값으로 되돌리지 않는다. 삭제된 글의 수정·댓글·공감·신고는 404.
 
 **GET /posts/{postId}** → 200
 
@@ -354,9 +354,8 @@ stream/stockinfo ──(읽기)──► Redis price:{code} / 워커 적재 테�
 auth ◄── 전 모듈 (SecurityContext)
 ```
 
-- `stock_master`를 읽는 **JPA 매핑은 search 모듈이 단독 소유**한다. 관심목록도 스트림도 "이 종목이 실재하는가"를 물어야 하는데, 모듈마다 같은 테이블을 각자 매핑하면 매핑이 갈라진다. search가 `StockCatalog`(존재 확인·이름/시장 조회)를 노출하고 나머지는 이 포트만 쓴다. 검색 질의도 같은 엔티티 위의 JPQL(`ilike`·정렬 case 식)로 구현한다.
 - `stream_event` 테이블의 논리 소유자는 **stream 모듈**이다. community는 직접 INSERT하지 않고 노출된 `StreamEventAppender`를 호출한다(경계 테스트로 강제). worker-llm과 worker-batch(투자의견)는 별도 프로세스로 같은 테이블에 INSERT한다. 스키마는 `db-migrations` 모듈(Liquibase)이 단일 관리하고 외부 생산자는 `source_key` 멱등 계약을 지킨다.
-- **워커 적재 테이블(읽기 전용)의 매핑 소유권**: `stock_master`·`daily_candle`·`valuation_daily`·`financial_summary`·`investor_flow_daily`처럼 워커가 쓰고 core-api는 읽기만 하는 테이블은 core-api 안에 단독 소유 모듈을 두지 않는다 — 읽는 모듈(search·stream·stockinfo)이 각자 `@Immutable` 읽기 전용 매핑을 갖는다(엔티티 이름만 구분). 단일 소유는 DDL의 `db-migrations`뿐이다. core-api가 쓰는 테이블(users·post·stream_event 등)은 기존대로 소유 모듈의 포트로만 접근한다.
+- **워커 적재 테이블(읽기 전용)의 매핑 소유권**: `stock_master`·`daily_candle`·`valuation_daily`·`financial_summary`·`investor_flow_daily`처럼 워커가 쓰고 core-api는 읽기만 하는 테이블은 core-api 안에 단독 소유 모듈을 두지 않는다 — 읽는 모듈(search·stream·stockinfo)이 각자 `@Immutable` 읽기 전용 매핑을 갖는다(엔티티 이름만 구분). 단일 소유는 DDL의 `db-migrations`뿐이다. 단, **"이 종목이 실재하는가"라는 공용 질문은 search의 `StockCatalog` 포트로 일원화**한다(subscription·stream·notification·community가 사용) — 존재 판정 로직이 모듈마다 갈라지는 것을 막기 위한 유스케이스 포트이며, stockinfo처럼 판정이 아니라 개요·지표 자체가 요구인 모듈은 자기 읽기 매핑을 쓴다. core-api가 쓰는 테이블(users·post·stream_event 등)은 기존대로 소유 모듈의 포트로만 접근한다.
 - 채널명·봉투는 `:contracts` 상수만 사용한다(문자열 하드코딩 금지).
 
 ## 10. 보안 체크리스트
