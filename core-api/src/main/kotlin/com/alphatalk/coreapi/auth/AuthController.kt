@@ -1,6 +1,9 @@
 package com.alphatalk.coreapi.auth
 
 import com.alphatalk.coreapi.support.CurrentUser
+import com.alphatalk.coreapi.support.RateLimited
+import com.alphatalk.coreapi.support.RateLimits
+import jakarta.servlet.http.HttpServletRequest
 import jakarta.validation.Valid
 import org.springframework.http.HttpStatus
 import org.springframework.web.bind.annotation.PostMapping
@@ -20,7 +23,12 @@ class AuthController(
         SignupResponse(auth.signup(request))
 
     @PostMapping("/login")
-    fun login(@Valid @RequestBody request: LoginRequest): TokenPair =
+    @RateLimited(
+        action = RateLimits.LOGIN,
+        limit = RateLimits.LOGIN_PER_MINUTE,
+        key = RateLimits.LOGIN_KEY,
+    )
+    fun login(@Valid @RequestBody request: LoginRequest, http: HttpServletRequest): TokenPair =
         auth.login(request)
 
     @PostMapping("/refresh")

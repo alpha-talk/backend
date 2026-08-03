@@ -31,6 +31,8 @@ import kotlin.test.assertTrue
 @ActiveProfiles("test")
 class AuthEndToEndTest {
     companion object {
+        private const val LOGIN_ATTEMPTS_SPANNING_TWO_WINDOWS = 21
+
         @Container
         @ServiceConnection
         @JvmStatic
@@ -85,6 +87,20 @@ class AuthEndToEndTest {
 
     private fun login(email: String = "a@b.c"): JsonNode =
         json(post("/api/v1/auth/login", """{"email":"$email","password":"password1"}""").body)
+
+    @Test
+    fun `FR-19 - 로그인 시도가 IP와 이메일 기준 분당 한도를 넘으면 429다`() {
+        val email = "throttled-${System.nanoTime()}@b.c"
+
+        val responses = (1..LOGIN_ATTEMPTS_SPANNING_TWO_WINDOWS).map {
+            post("/api/v1/auth/login", """{"email":"$email","password":"wrongpass1"}""")
+        }
+
+        assertEquals(401, responses.first().statusCode.value(), "첫 시도는 인증 실패여야 한다")
+        val throttled = responses.first { it.statusCode.value() == 429 }
+        assertEquals("RATE_LIMITED", json(throttled.body).path("error").path("code").asText())
+        assertTrue((throttled.headers.getFirst("Retry-After")?.toLong() ?: 0) in 1..60)
+    }
 
     @Test
     fun `FR-01 DoD - 가입 로그인 보호 API 접근 토큰 재발급`() {

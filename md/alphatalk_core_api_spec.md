@@ -77,12 +77,15 @@ ULID 사전순이 곧 시간순이라는 성질을 이용한 **양방향 커서*
 | 공감 토글 | 60회/분 | userId |
 | 로그인 시도 | 10회/분 | IP+email |
 
-구현: Redis 고정 윈도 카운터(`INCR`+`EXPIRE`). 초과 시 429 + `Retry-After`.
+구현: Redis 고정 윈도 카운터(`INCR`+`EXPIRE` Lua 원자화). 초과 시 429 + `Retry-After`. Redis 장애 시에는 요청을 막지 않는다(fail-open — 유량 제한이 가용성보다 우선하지 않음). 로그인 키의 IP는 `remoteAddr` 기준이므로 프록시/LB 뒤 배포 시 `server.forward-headers-strategy` 설정이 전제다(M6 배포 체크리스트).
+
+- **적용 지점은 API 엣지다**: 유량 제한은 유스케이스 로직이 아니라 횡단 관심사이므로 컨트롤러 메서드의 `@RateLimited` 선언으로 걸고 애스펙트가 강제한다 — 서비스 계층에는 유량 코드가 없다. 키는 기본이 인증 유저(`userId`)이고, 로그인처럼 비인증 요청은 애노테이션의 SpEL 식으로 조합한다(IP+email). 위 표의 한도·윈도는 API 계약이므로 애노테이션 상수로 고정하고 환경별 프로퍼티로 두지 않는다.
+- 제한은 **시도 기준**이라 인증 실패(로그인 401)와 멱등 재생(§1.6)도 카운트한다. 429는 창이 지나면 자연 해소되고 `Retry-After`가 대기 시간을 알려준다.
 
 ### 1.6 멱등성
 
-- 글/댓글 POST는 `Idempotency-Key` 헤더(선택, ULID)를 지원한다: 10분 내 같은 키로 재요청하면 최초 응답을 재반환한다(Redis 캐시).
-- 공감/구독은 PUT/DELETE 의미론이라 자연 멱등이다.
+- 글/댓글 POST는 `Idempotency-Key` 헤더(선택, ULID)를 지원한다: 같은 키로 재요청하면 최초 성공 응답을 재반환한다. 구현은 **DB 원장**(`idempotency_record`)이다 — 본문 검증 통과 후 글·댓글 INSERT와 **같은 트랜잭션**에서 키를 조건부 INSERT(`ON CONFLICT DO NOTHING`)로 선점하고 응답을 함께 영속한다. 커밋과 키 기록이 원자적이라 커밋 직후 프로세스 종료·순차 재시도·병렬 중복(선점 대기 후 재생) 모두에서 중복 생성이 없다. 같은 키를 다른 요청 종류에 쓰면 409. 재생도 하나의 요청이므로 §1.5 유량을 소비한다. 원장 보존 정리는 배치 몫(M6).
+- 공감/구독은 PUT/DELETE 의미론이라 자연 멱등이다. 공감 등록·읽음 커서 생성은 조건부 INSERT(`ON CONFLICT DO NOTHING`)로 동시 요청에서도 정확히 한 번만 반영된다.
 
 ---
 
@@ -124,7 +127,7 @@ ULID 사전순이 곧 시간순이라는 성질을 이용한 **양방향 커서*
 ```
 
 - 매칭: 코드 prefix OR 이름 부분일치(`ILIKE` + `pg_trgm` GIN 인덱스). 정렬: 코드 prefix 일치 우선 → 이름 일치 → **규모 내림차순** → 코드.
-- 규모 기준은 원래 시가총액이지만 `stock_master`에 가격이 없어 지금은 **`shares_outstanding`(발행주식수)로 근사**한다. 발행주식수는 시총과 다르므로 저가·다주식 종목이 고가 우량주보다 앞설 수 있다. `valuation_daily.market_cap`이 들어오는 M5에서 시총으로 교체한다 — 정렬 기준은 응답에 드러나지 않으므로 그때도 **API 계약은 그대로**다.
+- 규모 기준(M5부터): **최신 `valuation_daily.market_cap` 내림차순**. 아직 밸류에이션이 미적재인 종목은 `shares_outstanding`(발행주식수) 근사로 폴백한다(nulls last → 폴백 정렬). 정렬 기준은 응답에 드러나지 않으므로 **API 계약은 그대로**다.
 - `q`는 1자 이상. 데이터 원천은 batch-worker의 `stock_master`이고 `is_active=true`만 조회한다. Phase 3에서 OpenSearch(형태소/초성)로 승격하되 **API 계약은 불변**.
 
 ---
@@ -230,13 +233,16 @@ ULID 사전순이 곧 시간순이라는 성질을 이용한 **양방향 커서*
 
 **GET /notifications/badge** → 200 `{ "total": 27, "byCode": { "005930": 12, "000660": 15 } }`
 
-- 관심 종목마다 `count(event_id > cursor)`를 센다. 종목당 상한 99로 캡(`LIMIT 100` 카운트)해 비용을 고정한다. 결과는 10초 Redis 캐시.
+- 관심 종목마다 `count(event_id > cursor)`를 센다. 종목당 상한 99로 캡(`LIMIT 100` 카운트)해 비용을 고정한다. 결과는 10초 Redis 캐시(`badge:{userId}` — 메인서버 전용 키, Redis 계약 §3 주석). 커서 전진·모두 읽음 시 캐시를 지워 읽음 처리 직후의 배지가 캐시 신선도에 묶이지 않게 한다. 미읽음이 0인 종목은 `byCode`에서 생략한다.
+- 커서가 없는 종목(구독 직후 등)은 전부 미읽음으로 센다. 커서 조회는 Redis가 fast path고, 미스·장애 시 DB `read_cursor` 미러에서 읽어 Redis에 되채운다(기획안 §5.4).
 
 **GET /notifications?types=&cursor=&limit=30** → 스트림과 동일한 item 형태에 `code`별 혼합, `eventId` 내림차순. 항목 클릭 시 클라는 `/rooms/{code}` 화면에서 해당 `eventId`로 점프한다.
 
+- 응답 봉투는 §1.4 공통 `pageInfo`와 동일하다. `limit` 기본 30·최대 100. 과거 페이지는 `cursor`(내림차순 `before` 의미)로 넘긴다.
+
 **PUT /rooms/{code}/cursor** — req `{ "lastEventId": "01J9Z8..." }` → 204
 
-- 현재 커서보다 **작은 값(역행)은 무시**한다. Redis SET + DB upsert(write-through). 방 열람 중 주기적/이탈 시 호출한다.
+- 현재 커서보다 **작은 값(역행)은 무시**한다. DB upsert 후 Redis SET(write-through — DB가 진실, Redis는 fast path). 방 열람 중 주기적/이탈 시 호출한다. `lastEventId`는 ULID 형식을 검증하고, 없는 종목은 404.
 
 **POST /notifications/read-all** → 204 — 관심 종목 각각의 커서를 해당 종목 최신 `eventId`로 옮긴다.
 
@@ -254,6 +260,7 @@ ULID 사전순이 곧 시간순이라는 성질을 이용한 **양방향 커서*
 | PATCH | `/posts/{postId}` | 수정 (작성자) |
 | DELETE | `/posts/{postId}` | 소프트 삭제 (작성자) |
 | POST | `/posts/{postId}/comments` | 댓글(1뎁스) |
+| GET | `/posts/{postId}/comments` | 댓글 목록 (커서) |
 | DELETE | `/comments/{commentId}` | 댓글 삭제 |
 | PUT / DELETE | `/posts/{postId}/like` | 공감 등록/해제 (멱등) |
 | POST | `/posts/{postId}/report` | 신고 (FR-18) |
@@ -268,6 +275,13 @@ ULID 사전순이 곧 시간순이라는 성질을 이용한 **양방향 커서*
 
 **더블라이트 순서 (ADR A6)** — 한 트랜잭션: ① `post` INSERT ② `stream_event`(type=POST, `event_id`=postId 재사용) INSERT → 커밋 → ③ `@TransactionalEventListener(AFTER_COMMIT)`로 `PUBLISH post:{code}` (봉투는 Redis 계약 §1.2). 발행에 실패해도 무시한다 — 클라가 REST 복구로 보강한다(§1.4). `quotedEventId`는 같은 방의 실존 이벤트인지 검증한다.
 
+- 검증: `title` 1~100자, `content` 1~2000자, 댓글 `content` 1~1000자, 신고 `detail` 500자 이하.
+- `stream_event`의 POST payload는 §5 예시 형태(`postId`·`kind`·`author`·`preview`(본문 100자)·`likeCount`·`commentCount`)로 **작성 시점 스냅샷**을 저장한다. 이후 공감·댓글 수 변동은 payload에 재반영하지 않는다 — 최신 수치는 글 상세/목록 REST가 진실이다.
+- 댓글 발행 봉투: `eventId`=댓글 ULID, `data.kind="comment"`, `data.postId`=댓글 자신의 ULID, `data.parentId`=부모 글 ULID (WS 명세 §4.4의 `parentId` 해석 — 글은 `parentId: null`).
+- 방 글 목록(`GET /rooms/{code}/posts`)은 §1.4 커서 규약(`cursor`·`direction`·`limit` 기본 50)을 따르고 item은 `{ postId, code, author, title, preview, likeCount, commentCount, createdAt }`이다. 소프트 삭제된 글은 목록에서 제외한다(삭제 흔적 표시는 스트림의 `deleted` 마킹 몫).
+- 댓글 목록(`GET /posts/{postId}/comments?cursor=&direction=&limit=50`)은 §1.4 파라미터를 쓰되 스레드 관행에 맞춰 **기본 방향이 `after`(cursor 미지정 시 가장 오래된 댓글부터 오름차순)**다. `direction=before`는 내림차순 과거 조회. item은 상세 응답의 comments.items와 같고 `commentId` 오름차순이 시간순이다. 51번째 이후 댓글과 놓친 `kind=comment` 푸시(WS 명세 §6)는 이 API의 `cursor=마지막 commentId`로 복구한다. 글 상세의 `comments`는 이 API의 첫 페이지(기본 방향, 50건)와 동일하다.
+- PATCH 요청은 `{ "title?", "content?" }` 부분 수정이고 응답은 GET 상세와 같은 형태다. 생략한 필드는 **DB 현재값 기준(coalesce)으로 유지**된다 — 서로 다른 필드를 동시에 수정해도 늦은 쪽이 상대 필드를 옛 값으로 되돌리지 않는다. 삭제된 글의 수정·댓글·공감·신고는 404.
+
 **GET /posts/{postId}** → 200
 
 ```json
@@ -279,8 +293,8 @@ ULID 사전순이 곧 시간순이라는 성질을 이용한 **양방향 커서*
   "createdAt": 1719..., "updatedAt": null, "deleted": false }
 ```
 
-- **삭제 정책**: 소프트 삭제다. 스트림에서는 해당 StreamEvent payload에 `"deleted": true`를 마킹한다(재발행 없음 — 클라가 목록에서 "삭제된 글"로 표시). 댓글 작성 시에도 `post:{code}`에 `kind=comment`를 발행한다(같은 봉투).
-- 공감: `post_like` upsert + `like_count` 원자 증감. 신고: `{ "reason": "SPAM|ABUSE|MANIPULATION|ETC", "detail?" }` → 201. 신고 상태(접수/처리)는 운영 도구 범위다.
+- **삭제 정책**: 소프트 삭제다. 스트림에서는 해당 StreamEvent payload에 `"deleted": true`를 마킹한다(재발행 없음 — 클라가 목록에서 "삭제된 글"로 표시). 삭제된 글의 상세는 `deleted: true`에 `title`/`content`를 비워 반환한다(댓글 스레드는 유지). 댓글 작성 시에도 `post:{code}`에 `kind=comment`를 발행한다(같은 봉투).
+- 공감: `post_like` upsert + `like_count` 원자 증감. 응답은 204(등록·해제 동일, 멱등). 신고: `{ "reason": "SPAM|ABUSE|MANIPULATION|ETC", "detail?" }` → 201 `{ "reportId": "01JA..." }`. 신고 상태(접수/처리)는 운영 도구 범위다.
 
 ---
 
@@ -298,16 +312,20 @@ ULID 사전순이 곧 시간순이라는 성질을 이용한 **양방향 커서*
 
 **GET /stocks/{code}** → `{ "code", "name", "market", "sector", "sharesOutstanding", "listedAt", "updatedAt" }`
 
+- `sector`는 `sector` 테이블을 조인한 업종 **이름**(미분류면 null), `listedAt`은 `yyyyMMdd` 문자열(null 허용), `updatedAt`은 epoch ms. 상장폐지(`is_active=false`)·미존재 종목은 이 모듈 전 엔드포인트에서 404.
+
 **GET /stocks/{code}/candles?period=D|W|M&count=100&to=20260707** → 200
 
 ```json
 { "period": "D", "items": [ { "date": "20260707", "open": 70600, "high": 71500, "low": 70400,
                                "close": 71200, "volume": 12345678, "value": 876543210000 } ],
-  "pageInfo": { "hasMoreBefore": true } }
+  "pageInfo": { "hasMoreBefore": true, "nextTo": "20260706" } }
 ```
 
 - 저장은 **일봉만**(수정주가) 한다. `W`/`M`은 조회 시 일봉을 집계한다(ADR A8: 주=ISO주, 월=역월; open=첫날 시가, close=마지막 종가, high/low=극값, volume=합). `to` 이전 `count`건은 내림차순이 아니라 **오름차순 반환**(차트 라이브러리 관행).
 - 미적재 과거 구간은 있는 만큼 반환하고 `hasMoreBefore:false`를 준다(백필은 batch 잡).
+- `W`/`M` 버킷의 `date`는 버킷 안 **마지막 거래일**이고 `value`도 합산한다. `count` 기본 100·최대 500. 집계용 일봉 조회는 `count × 버킷당 최대 일수(주 7·월 31)+1`로 상한을 고정하고, 상한에 걸려 잘렸을 수 있는 가장 오래된 버킷은 버린 뒤 `hasMoreBefore:true`로 알린다 — 부분 버킷을 완전한 봉처럼 주지 않기 위해서다.
+- **과거 페이지 커서는 `pageInfo.nextTo`다**: `hasMoreBefore=true`면 다음 페이지를 `to=nextTo`로 요청한다. `nextTo`는 가장 오래된 버킷의 **시작일 하루 전**(주=ISO주 월요일−1, 월=1일−1, 일=당일−1)이라 같은 버킷이 다음 페이지에서 부분 재집계되지 않는다. 클라가 `date`(마지막 거래일)−1로 직접 계산하면 W/M에서 같은 주·월이 중복되므로 반드시 `nextTo`를 쓴다. `hasMoreBefore=false`면 `nextTo`는 null.
 
 **GET /stocks/{code}/valuation** → `{ "per": 12.3, "pbr": 1.1, "eps": 5800, "bps": 65000, "marketCap": 4250000, "asOf": "20260706" }` (marketCap 단위 억원 — 프론트 합의)
 
@@ -323,6 +341,10 @@ ULID 사전순이 곧 시간순이라는 성질을 이용한 **양방향 커서*
 
 모든 지표 응답에 `asOf` 필수(기획안 데이터 신선도 요구).
 
+- **단위 규약**: 워커는 금액을 원 단위로 적재하고(KIS 워커 명세 §4) API 단위 변환은 core-api 몫이다 — `marketCap`과 재무 금액(`revenue`·`operatingProfit` 등)은 **억원**(1e8로 내림 나눗셈), 수급은 적재 단위 그대로 백만원.
+- 재무의 `period`는 연간(`reprt_code=11011`)이 `"2025"`, 분기가 `"2026Q1"`(11013=Q1·11012=Q2·11014=Q3)이다. `years` 기본 3·최대 10 — 최신 `years`개 연도의 연간·분기 행을 준다. `fs_div`는 워커가 연결(CFS) 우선으로 한 행만 적재하므로 응답에 드러내지 않는다. `asOf`는 공시 시각(`disclosed_at`)의 KST 날짜다.
+- `investors`는 최신 영업일부터 내림차순, `days` 기본 20·최대 250. 데이터가 없으면 `financials`/`investors`는 빈 배열로 200, 단일 객체인 `valuation`은 404다.
+
 ---
 
 ## 9. 모듈 간 의존 & 이벤트 (Modulith 경계)
@@ -336,8 +358,8 @@ stream/stockinfo ──(읽기)──► Redis price:{code} / 워커 적재 테�
 auth ◄── 전 모듈 (SecurityContext)
 ```
 
-- `stock_master`를 읽는 **JPA 매핑은 search 모듈이 단독 소유**한다. 관심목록도 스트림도 "이 종목이 실재하는가"를 물어야 하는데, 모듈마다 같은 테이블을 각자 매핑하면 매핑이 갈라진다. search가 `StockCatalog`(존재 확인·이름/시장 조회)를 노출하고 나머지는 이 포트만 쓴다. 검색 질의도 같은 엔티티 위의 JPQL(`ilike`·정렬 case 식)로 구현한다.
 - `stream_event` 테이블의 논리 소유자는 **stream 모듈**이다. community는 직접 INSERT하지 않고 노출된 `StreamEventAppender`를 호출한다(경계 테스트로 강제). worker-llm과 worker-batch(투자의견)는 별도 프로세스로 같은 테이블에 INSERT한다. 스키마는 `db-migrations` 모듈(Liquibase)이 단일 관리하고 외부 생산자는 `source_key` 멱등 계약을 지킨다.
+- **워커 적재 테이블(읽기 전용)의 매핑 소유권**: `stock_master`·`daily_candle`·`valuation_daily`·`financial_summary`·`investor_flow_daily`처럼 워커가 쓰고 core-api는 읽기만 하는 테이블은 core-api 안에 단독 소유 모듈을 두지 않는다 — 읽는 모듈(search·stream·stockinfo)이 각자 `@Immutable` 읽기 전용 매핑을 갖는다(엔티티 이름만 구분). 단일 소유는 DDL의 `db-migrations`뿐이다. 단, **"이 종목이 실재하는가"라는 공용 질문은 search의 `StockCatalog` 포트로 일원화**한다(subscription·stream·notification·community가 사용) — 존재 판정 로직이 모듈마다 갈라지는 것을 막기 위한 유스케이스 포트이며, stockinfo처럼 판정이 아니라 개요·지표 자체가 요구인 모듈은 자기 읽기 매핑을 쓴다. core-api가 쓰는 테이블(users·post·stream_event 등)은 기존대로 소유 모듈의 포트로만 접근한다.
 - 채널명·봉투는 `:contracts` 상수만 사용한다(문자열 하드코딩 금지).
 
 ## 10. 보안 체크리스트
@@ -359,11 +381,13 @@ comment(id CHAR(26) PK, post_id FK, author_id FK, content, created_at, deleted_a
 post_like(post_id, user_id, created_at, PK(post_id, user_id))
 report(id, target_type, target_id, reporter_id, reason, detail, status, created_at)
 read_cursor(user_id, code, last_event_id, updated_at, PK(user_id, code))   -- Redis 미러
+idempotency_record(user_id, idem_key CHAR(26), action, response JSONB NULL, created_at,
+     PK(user_id, idem_key))   -- §1.6 멱등 원장 (글·댓글 커밋과 동일 트랜잭션)
 -- 워커 소유 테이블(stock_master, daily_candle, valuation_daily, investor_flow_daily,
 -- financial_summary 등)은 「KIS 수집 워커 명세」 §4 참조. 마이그레이션은 db-migrations 모듈(Liquibase) 단일 관리.
 ```
 
-### 전체 엔드포인트 요약 (22개)
+### 전체 엔드포인트 요약 (30개)
 
 | 모듈 | 엔드포인트 |
 |---|---|
@@ -372,7 +396,7 @@ read_cursor(user_id, code, last_event_id, updated_at, PK(user_id, code))   -- Re
 | subscription (3) | GET /watchlist, PUT·DELETE /watchlist/{code} |
 | stream (2) | GET /rooms/{code}/stream, GET /rooms/{code}/quote |
 | notification (4) | GET badge, GET /notifications, PUT /rooms/{code}/cursor, POST read-all |
-| community (9) | posts CRUD(4)+목록, comments(2), like(PUT/DELETE=1), report |
+| community (10) | posts CRUD(4)+목록, comments(POST·GET·DELETE=3), like(PUT/DELETE=1), report |
 | stockinfo (5) | GET /stocks/{code} + candles·valuation·financials·investors |
 
 ---
