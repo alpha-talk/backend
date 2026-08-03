@@ -3,6 +3,7 @@ package com.alphatalk.coreapi.stockinfo
 import com.alphatalk.coreapi.support.ApiException
 import com.alphatalk.coreapi.support.ErrorCode
 import org.springframework.stereotype.Service
+import org.springframework.transaction.annotation.Transactional
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 
@@ -14,6 +15,7 @@ class StockInfoService(
     private val financials: FinancialsStore,
     private val investors: InvestorFlowStore,
 ) {
+    @Transactional(readOnly = true)
     fun overview(rawCode: String): StockOverviewResponse {
         val code = validCode(rawCode)
         val profile = profiles.findActive(code) ?: throw unknownStock(code)
@@ -28,6 +30,7 @@ class StockInfoService(
         )
     }
 
+    @Transactional(readOnly = true)
     fun candles(rawCode: String, rawPeriod: String?, rawCount: Int?, rawTo: String?): CandlesResponse {
         val code = validCode(rawCode)
         val period = validPeriod(rawPeriod)
@@ -57,6 +60,7 @@ class StockInfoService(
         )
     }
 
+    @Transactional(readOnly = true)
     fun valuation(rawCode: String): ValuationResponse {
         val code = validCode(rawCode)
         requireActive(code)
@@ -72,6 +76,7 @@ class StockInfoService(
         )
     }
 
+    @Transactional(readOnly = true)
     fun financials(rawCode: String, rawYears: Int?): FinancialsResponse {
         val code = validCode(rawCode)
         val years = validYears(rawYears)
@@ -89,6 +94,7 @@ class StockInfoService(
         return FinancialsResponse(annual = annual, quarterly = quarterly)
     }
 
+    @Transactional(readOnly = true)
     fun investors(rawCode: String, rawDays: Int?): InvestorsResponse {
         val code = validCode(rawCode)
         val days = validDays(rawDays)

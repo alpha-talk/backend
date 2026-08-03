@@ -7,6 +7,7 @@ import com.alphatalk.coreapi.support.ApiException
 import com.alphatalk.coreapi.support.ErrorCode
 import com.fasterxml.jackson.databind.ObjectMapper
 import org.springframework.stereotype.Service
+import org.springframework.transaction.annotation.Transactional
 
 @Service
 class CommunityService(
@@ -59,6 +60,7 @@ class CommunityService(
         }
     }
 
+    @Transactional(readOnly = true)
     fun postDetail(userId: Long, rawPostId: String): PostDetailView {
         val postId = validUlid(rawPostId)
         val row = posts.findWithAuthor(postId) ?: throw postNotFound(postId)
@@ -89,6 +91,7 @@ class CommunityService(
         )
     }
 
+    @Transactional(readOnly = true)
     fun comments(rawPostId: String, cursor: String?, direction: String?, limit: Int?): CommentPage {
         val postId = validUlid(rawPostId)
         if (posts.find(postId) == null) throw postNotFound(postId)
@@ -128,6 +131,7 @@ class CommunityService(
         )
     }
 
+    @Transactional(readOnly = true)
     fun roomPosts(rawCode: String, cursor: String?, direction: String?, limit: Int?): PostListPage {
         val code = validCode(rawCode)
         val validCursor = cursor?.trim().orEmpty().ifEmpty { null }?.let(::validUlid)
