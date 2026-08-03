@@ -1,4 +1,10 @@
+spring:
+  config:
+    import:                                     # 저장소 루트 secrets.yml — 로컬 시크릿(.gitignore 대상). 없으면 무시되고 환경변수 경로로 동작
+      - optional:file:./secrets.yml             # 저장소 루트에서 실행할 때
+      - optional:file:../secrets.yml            # bootRun(작업 디렉터리=모듈 디렉터리)으로 실행할 때
+
 alphatalk:
   price:
     symbols: ["005930"]
-    market-hours-enforced: false    # 로컬 스모크는 장 시간 밖에서도 연결·구독 유지
+    market-hours-enforced: true    # 장 운영 창(07:50~20:00, §2.7) 준수 — 창 밖 심야 스모크만 false로 완화

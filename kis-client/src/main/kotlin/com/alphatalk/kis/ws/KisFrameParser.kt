@@ -6,6 +6,9 @@ import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 
 object KisFrameParser {
     const val TR_ID_TICK = "H0STCNT0"
+    const val TR_ID_TICK_TOTAL = "H0UNCNT0"
+    const val TR_ID_TICK_OVERTIME = "H0STOUP0"
+    val TICK_TR_IDS = setOf(TR_ID_TICK, TR_ID_TICK_TOTAL, TR_ID_TICK_OVERTIME)
     const val PINGPONG_TR_ID = "PINGPONG"
 
     private const val ENCRYPTED_FLAG = "1"
@@ -47,7 +50,7 @@ object KisFrameParser {
         if (parts.size < 4) return KisFrame.Unknown(text)
         val (encrypted, trId, countText, payload) = parts
         if (encrypted == ENCRYPTED_FLAG) return KisFrame.EncryptedDropped(trId)
-        if (trId != TR_ID_TICK) return KisFrame.Unknown(text)
+        if (trId !in TICK_TR_IDS) return KisFrame.Unknown(text)
         val count = countText.toIntOrNull()?.takeIf { it > 0 } ?: return KisFrame.Unknown(text)
         val fields = payload.split("^")
         if (fields.size % count != 0) return KisFrame.Unknown(text)

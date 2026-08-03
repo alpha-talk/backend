@@ -1,8 +1,10 @@
 package com.alphatalk.worker.price.config
 
+import com.alphatalk.kis.model.KisEnv
 import com.alphatalk.worker.price.conflation.ConflationBuffer
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
@@ -58,6 +60,12 @@ class PriceConfigTest {
 
         assertNotNull(sessionPool(props))
         assertNotNull(config.demandSource(props))
+    }
+
+    @Test
+    fun `실전은 통합·시간외 TR을, 모의는 KRX 정규장 TR만 구독한다`() {
+        assertEquals(listOf("H0UNCNT0", "H0STOUP0"), config.tickTrIds(KisEnv.PROD))
+        assertEquals(listOf("H0STCNT0"), config.tickTrIds(KisEnv.VTS))
     }
 
     @Test
