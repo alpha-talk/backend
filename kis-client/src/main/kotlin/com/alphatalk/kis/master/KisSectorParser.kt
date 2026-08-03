@@ -23,21 +23,22 @@ object KisSectorParser {
     private const val CODE_TO = 5
 
     fun parse(content: ByteArray): ParsedSectors {
-        val sectors = mutableListOf<KisSector>()
-        var skipped = 0
-        splitLines(content).forEach { line ->
-            val parsed = parseLine(line)
-            if (parsed == null) skipped += 1 else sectors += parsed
-        }
-        return ParsedSectors(sectors, skipped)
+        val rows = splitLines(content).map(::readRow)
+        return ParsedSectors(
+            sectors = rows.filterNotNull()
+                .filter { it.name.isNotEmpty() }
+                .map { KisSector(it.code, it.name) },
+            skippedLines = rows.count { it == null },
+        )
     }
 
-    private fun parseLine(line: ByteArray): KisSector? {
+    private data class Row(val code: String, val name: String)
+
+    private fun readRow(line: ByteArray): Row? {
         if (line.size != LINE_LENGTH) return null
         val code = String(line, 0, CODE_TO, CP949).trim()
-        val name = String(line, CODE_TO, LINE_LENGTH - CODE_TO, CP949).trim()
-        if (code.isEmpty() || name.isEmpty()) return null
-        return KisSector(code, name)
+        if (code.isEmpty()) return null
+        return Row(code, String(line, CODE_TO, LINE_LENGTH - CODE_TO, CP949).trim())
     }
 
     private fun splitLines(content: ByteArray): List<ByteArray> {

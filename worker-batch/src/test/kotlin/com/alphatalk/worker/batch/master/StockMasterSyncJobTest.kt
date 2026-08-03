@@ -53,12 +53,14 @@ class StockMasterSyncJobTest {
 
     private class RecordingStockStore(
         private val onDeactivate: (() -> Unit)? = null,
+        private val callOrder: MutableList<String>? = null,
     ) : StockMasterStore {
         val upserted = mutableListOf<KisStockMaster>()
         var deactivateCalls = 0
         var deactivatedWith: List<String> = emptyList()
 
         override fun upsertAll(stocks: List<KisStockMaster>): Int {
+            callOrder?.add("stocks")
             upserted += stocks
             return stocks.size
         }
@@ -71,10 +73,13 @@ class StockMasterSyncJobTest {
         }
     }
 
-    private class RecordingSectorStore : SectorStore {
+    private class RecordingSectorStore(
+        private val callOrder: MutableList<String>? = null,
+    ) : SectorStore {
         val upserted = mutableListOf<KisSector>()
 
         override fun upsertAll(sectors: List<KisSector>): Int {
+            callOrder?.add("sectors")
             upserted += sectors
             return sectors.size
         }
@@ -100,12 +105,13 @@ class StockMasterSyncJobTest {
         stocks: StockMasterStore,
         runs: BatchJobRunStore,
         sectors: SectorStore = RecordingSectorStore(),
+        meters: SimpleMeterRegistry = SimpleMeterRegistry(),
     ) = StockMasterSyncJob(
         files,
         stocks,
         sectors,
         runs,
-        SimpleMeterRegistry(),
+        meters,
         clock = { startedAt },
         today = { today },
     )
@@ -170,18 +176,55 @@ class StockMasterSyncJobTest {
     }
 
     @Test
-    fun `업종 파일이 계속 불완전하면 잡을 실패로 남긴다`() {
+    fun `업종 파일이 계속 불완전해도 종목 적재는 지킨다`() {
         val files = RecordingFetcher(corruptSectorTimes = 2)
+        val store = RecordingStockStore()
+        val meters = SimpleMeterRegistry()
+
+        val ok = job(files, store, RecordingRuns(startResult = 1L), RecordingSectorStore(), meters).syncOnce()
+
+        assertEquals(6, ok)
+        assertTrue(store.upserted.isNotEmpty(), "업종 실패가 종목 적재를 막았다")
+        assertEquals(6.0, meters.counter("batch.stock.master.synced").count())
+        assertEquals(1.0, meters.counter("batch.sector.sync.failed").count())
+    }
+
+    @Test
+    fun `업종 동기화가 실패하면 잡을 성공으로 남기지 않아 당일 재시도가 열린다`() {
         val runs = RecordingRuns(startResult = 1L)
         val sectors = RecordingSectorStore()
 
-        assertFailsWith<IllegalStateException> {
-            job(files, RecordingStockStore(), runs, sectors).syncOnce()
+        job(RecordingFetcher(corruptSectorTimes = 2), RecordingStockStore(), runs, sectors).syncOnce()
+
+        assertEquals(null, runs.succeeded, "업종 실패를 성공으로 기록했다")
+        assertEquals(1L, runs.failed?.first)
+        assertTrue(runs.failed?.second?.contains("sector") == true)
+        assertTrue(sectors.upserted.isEmpty())
+    }
+
+    @Test
+    fun `업종 단계의 Error는 삼키지 않고 전파한다`() {
+        val exploding = object : SectorStore {
+            override fun upsertAll(sectors: List<KisSector>): Int = throw StackOverflowError("boom")
         }
 
-        assertEquals(1L, runs.failed?.first)
-        assertEquals(null, runs.succeeded)
-        assertTrue(sectors.upserted.isEmpty())
+        assertFailsWith<StackOverflowError> {
+            job(RecordingFetcher(), RecordingStockStore(), RecordingRuns(startResult = 1L), exploding).syncOnce()
+        }
+    }
+
+    @Test
+    fun `종목을 먼저 저장한 뒤 업종을 동기화한다`() {
+        val order = mutableListOf<String>()
+
+        job(
+            RecordingFetcher(),
+            RecordingStockStore(callOrder = order),
+            RecordingRuns(startResult = 1L),
+            RecordingSectorStore(callOrder = order),
+        ).syncOnce()
+
+        assertEquals(listOf("stocks", "sectors"), order)
     }
 
     @Test
