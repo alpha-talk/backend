@@ -115,7 +115,7 @@ WS 구독 용량이 유한하므로(§1.3) 전 종목이 아니라 수요가 있
 2. **데이터(파이프 구분 텍스트)**: `암호화유무|TR_ID|데이터건수|응답데이터`
     - 첫 필드 `0`=평문, `1`=AES 암호화(체결통보 등 — 본 서비스 미사용 TR. 파서는 플래그 분기만 두고 `1`은 드랍+경고).
     - 응답데이터는 `^` 구분 필드, 건수>1이면 레코드가 이어 붙음(필드 수로 분할).
-      **체결가 TR 주요 필드 인덱스** — 세 TR(H0STCNT0·H0UNCNT0·H0STOUP0) 모두 앞 14필드 레이아웃이 동일해(공식 예제 columns 대조: H0UNCNT0=H0STCNT0 전 필드 동일 44개, H0STOUP0은 40개) 파서는 인덱스 매핑 하나를 공유한다. 파싱 상수는 `:contracts`가 아닌 `:kis-client`에 고정:
+      **체결가 TR 주요 필드 인덱스** — 세 TR(H0STCNT0·H0UNCNT0·H0STOUP0)의 필드 수는 공식 open-trading-api columns 대조 기준 **46·46·43**이다. H0STCNT0과 H0UNCNT0은 idx 21 필드명(CCLD_DVSN/CNTG_CLS_CODE — 같은 체결구분)만 다르고 순서 동일, H0STOUP0은 앞 43필드가 같고 뒤 3필드(HOUR_CLS_CODE·MRKT_TRTM_CLS_CODE·VI_STND_PRC)만 없다. 파서가 쓰는 idx 0~13은 셋이 완전히 일치하므로 인덱스 매핑 하나를 공유한다. 파싱 상수는 `:contracts`가 아닌 `:kis-client`에 고정:
 
 | idx | 필드 | 매핑 |
 |---|---|---|
@@ -126,7 +126,7 @@ WS 구독 용량이 유한하므로(§1.3) 전 종목이 아니라 수요가 있
 | 7 / 8 / 9 | STCK_OPRC / HGPR / LWPR | open·high·low |
 | 12 / 13 | CNTG_VOL / ACML_VOL | 체결량·volume(누적) |
 
-> 전체 필드(40여 개)의 확정 순서는 KIS 포털 「실시간 체결가」 문서 기준으로 구현 시 상수화하고, **실 수신 프레임 캡처를 단위 테스트 픽스처**로 고정한다. `prevClose`는 틱에 없음 → `price − PRDY_VRSS`로 산출.
+> 전체 필드 순서는 공식 open-trading-api columns 기준 전 필드 픽스처(46·43필드, 다건 이어붙임 포함)로 단위 테스트에 고정했고, **실 수신 프레임 캡처**로 재확정한다(§9). `prevClose`는 틱에 없음 → `price − PRDY_VRSS`로 산출.
 
 H0STASP0(실시간 호가)는 P3 `depth` 확장 시 동일 구조로 추가한다.
 
@@ -321,7 +321,7 @@ batch_job_run(id, job, run_date, status, ok_count, fail_count, started_at, finis
 
 1. **KIS 2026-03-20 "신규 고객 초당 호출 제한" 공지 원문** — §1.3 수치 재확인 (포털 공지사항).
 2. 모의투자 WS에서 `H0STCNT0` 실시간 지원 범위·시간대 제약, 그리고 **통합 `H0UNCNT0`·시간외 `H0STOUP0`의 vts 지원 여부** 확인 — 지원이 확인되면 vts도 실전과 동일 TR 세트로 통일한다(§2.3).
-3. 체결가 TR 3종의 전체 필드 순서 — 공식 예제(open-trading-api) columns로 앞 14필드 동일은 확인했고, 포털 문서·실프레임 캡처로 재확정.
+3. 체결가 TR 3종의 전체 필드 순서 — 공식 예제(open-trading-api) columns 전 필드 대조 완료(46·46·43, idx 0~13 완전 일치). 실프레임 캡처로 재확정만 남음.
 4. 마스터 파일 URL 안정성(비공식 경로) — 포털 "종목 다운로드" 링크 주소와 대조, 변경 대비 설정화.
 5. `FID_ORG_ADJ_PRC` 값 의미(0=수정주가) 문서 재확인.
 6. OpenDART 일일 호출 한도 수치.
