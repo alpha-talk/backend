@@ -83,6 +83,8 @@ backend/
 
 로컬 인프라는 루트 `docker-compose.yml`(Redis). 통합 테스트는 Testcontainers가 자체 기동하므로 별도 준비 불요.
 
+**로컬 시크릿**은 저장소 루트 `secrets.yml`에 모은다 — `cp secrets.yml.example secrets.yml` 후 값을 채운다. 각 서버의 `application-local.yml`(local 프로파일)이 `spring.config.import`로 optional 로 읽는다 — local 프로파일을 켜지 않는 테스트·운영 기동에서는 읽히지 않고, 파일이 없으면 무시되고 환경변수 경로로 동작한다. import된 파일이 우선이라 `secrets.yml` 값이 `application-local.yml`의 같은 키를 덮어쓴다. `secrets.yml`은 `.gitignore` 대상이며 **절대 커밋하지 않는다**. 운영은 이 파일이 아니라 환경변수·시크릿 매니저로 주입한다. import를 기본 `application.yml`로 옮기지 않는다 — 테스트 JVM의 작업 디렉터리가 모듈 디렉터리라 개발자 로컬 시크릿이 테스트 컨텍스트에 스며든다.
+
 ## 컨벤션
 
 - **코딩 컨벤션**: [md/coding_convention.md](md/coding_convention.md). 핵심 —
