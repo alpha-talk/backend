@@ -1,5 +1,5 @@
 package com.alphatalk.kis.model
 
 object KisLimits {
-    const val MAX_SYMBOLS_PER_SESSION = 41
+    const val MAX_REGISTRATIONS_PER_SESSION = 41
 }
