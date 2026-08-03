@@ -3,6 +3,7 @@ package com.alphatalk.coreapi.stockinfo
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class CandleAggregatorTest {
@@ -119,5 +120,23 @@ class CandleAggregatorTest {
 
         assertTrue(window.candles.isEmpty())
         assertFalse(window.hasMoreBefore)
+    }
+
+    @Test
+    fun `다음 페이지 커서는 가장 오래된 버킷 시작일 하루 전이다`() {
+        val weekly = CandleWindow(listOf(candle("20260708", 100, 101)), hasMoreBefore = true)
+        val monthly = CandleWindow(listOf(candle("20260715", 100, 101)), hasMoreBefore = true)
+        val daily = CandleWindow(listOf(candle("20260708", 100, 101)), hasMoreBefore = true)
+
+        assertEquals("20260705", CandleAggregator.nextTo(weekly, CandlePeriod.WEEKLY))
+        assertEquals("20260630", CandleAggregator.nextTo(monthly, CandlePeriod.MONTHLY))
+        assertEquals("20260707", CandleAggregator.nextTo(daily, CandlePeriod.DAILY))
+    }
+
+    @Test
+    fun `과거가 더 없으면 다음 페이지 커서도 없다`() {
+        val window = CandleWindow(listOf(candle("20260708", 100, 101)), hasMoreBefore = false)
+
+        assertNull(CandleAggregator.nextTo(window, CandlePeriod.WEEKLY))
     }
 }

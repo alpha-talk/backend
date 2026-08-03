@@ -50,7 +50,10 @@ class StockInfoService(
                     value = it.value,
                 )
             },
-            pageInfo = CandlePageInfo(hasMoreBefore = window.hasMoreBefore),
+            pageInfo = CandlePageInfo(
+                hasMoreBefore = window.hasMoreBefore,
+                nextTo = CandleAggregator.nextTo(window, period),
+            ),
         )
     }
 
@@ -64,7 +67,7 @@ class StockInfoService(
             pbr = latest.pbr?.toDouble(),
             eps = latest.eps,
             bps = latest.bps,
-            marketCap = latest.marketCapWon?.let { it / WON_PER_EOK },
+            marketCap = latest.marketCapWon?.let { Math.floorDiv(it, WON_PER_EOK) },
             asOf = latest.date,
         )
     }
@@ -104,12 +107,12 @@ class StockInfoService(
 
     private fun FinancialRecord.toRow(period: String) = FinancialRow(
         period = period,
-        revenue = revenue?.let { it / WON_PER_EOK },
-        operatingProfit = operatingProfit?.let { it / WON_PER_EOK },
-        netIncome = netIncome?.let { it / WON_PER_EOK },
-        assets = assets?.let { it / WON_PER_EOK },
-        liabilities = liabilities?.let { it / WON_PER_EOK },
-        equity = equity?.let { it / WON_PER_EOK },
+        revenue = revenue?.let { Math.floorDiv(it, WON_PER_EOK) },
+        operatingProfit = operatingProfit?.let { Math.floorDiv(it, WON_PER_EOK) },
+        netIncome = netIncome?.let { Math.floorDiv(it, WON_PER_EOK) },
+        assets = assets?.let { Math.floorDiv(it, WON_PER_EOK) },
+        liabilities = liabilities?.let { Math.floorDiv(it, WON_PER_EOK) },
+        equity = equity?.let { Math.floorDiv(it, WON_PER_EOK) },
         source = FINANCIALS_SOURCE,
         asOf = disclosedAt.atZone(SEOUL).toLocalDate().format(DATE_FORMAT),
     )

@@ -48,6 +48,23 @@ object CandleAggregator {
         }
     }
 
+    fun nextTo(window: CandleWindow, period: CandlePeriod): String? {
+        if (!window.hasMoreBefore) return null
+        val oldest = window.candles.firstOrNull() ?: return null
+        return bucketStart(oldest.date, period)
+            .minusDays(1)
+            .format(DateTimeFormatter.BASIC_ISO_DATE)
+    }
+
+    private fun bucketStart(date: String, period: CandlePeriod): LocalDate {
+        val day = LocalDate.parse(date, DateTimeFormatter.BASIC_ISO_DATE)
+        return when (period) {
+            CandlePeriod.DAILY -> day
+            CandlePeriod.WEEKLY -> day.with(WeekFields.ISO.dayOfWeek(), 1)
+            CandlePeriod.MONTHLY -> day.withDayOfMonth(1)
+        }
+    }
+
     private fun bucketKey(date: String, period: CandlePeriod): String {
         val day = LocalDate.parse(date, DateTimeFormatter.BASIC_ISO_DATE)
         return when (period) {

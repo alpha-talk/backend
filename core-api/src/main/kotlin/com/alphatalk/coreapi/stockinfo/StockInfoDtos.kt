@@ -20,7 +20,10 @@ data class CandleView(
     val value: Long,
 )
 
-data class CandlePageInfo(val hasMoreBefore: Boolean)
+data class CandlePageInfo(
+    val hasMoreBefore: Boolean,
+    val nextTo: String?,
+)
 
 data class CandlesResponse(
     val period: String,
