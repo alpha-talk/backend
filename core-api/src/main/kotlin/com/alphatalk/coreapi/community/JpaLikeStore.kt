@@ -53,7 +53,10 @@ interface PostLikeJpaRepository : JpaRepository<PostLikeEntity, PostLikeId> {
         @Param("at") at: Instant,
     ): Int
 
-    fun deleteByPostIdAndUserId(postId: String, userId: Long): Long
+    @Transactional
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Query("delete from PostLikeEntity l where l.postId = :postId and l.userId = :userId")
+    fun deleteIfExists(@Param("postId") postId: String, @Param("userId") userId: Long): Int
 
     fun existsByPostIdAndUserId(postId: String, userId: Long): Boolean
 }
@@ -67,7 +70,7 @@ class JpaLikeStore(
         likes.insertIfAbsent(postId, userId, clock.instant()) > 0
 
     override fun remove(postId: String, userId: Long): Boolean =
-        likes.deleteByPostIdAndUserId(postId, userId) > 0
+        likes.deleteIfExists(postId, userId) > 0
 
     @Transactional(readOnly = true)
     override fun exists(postId: String, userId: Long): Boolean =
