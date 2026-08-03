@@ -44,6 +44,35 @@ class KisFrameParserTest {
     }
 
     @Test
+    fun `통합 체결가 프레임도 동일 레이아웃으로 파싱한다`() {
+        val frame = KisFrameParser.parse(fixture("h0uncnt0-single.txt"))
+
+        val ticks = assertIs<KisFrame.Ticks>(frame).ticks
+        assertEquals(1, ticks.size)
+        val tick = ticks[0]
+        assertEquals("005930", tick.code)
+        assertEquals("155801", tick.time)
+        assertEquals(71300, tick.price)
+        assertEquals(800, tick.change)
+        assertEquals(1250000, tick.volume)
+    }
+
+    @Test
+    fun `시간외 체결가 프레임을 파싱하고 하락 부호를 적용한다`() {
+        val frame = KisFrameParser.parse(fixture("h0stoup0-single.txt"))
+
+        val ticks = assertIs<KisFrame.Ticks>(frame).ticks
+        assertEquals(1, ticks.size)
+        val tick = ticks[0]
+        assertEquals("005930", tick.code)
+        assertEquals("163010", tick.time)
+        assertEquals(71400, tick.price)
+        assertEquals(-400, tick.change)
+        assertEquals(-0.56, tick.changeRate)
+        assertEquals(45210, tick.volume)
+    }
+
+    @Test
     fun `PINGPONG 프레임을 식별한다`() {
         val frame = KisFrameParser.parse(fixture("pingpong.txt"))
 

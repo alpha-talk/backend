@@ -7,4 +7,4 @@ spring:
 alphatalk:
   price:
     symbols: ["005930"]
-    market-hours-enforced: false    # 로컬 스모크는 장 시간 밖에서도 연결·구독 유지
+    market-hours-enforced: true    # 장 운영 창(07:50~20:00, §2.7) 준수 — 창 밖 심야 스모크만 false로 완화
