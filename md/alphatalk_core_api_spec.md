@@ -316,12 +316,13 @@ ULID 사전순이 곧 시간순이라는 성질을 이용한 **양방향 커서*
 ```json
 { "period": "D", "items": [ { "date": "20260707", "open": 70600, "high": 71500, "low": 70400,
                                "close": 71200, "volume": 12345678, "value": 876543210000 } ],
-  "pageInfo": { "hasMoreBefore": true } }
+  "pageInfo": { "hasMoreBefore": true, "nextTo": "20260706" } }
 ```
 
 - 저장은 **일봉만**(수정주가) 한다. `W`/`M`은 조회 시 일봉을 집계한다(ADR A8: 주=ISO주, 월=역월; open=첫날 시가, close=마지막 종가, high/low=극값, volume=합). `to` 이전 `count`건은 내림차순이 아니라 **오름차순 반환**(차트 라이브러리 관행).
 - 미적재 과거 구간은 있는 만큼 반환하고 `hasMoreBefore:false`를 준다(백필은 batch 잡).
 - `W`/`M` 버킷의 `date`는 버킷 안 **마지막 거래일**이고 `value`도 합산한다. `count` 기본 100·최대 500. 집계용 일봉 조회는 `count × 버킷당 최대 일수(주 7·월 31)+1`로 상한을 고정하고, 상한에 걸려 잘렸을 수 있는 가장 오래된 버킷은 버린 뒤 `hasMoreBefore:true`로 알린다 — 부분 버킷을 완전한 봉처럼 주지 않기 위해서다.
+- **과거 페이지 커서는 `pageInfo.nextTo`다**: `hasMoreBefore=true`면 다음 페이지를 `to=nextTo`로 요청한다. `nextTo`는 가장 오래된 버킷의 **시작일 하루 전**(주=ISO주 월요일−1, 월=1일−1, 일=당일−1)이라 같은 버킷이 다음 페이지에서 부분 재집계되지 않는다. 클라가 `date`(마지막 거래일)−1로 직접 계산하면 W/M에서 같은 주·월이 중복되므로 반드시 `nextTo`를 쓴다. `hasMoreBefore=false`면 `nextTo`는 null.
 
 **GET /stocks/{code}/valuation** → `{ "per": 12.3, "pbr": 1.1, "eps": 5800, "bps": 65000, "marketCap": 4250000, "asOf": "20260706" }` (marketCap 단위 억원 — 프론트 합의)
 
@@ -383,7 +384,7 @@ idempotency_record(user_id, idem_key CHAR(26), action, response JSONB NULL, crea
 -- financial_summary 등)은 「KIS 수집 워커 명세」 §4 참조. 마이그레이션은 db-migrations 모듈(Liquibase) 단일 관리.
 ```
 
-### 전체 엔드포인트 요약 (23개)
+### 전체 엔드포인트 요약 (30개)
 
 | 모듈 | 엔드포인트 |
 |---|---|
