@@ -2,6 +2,7 @@ package com.alphatalk.worker.price.session
 
 import com.alphatalk.kis.model.KisAccount
 import com.alphatalk.kis.model.KisLimits
+import com.alphatalk.kis.ws.KisFrameParser
 import com.alphatalk.kis.ws.KisSessionListener
 import com.alphatalk.kis.ws.KisTick
 import com.alphatalk.kis.ws.KisWebSocketSession
@@ -9,6 +10,7 @@ import com.alphatalk.worker.price.conflation.ConflationBuffer
 import io.micrometer.core.instrument.Gauge
 import io.micrometer.core.instrument.MeterRegistry
 import org.slf4j.LoggerFactory
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -18,7 +20,8 @@ class SessionPool(
     private val approvalKeys: (KisAccount) -> String,
     private val buffer: ConflationBuffer,
     private val meters: MeterRegistry,
-    private val maxSymbolsPerSession: Int = KisLimits.MAX_SYMBOLS_PER_SESSION,
+    private val tickTrIds: List<String> = listOf(KisFrameParser.TR_ID_TICK),
+    maxRegistrationsPerSession: Int = KisLimits.MAX_REGISTRATIONS_PER_SESSION,
     private val removalGraceMillis: Long = 30_000,
     private val backoff: BackoffPolicy = BackoffPolicy(),
     private val connectTimeoutSeconds: Long = 10,
@@ -26,11 +29,18 @@ class SessionPool(
     private val ackTimeoutMillis: Long = 5_000,
     private val clock: () -> Long = System::currentTimeMillis,
 ) {
+    init {
+        require(tickTrIds.isNotEmpty()) { "tickTrIds는 최소 1개 필요하다" }
+    }
+
     private val log = LoggerFactory.getLogger(javaClass)
+    private val maxSymbolsPerSession = maxRegistrationsPerSession / tickTrIds.size
     private val sessions = accounts.map { PooledSession(it) }
     private val assignments = mutableMapOf<String, PooledSession>()
     private val pendingRemovals = mutableMapOf<String, Long>()
     private val degraded = linkedSetOf<String>()
+
+    private data class Registration(val trId: String, val symbol: String)
 
     init {
         SessionState.entries.forEach { state ->
@@ -39,7 +49,7 @@ class SessionPool(
             }.tag("state", state.name.lowercase()).register(meters)
         }
         Gauge.builder("kis.subscribed.symbols", this) { pool ->
-            pool.sessions.sumOf { it.confirmed.size }.toDouble()
+            pool.sessions.sumOf { session -> session.confirmed.map(Registration::symbol).distinct().size }.toDouble()
         }.register(meters)
         Gauge.builder("degraded.symbols", this) { pool ->
             pool.degraded.size.toDouble()
@@ -72,8 +82,8 @@ class SessionPool(
     fun degradedSymbols(): Set<String> = degraded.toSet()
 
     @Synchronized
-    private fun applyAck(pooled: PooledSession, trKey: String?, success: Boolean) {
-        pooled.onAck(trKey, success)
+    private fun applyAck(pooled: PooledSession, trId: String?, trKey: String?, success: Boolean) {
+        pooled.onAck(trId, trKey, success)
     }
 
     private fun reconcileAssignments(target: Set<String>) {
@@ -104,8 +114,8 @@ class SessionPool(
     private inner class PooledSession(val account: KisAccount) {
         var state: SessionState = SessionState.DISCONNECTED
         val assigned = mutableSetOf<String>()
-        val confirmed = mutableSetOf<String>()
-        val pending = mutableMapOf<String, Long>()
+        val confirmed: MutableSet<Registration> = ConcurrentHashMap.newKeySet()
+        val pending = mutableMapOf<Registration, Long>()
         var session: KisWebSocketSession? = null
         var nextConnectAttemptAt = 0L
         var consecutiveFailures = 0
@@ -149,25 +159,32 @@ class SessionPool(
             val current = session ?: return
             val now = clock()
             pending.entries.removeIf { now - it.value >= ackTimeoutMillis }
-            (assigned - confirmed - pending.keys).forEach { symbol ->
-                runCatching { current.subscribe(symbol) }
-                    .onSuccess { pending[symbol] = now }
-                    .onFailure { log.warn("subscribe failed: keyId={} code={}", account.keyId, symbol, it) }
+            val wanted = assigned.flatMapTo(mutableSetOf()) { symbol -> tickTrIds.map { Registration(it, symbol) } }
+            (wanted - confirmed - pending.keys).forEach { registration ->
+                runCatching { current.subscribe(registration.symbol, registration.trId) }
+                    .onSuccess { pending[registration] = now }
+                    .onFailure {
+                        log.warn(
+                            "subscribe failed: keyId={} trId={} code={}",
+                            account.keyId, registration.trId, registration.symbol, it,
+                        )
+                    }
             }
-            (confirmed + pending.keys - assigned).forEach { symbol ->
-                runCatching { current.unsubscribe(symbol) }
-                confirmed -= symbol
-                pending.remove(symbol)
+            (confirmed + pending.keys - wanted).forEach { registration ->
+                runCatching { current.unsubscribe(registration.symbol, registration.trId) }
+                confirmed -= registration
+                pending.remove(registration)
             }
         }
 
-        fun onAck(trKey: String?, success: Boolean) {
-            val symbol = trKey ?: return
-            if (pending.remove(symbol) == null) return
+        fun onAck(trId: String?, trKey: String?, success: Boolean) {
+            if (trId == null || trKey == null) return
+            val registration = Registration(trId, trKey)
+            if (pending.remove(registration) == null) return
             if (success) {
-                confirmed += symbol
+                confirmed += registration
             } else {
-                log.warn("subscribe rejected, retrying: keyId={} code={}", account.keyId, symbol)
+                log.warn("subscribe rejected, retrying: keyId={} trId={} code={}", account.keyId, trId, trKey)
             }
         }
 
@@ -178,7 +195,7 @@ class SessionPool(
 
         fun disconnect() {
             session?.let { current ->
-                runCatching { (confirmed + pending.keys).forEach { current.unsubscribe(it) } }
+                runCatching { (confirmed + pending.keys).forEach { current.unsubscribe(it.symbol, it.trId) } }
                 runCatching { current.close() }
             }
             session = null
@@ -203,7 +220,7 @@ class SessionPool(
         }
 
         override fun onSubscribeAck(trId: String?, trKey: String?, success: Boolean) {
-            applyAck(pooled, trKey, success)
+            applyAck(pooled, trId, trKey, success)
         }
 
         override fun onEncryptedDropped(trId: String) {

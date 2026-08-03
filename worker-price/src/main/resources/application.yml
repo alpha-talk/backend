@@ -39,7 +39,7 @@ alphatalk:
     rate-factor: ${KIS_RATE_FACTOR:0.75}  # 공식 유량 대비 내부 한도 비율 (§1.3)
     maintain-interval-ms: 1000            # 오케스트레이터 리컨실 주기 — 리더 갱신·세션 유지보수
     removal-grace-ms: 30000               # 구독 해지 30초 유예, 재수요 시 취소 (§2.2)
-    market-hours-enforced: true           # 08:50 세션 준비 → 09:00 구독 → 15:40 해제 (§2.7)
+    market-hours-enforced: true           # 07:50 세션 준비 → 08:00 구독(NXT 프리) → 20:00 해제(NXT 애프터 종료) (§2.7)
     holidays: []                          # KRX 휴장일(yyyy-MM-dd) — 공지 기준 수동 관리, 주말은 자동 제외 (§2.7)
     poll-interval-ms: 30000               # WS 용량 초과 강등 심볼 REST 폴링 주기 — 하위 60s 확장은 후속 (§2.5)
     poll-budget-factor: 0.5               # 계정 REST 유량 중 폴링에 배정하는 예산 비율 (§2.5)
