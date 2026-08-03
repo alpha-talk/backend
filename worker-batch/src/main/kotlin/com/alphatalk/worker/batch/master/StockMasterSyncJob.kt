@@ -56,9 +56,9 @@ open class StockMasterSyncJob(
                     }
                 }
             }
-            syncSectors(collected)
             val stored = stocks.upsertAll(collected)
             retireMissing(collected, failedMarkets, incompleteMarkets)
+            syncSectorsBestEffort(collected)
             runs.succeed(runId, stored, failedMarkets.size, clock())
             meters.counter("batch.stock.master.synced").increment(stored.toDouble())
             log.info("stock master sync done: stored={} failedMarkets={}", stored, failedMarkets.size)
@@ -66,6 +66,13 @@ open class StockMasterSyncJob(
         } catch (e: Exception) {
             runs.fail(runId, e.toString(), clock())
             throw e
+        }
+    }
+
+    private fun syncSectorsBestEffort(collected: List<KisStockMaster>) {
+        runCatching { syncSectors(collected) }.onFailure {
+            meters.counter("batch.sector.sync.failed").increment()
+            log.warn("sector master sync failed, stock master result is kept", it)
         }
     }
 
