@@ -6,6 +6,7 @@ import org.springframework.web.bind.MethodArgumentNotValidException
 import org.springframework.web.bind.annotation.ExceptionHandler
 import org.springframework.web.bind.annotation.RestControllerAdvice
 import org.springframework.web.method.annotation.HandlerMethodValidationException
+import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException
 
 @RestControllerAdvice
 class ApiExceptionHandler {
@@ -34,6 +35,14 @@ class ApiExceptionHandler {
     @ExceptionHandler(HandlerMethodValidationException::class)
     fun handleParameterValidation(e: HandlerMethodValidationException): ResponseEntity<ApiErrorResponse> =
         respond(ErrorCode.VALIDATION_FAILED, "요청 파라미터가 올바르지 않습니다")
+
+    @ExceptionHandler(MethodArgumentTypeMismatchException::class)
+    fun handleParameterTypeMismatch(e: MethodArgumentTypeMismatchException): ResponseEntity<ApiErrorResponse> =
+        respond(
+            ErrorCode.VALIDATION_FAILED,
+            "요청 파라미터 형식이 올바르지 않습니다",
+            mapOf("field" to e.name),
+        )
 
     @ExceptionHandler(Exception::class)
     fun handleUnexpected(e: Exception): ResponseEntity<ApiErrorResponse> {
