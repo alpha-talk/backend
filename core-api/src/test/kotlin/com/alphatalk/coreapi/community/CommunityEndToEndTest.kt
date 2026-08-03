@@ -346,6 +346,29 @@ class CommunityEndToEndTest {
     }
 
     @Test
+    fun `동시에 몰린 공감 해제도 전부 204고 상태가 정확하다`() {
+        val postId = createPost().path("postId").asText()
+        assertEquals(204, exchange(HttpMethod.PUT, "/api/v1/posts/$postId/like", null, readerToken).statusCode.value())
+        val workers = 8
+        val pool = Executors.newFixedThreadPool(workers)
+        try {
+            val ready = CyclicBarrier(workers)
+            val futures = (1..workers).map {
+                pool.submit<Int> {
+                    ready.await(10, TimeUnit.SECONDS)
+                    exchange(HttpMethod.DELETE, "/api/v1/posts/$postId/like", null, readerToken).statusCode.value()
+                }
+            }
+            futures.forEach { assertEquals(204, it.get(30, TimeUnit.SECONDS)) }
+        } finally {
+            pool.shutdownNow()
+        }
+
+        assertEquals(0, jdbc.queryForObject("SELECT count(*) FROM post_like WHERE post_id = ?", Long::class.java, postId))
+        assertEquals(0, jdbc.queryForObject("SELECT like_count FROM post WHERE id = ?", Int::class.java, postId))
+    }
+
+    @Test
     fun `공감은 멱등하고 취소하면 되돌아간다`() {
         val postId = createPost().path("postId").asText()
 
