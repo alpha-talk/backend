@@ -7,6 +7,7 @@ import com.alphatalk.kis.model.KisAccount
 import com.alphatalk.kis.model.KisEnv
 import com.alphatalk.kis.rate.KisRateLimiters
 import com.alphatalk.kis.rest.KisRestClient
+import com.alphatalk.kis.ws.KisFrameParser
 import com.alphatalk.worker.price.calendar.MarketCalendar
 import com.alphatalk.worker.price.candle.CandleSyncJob
 import com.alphatalk.worker.price.candle.DailyCandleFetcher
@@ -66,8 +67,14 @@ class PriceConfig {
             approvalKeys = { approvals.approvalKey(it) },
             buffer = buffer,
             meters = meters,
+            tickTrIds = tickTrIds(env),
             removalGraceMillis = props.removalGraceMs,
         )
+    }
+
+    internal fun tickTrIds(env: KisEnv): List<String> = when (env) {
+        KisEnv.PROD -> listOf(KisFrameParser.TR_ID_TICK_TOTAL, KisFrameParser.TR_ID_TICK_OVERTIME)
+        KisEnv.VTS -> listOf(KisFrameParser.TR_ID_TICK)
     }
 
     @Bean

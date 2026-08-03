@@ -5,3 +5,6 @@ out/
 *.iml
 .DS_Store
 .kotlin/
+
+# 로컬 시크릿 — secrets.yml.example을 복사해 채운다. 절대 커밋 금지.
+secrets.yml

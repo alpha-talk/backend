@@ -36,8 +36,8 @@ class MarketCalendar(
         date.dayOfWeek != DayOfWeek.SATURDAY && date.dayOfWeek != DayOfWeek.SUNDAY && date !in holidays
 
     companion object {
-        private val PREPARE_START = LocalTime.of(8, 50)
-        private val OPEN_START = LocalTime.of(9, 0)
-        private val CLOSE_END = LocalTime.of(15, 40)
+        private val PREPARE_START = LocalTime.of(7, 50)
+        private val OPEN_START = LocalTime.of(8, 0)
+        private val CLOSE_END = LocalTime.of(20, 0)
     }
 }

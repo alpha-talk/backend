@@ -15,7 +15,7 @@ class WarmupPoller(
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
 
-    @Scheduled(cron = "0 55 8 * * MON-FRI", zone = "Asia/Seoul")
+    @Scheduled(cron = "0 55 7 * * MON-FRI", zone = "Asia/Seoul")
     fun warmUp() {
         if (!leader.tryAcquire()) return
         if (calendar.phase() == MarketPhase.CLOSED) return
