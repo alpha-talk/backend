@@ -176,21 +176,41 @@ class StockMasterSyncJobTest {
     }
 
     @Test
-    fun `업종 파일이 계속 불완전해도 종목 적재는 지키고 경고만 남긴다`() {
+    fun `업종 파일이 계속 불완전해도 종목 적재는 지킨다`() {
         val files = RecordingFetcher(corruptSectorTimes = 2)
         val store = RecordingStockStore()
-        val runs = RecordingRuns(startResult = 1L)
-        val sectors = RecordingSectorStore()
         val meters = SimpleMeterRegistry()
 
-        val ok = job(files, store, runs, sectors, meters).syncOnce()
+        val ok = job(files, store, RecordingRuns(startResult = 1L), RecordingSectorStore(), meters).syncOnce()
 
         assertEquals(6, ok)
-        assertEquals(Triple(1L, 6, 0), runs.succeeded)
-        assertEquals(null, runs.failed)
         assertTrue(store.upserted.isNotEmpty(), "업종 실패가 종목 적재를 막았다")
-        assertTrue(sectors.upserted.isEmpty())
+        assertEquals(6.0, meters.counter("batch.stock.master.synced").count())
         assertEquals(1.0, meters.counter("batch.sector.sync.failed").count())
+    }
+
+    @Test
+    fun `업종 동기화가 실패하면 잡을 성공으로 남기지 않아 당일 재시도가 열린다`() {
+        val runs = RecordingRuns(startResult = 1L)
+        val sectors = RecordingSectorStore()
+
+        job(RecordingFetcher(corruptSectorTimes = 2), RecordingStockStore(), runs, sectors).syncOnce()
+
+        assertEquals(null, runs.succeeded, "업종 실패를 성공으로 기록했다")
+        assertEquals(1L, runs.failed?.first)
+        assertTrue(runs.failed?.second?.contains("sector") == true)
+        assertTrue(sectors.upserted.isEmpty())
+    }
+
+    @Test
+    fun `업종 단계의 Error는 삼키지 않고 전파한다`() {
+        val exploding = object : SectorStore {
+            override fun upsertAll(sectors: List<KisSector>): Int = throw StackOverflowError("boom")
+        }
+
+        assertFailsWith<StackOverflowError> {
+            job(RecordingFetcher(), RecordingStockStore(), RecordingRuns(startResult = 1L), exploding).syncOnce()
+        }
     }
 
     @Test
