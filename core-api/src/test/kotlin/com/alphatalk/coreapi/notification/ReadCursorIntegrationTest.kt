@@ -118,6 +118,15 @@ class ReadCursorIntegrationTest {
     }
 
     @Test
+    fun `Redis 커서 미러는 TTL로 stale을 자가 치유한다 - Redis 계약 v0_10`() {
+        cursorCache.advance(userId, "005930", "01J9Z800000000000000000005")
+
+        val ttl = redisTemplate.getExpire(Keys.cursor(userId, "005930"))
+
+        assertTrue(ttl in 1..86400, "커서 미러 TTL이 계약(1일)과 다르다: $ttl")
+    }
+
+    @Test
     fun `동시 전진 경합에서도 커서는 최댓값으로 수렴하고 행은 하나다`() {
         val eventIds = (1..16).map { "01J9Z8000000000000000000%02d".format(it) }
         val pool = Executors.newFixedThreadPool(8)

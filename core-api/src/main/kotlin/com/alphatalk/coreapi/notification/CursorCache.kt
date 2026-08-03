@@ -35,7 +35,7 @@ class RedisCursorCache(
 
     override fun advance(userId: Long, code: String, eventId: String) {
         runCatching {
-            redis.execute(SET_IF_NEWER, listOf(Keys.cursor(userId, code)), eventId)
+            redis.execute(SET_IF_NEWER, listOf(Keys.cursor(userId, code)), eventId, TTL_SECONDS)
         }.onFailure {
             log.warn("cursor cache advance failed: userId={} code={}", userId, code, it)
         }
@@ -46,11 +46,15 @@ class RedisCursorCache(
     }
 
     companion object {
+        private const val TTL_SECONDS = "86400"
         private val SET_IF_NEWER = DefaultRedisScript(
             """
             local cur = redis.call('GET', KEYS[1])
-            if cur and cur >= ARGV[1] then return 0 end
-            redis.call('SET', KEYS[1], ARGV[1])
+            if cur and cur >= ARGV[1] then
+              redis.call('EXPIRE', KEYS[1], ARGV[2])
+              return 0
+            end
+            redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])
             return 1
             """.trimIndent(),
             Long::class.javaObjectType,
