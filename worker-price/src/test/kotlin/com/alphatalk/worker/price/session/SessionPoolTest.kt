@@ -35,22 +35,24 @@ class SessionPoolTest {
         maxPerSession: Int = 2,
         graceMillis: Long = 1_000,
         ackTimeoutMillis: Long = 5_000,
+        trIds: List<String> = listOf("H0STCNT0"),
     ) = SessionPool(
         accounts = (1..accounts).map { KisAccount("key$it", "app$it", "secret$it") },
         wsUrl = server.url,
         approvalKeys = { "AK" },
         buffer = ConflationBuffer(),
         meters = SimpleMeterRegistry(),
-        maxSymbolsPerSession = maxPerSession,
+        tickTrIds = trIds,
+        maxRegistrationsPerSession = maxPerSession,
         removalGraceMillis = graceMillis,
         backoff = BackoffPolicy(initialMillis = 50, jitterRatio = 0.0),
         ackTimeoutMillis = ackTimeoutMillis,
         clock = { now },
     )
 
-    private fun ackFrame(code: String, success: Boolean): String {
+    private fun ackFrame(code: String, success: Boolean, trId: String = "H0STCNT0"): String {
         val rtCd = if (success) "0" else "1"
-        return """{"header":{"tr_id":"H0STCNT0","tr_key":"$code","encrypt":"N"},""" +
+        return """{"header":{"tr_id":"$trId","tr_key":"$code","encrypt":"N"},""" +
             """"body":{"rt_cd":"$rtCd","msg_cd":"OPSP0000","msg1":"ack"}}"""
     }
 
@@ -212,5 +214,72 @@ class SessionPoolTest {
         server.awaitMessages(2)
         assertEquals(1, unsubscribesOf(server.receivedMessages).size)
         await().atMost(Duration.ofSeconds(5)).until { server.connectionCount == 0 }
+    }
+
+    @Test
+    fun `TR이 여러 개면 심볼당 TR별로 모두 등록한다`() {
+        val pool = pool(maxPerSession = 4, trIds = listOf("H0UNCNT0", "H0STOUP0"))
+
+        pool.maintain(setOf("005930"), subscribeAllowed = true)
+
+        server.awaitMessages(2)
+        val subscribes = subscribesOf(server.receivedMessages)
+        assertEquals(
+            setOf("H0UNCNT0" to "005930", "H0STOUP0" to "005930"),
+            subscribes.map {
+                it.path("body").path("input").path("tr_id").asText() to
+                    it.path("body").path("input").path("tr_key").asText()
+            }.toSet(),
+        )
+    }
+
+    @Test
+    fun `심볼 용량은 등록 한도를 TR 수로 나눠 계산한다`() {
+        val pool = pool(maxPerSession = 4, trIds = listOf("H0UNCNT0", "H0STOUP0"))
+
+        pool.maintain(linkedSetOf("000001", "000002", "000003"), subscribeAllowed = true)
+
+        server.awaitMessages(4)
+        assertEquals(4, subscribesOf(server.receivedMessages).size)
+        assertEquals(setOf("000003"), pool.degradedSymbols())
+    }
+
+    @Test
+    fun `해지 시 심볼의 모든 TR을 해제한다`() {
+        val pool = pool(maxPerSession = 4, graceMillis = 1_000, trIds = listOf("H0UNCNT0", "H0STOUP0"))
+        pool.maintain(linkedSetOf("000001", "000002"), subscribeAllowed = true)
+        server.awaitMessages(4)
+
+        pool.maintain(setOf("000001"), subscribeAllowed = true)
+        now += 1_500
+        pool.maintain(setOf("000001"), subscribeAllowed = true)
+
+        server.awaitMessages(6)
+        val unsubscribed = unsubscribesOf(server.receivedMessages)
+        assertEquals(
+            setOf("H0UNCNT0" to "000002", "H0STOUP0" to "000002"),
+            unsubscribed.map {
+                it.path("body").path("input").path("tr_id").asText() to
+                    it.path("body").path("input").path("tr_key").asText()
+            }.toSet(),
+        )
+    }
+
+    @Test
+    fun `ACK는 TR 단위로 확정되고 응답 없는 TR만 재등록한다`() {
+        val pool = pool(maxPerSession = 4, ackTimeoutMillis = 100, trIds = listOf("H0UNCNT0", "H0STOUP0"))
+        pool.maintain(setOf("000001"), subscribeAllowed = true)
+        server.awaitMessages(2)
+
+        server.broadcastText(ackFrame("000001", success = true, trId = "H0UNCNT0"))
+        Thread.sleep(300)
+        now += 500
+        pool.maintain(setOf("000001"), subscribeAllowed = true)
+
+        server.awaitMessages(3)
+        Thread.sleep(200)
+        val resubscribed = subscribesOf(server.receivedMessages).drop(2)
+        assertEquals(1, resubscribed.size)
+        assertEquals("H0STOUP0", resubscribed[0].path("body").path("input").path("tr_id").asText())
     }
 }

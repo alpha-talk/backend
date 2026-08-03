@@ -15,11 +15,14 @@ class MarketCalendarTest {
 
     @Test
     fun `평일 장중 구간별 phase`() {
-        assertEquals(MarketPhase.CLOSED, MarketCalendar(clock = at(2026, 7, 27, 8, 49)).phase())
-        assertEquals(MarketPhase.PREPARE, MarketCalendar(clock = at(2026, 7, 27, 8, 55)).phase())
+        assertEquals(MarketPhase.CLOSED, MarketCalendar(clock = at(2026, 7, 27, 7, 49)).phase())
+        assertEquals(MarketPhase.PREPARE, MarketCalendar(clock = at(2026, 7, 27, 7, 55)).phase())
+        assertEquals(MarketPhase.OPEN, MarketCalendar(clock = at(2026, 7, 27, 8, 0)).phase())
         assertEquals(MarketPhase.OPEN, MarketCalendar(clock = at(2026, 7, 27, 9, 0)).phase())
-        assertEquals(MarketPhase.OPEN, MarketCalendar(clock = at(2026, 7, 27, 15, 39)).phase())
-        assertEquals(MarketPhase.CLOSED, MarketCalendar(clock = at(2026, 7, 27, 15, 40)).phase())
+        assertEquals(MarketPhase.OPEN, MarketCalendar(clock = at(2026, 7, 27, 15, 40)).phase())
+        assertEquals(MarketPhase.OPEN, MarketCalendar(clock = at(2026, 7, 27, 16, 30)).phase())
+        assertEquals(MarketPhase.OPEN, MarketCalendar(clock = at(2026, 7, 27, 19, 59)).phase())
+        assertEquals(MarketPhase.CLOSED, MarketCalendar(clock = at(2026, 7, 27, 20, 0)).phase())
     }
 
     @Test
