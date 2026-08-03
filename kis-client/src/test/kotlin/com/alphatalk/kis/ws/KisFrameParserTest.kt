@@ -58,6 +58,21 @@ class KisFrameParserTest {
     }
 
     @Test
+    fun `통합 체결가 2건 이어붙은 프레임도 필드 수로 분할한다`() {
+        val frame = KisFrameParser.parse(fixture("h0uncnt0-double.txt"))
+
+        val ticks = assertIs<KisFrame.Ticks>(frame).ticks
+        assertEquals(2, ticks.size)
+        assertEquals("005930", ticks[0].code)
+        assertEquals(800, ticks[0].change)
+        assertEquals("000660", ticks[1].code)
+        assertEquals(198500, ticks[1].price)
+        assertEquals(-300, ticks[1].change)
+        assertEquals(-0.15, ticks[1].changeRate)
+        assertEquals(987654, ticks[1].volume)
+    }
+
+    @Test
     fun `시간외 체결가 프레임을 파싱하고 하락 부호를 적용한다`() {
         val frame = KisFrameParser.parse(fixture("h0stoup0-single.txt"))
 
