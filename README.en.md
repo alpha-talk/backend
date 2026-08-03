@@ -10,7 +10,7 @@ Backend for a stock community that folds news, disclosures, AI summaries, live q
 [![JDK](https://img.shields.io/badge/JDK-21-437291?logo=openjdk&logoColor=white)](https://openjdk.org/projects/jdk/21/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16%20%2B%20pgvector-4169E1?logo=postgresql&logoColor=white)](https://github.com/pgvector/pgvector)
 [![Redis](https://img.shields.io/badge/Redis-7-DC382D?logo=redis&logoColor=white)](https://redis.io)
-[![tests](https://img.shields.io/badge/tests-306%20passing-brightgreen)](#development)
+[![tests](https://img.shields.io/badge/tests-561%20passing-brightgreen)](#development)
 
 [한국어](README.md) · English
 
@@ -65,7 +65,7 @@ git clone https://github.com/alpha-talk/backend.git
 cd backend
 
 docker compose up -d      # Redis 7 · PostgreSQL 16 (pgvector)
-./gradlew build           # all modules, 306 tests
+./gradlew build           # all modules, 561 tests
 ```
 
 To bring up just the gateway:
@@ -88,12 +88,12 @@ One repository holds several servers as Gradle subprojects. Not every folder is 
 | `auth-jwt` | library | JWT issuing and verification. Add the dependency and a secret property, and the beans register themselves | — |
 | `kis-client` | library | Korea Investment & Securities OpenAPI — token lifecycle, rate limiting, REST/WS clients | — |
 | `db-migrations` | library | Liquibase changelogs. Sole owner of the database schema | — |
+| `core-api` | server | Main REST server — auth, search, watchlist, stream, notifications, community, stock info | 8080 |
 | `ws` | server | STOMP gateway — push-only edge | 8081 |
 | `worker-price` | server | KIS live quotes: collect, conflate, publish; daily candles | 8082 |
 | `worker-batch` | server | Stock master, investor flow, and financial statement batches | 8083 |
 | `worker-ingest` | server | News collection, normalization, queue enqueue | 8084 |
 | `worker-llm` | server | Consume queue → cluster → summarize → persist and publish | 8085 |
-| `core-api` | server *(planned)* | Main REST server — auth, search, stream reads, community | 8080 |
 
 ## Stack
 
@@ -131,7 +131,7 @@ Design decisions live in `md/`, not in the code. When code and documents disagre
 ./gradlew :worker-llm:test   # news summarization worker only
 ```
 
-Integration tests start their own Redis and PostgreSQL through Testcontainers, so there is nothing to set up. All 306 currently pass.
+Integration tests start their own Redis and PostgreSQL through Testcontainers, so there is nothing to set up. All 561 currently pass.
 
 A few things worth knowing:
 
@@ -148,9 +148,9 @@ A few things worth knowing:
 | News pipeline (`worker-ingest` · `worker-llm`) | Collection through clustering, summarization, sentiment, fan-out, daily briefing, DLQ — working |
 | KIS real-time (`kis-client` · `worker-price`) | Session pool, conflation, publishing, REST polling fallback, daily candles — working |
 | Batch (`worker-batch`) | Stock master sync done. Investor flow, financials, and analyst opinions are specified but not built |
-| Main server (`core-api`) | Specified, implementation not started |
+| Main server (`core-api`) | Auth, search, watchlist, stream, notifications, community, stock info — 30 REST endpoints working. Deployment hardening (CORS, metrics) is left |
 
-Next up: scaffolding `core-api`, wiring worker demand, and a load smoke test.
+Next up: the remaining batch jobs (investor flow, financials, analyst opinions), deployment hardening for `core-api`, and a load smoke test.
 
 ## Disclaimer
 
