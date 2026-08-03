@@ -8,6 +8,7 @@ import jakarta.validation.constraints.Size
 data class SignupRequest(
     @field:Email(message = "이메일 형식이 아닙니다")
     @field:NotBlank(message = "이메일은 필수입니다")
+    @field:Size(max = 254, message = "이메일은 254자 이하여야 합니다")
     val email: String,
     @field:Pattern(
         regexp = "^(?=.*[A-Za-z])(?=.*\\d).{8,72}$",
@@ -22,6 +23,7 @@ data class SignupResponse(val userId: Long)
 
 data class LoginRequest(
     @field:NotBlank(message = "이메일은 필수입니다")
+    @field:Size(max = 254, message = "이메일은 254자 이하여야 합니다")
     val email: String,
     @field:NotBlank(message = "비밀번호는 필수입니다")
     val password: String,
