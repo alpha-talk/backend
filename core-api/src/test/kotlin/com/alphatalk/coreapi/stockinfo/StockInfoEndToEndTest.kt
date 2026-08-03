@@ -153,7 +153,11 @@ class StockInfoEndToEndTest {
             response.path("items").map { it.path("date").asText() },
         )
         assertEquals(true, response.path("pageInfo").path("hasMoreBefore").asBoolean())
+        assertEquals("20260707", response.path("pageInfo").path("nextTo").asText())
         assertEquals(71000000000L, response.path("items")[0].path("value").asLong())
+
+        val next = json(get("/api/v1/stocks/005930/candles?period=D&count=3&to=20260707").body)
+        assertEquals(listOf("20260706", "20260707"), next.path("items").map { it.path("date").asText() })
     }
 
     @Test
@@ -168,6 +172,32 @@ class StockInfoEndToEndTest {
         assertEquals(5000000, items[0].path("volume").asLong())
         assertEquals("20260714", items[1].path("date").asText())
         assertEquals(false, response.path("pageInfo").path("hasMoreBefore").asBoolean())
+        assertEquals(true, response.path("pageInfo").path("nextTo").isNull)
+    }
+
+    @Test
+    fun `주봉 다음 페이지는 nextTo로 요청해야 같은 주가 중복 집계되지 않는다`() {
+        val first = json(get("/api/v1/stocks/005930/candles?period=W&count=1").body)
+
+        assertEquals(listOf("20260714"), first.path("items").map { it.path("date").asText() })
+        assertEquals(true, first.path("pageInfo").path("hasMoreBefore").asBoolean())
+        assertEquals("20260712", first.path("pageInfo").path("nextTo").asText())
+
+        val next = json(get("/api/v1/stocks/005930/candles?period=W&count=1&to=20260712").body)
+        val week = next.path("items").single()
+        assertEquals("20260710", week.path("date").asText())
+        assertEquals(69600, week.path("open").asLong())
+        assertEquals(5000000, week.path("volume").asLong())
+    }
+
+    @Test
+    fun `숫자 파라미터에 문자가 오면 500이 아니라 400이다`() {
+        val response = get("/api/v1/stocks/005930/candles?count=abc")
+
+        assertEquals(400, response.statusCode.value())
+        val error = json(response.body).path("error")
+        assertEquals("VALIDATION_FAILED", error.path("code").asText())
+        assertEquals("count", error.path("detail").path("field").asText())
     }
 
     @Test

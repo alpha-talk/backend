@@ -136,6 +136,18 @@ class StockInfoServiceTest {
     }
 
     @Test
+    fun `적자 금액은 0 방향 절사가 아니라 내림으로 환산한다`() {
+        val rows = listOf(
+            FinancialRecord(2025, "11011", "CFS", -150_000_000, -50_000_000, null, null, null, null, Instant.parse("2026-04-01T00:00:00Z")),
+        )
+
+        val annual = service(financials = FakeFinancialsStore(rows)).financials("005930", 1).annual.single()
+
+        assertEquals(-2, annual.revenue)
+        assertEquals(-1, annual.operatingProfit)
+    }
+
+    @Test
     fun `재무가 없으면 빈 목록으로 200이다`() {
         val financials = service().financials("005930", null)
 
