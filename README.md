@@ -10,7 +10,7 @@
 [![JDK](https://img.shields.io/badge/JDK-21-437291?logo=openjdk&logoColor=white)](https://openjdk.org/projects/jdk/21/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16%20%2B%20pgvector-4169E1?logo=postgresql&logoColor=white)](https://github.com/pgvector/pgvector)
 [![Redis](https://img.shields.io/badge/Redis-7-DC382D?logo=redis&logoColor=white)](https://redis.io)
-[![tests](https://img.shields.io/badge/tests-306%20passing-brightgreen)](#개발)
+[![tests](https://img.shields.io/badge/tests-561%20passing-brightgreen)](#개발)
 
 한국어 · [English](README.en.md)
 
@@ -65,7 +65,7 @@ git clone https://github.com/alpha-talk/backend.git
 cd backend
 
 docker compose up -d      # Redis 7 · PostgreSQL 16(pgvector)
-./gradlew build           # 전 모듈 빌드 + 테스트 306개
+./gradlew build           # 전 모듈 빌드 + 테스트 561개
 ```
 
 게이트웨이만 띄워보려면:
@@ -88,12 +88,12 @@ RSS 기사가 요약을 거쳐 브라우저 카드로 뜨는 것까지 눈으로
 | `auth-jwt` | 라이브러리 | JWT 발급·검증. 의존성과 시크릿 프로퍼티만 넣으면 빈이 등록된다 | — |
 | `kis-client` | 라이브러리 | 한국투자증권 OpenAPI — 토큰 수명주기·유량 제어·REST/WS 클라이언트 | — |
 | `db-migrations` | 라이브러리 | Liquibase changelog. DB 스키마의 단일 소유자 | — |
+| `core-api` | 서버 | REST 메인서버 — 인증·검색·관심목록·스트림·알림·커뮤니티·종목정보 | 8080 |
 | `ws` | 서버 | STOMP 게이트웨이 — 푸시 전용 엣지 | 8081 |
 | `worker-price` | 서버 | KIS 실시간 시세 수집·conflation·발행, 일봉 적재 | 8082 |
 | `worker-batch` | 서버 | 종목마스터·수급·재무 배치 | 8083 |
 | `worker-ingest` | 서버 | 뉴스 수집·정규화·큐 적재 | 8084 |
 | `worker-llm` | 서버 | 큐 소비 → 클러스터링 → LLM 요약 → 저장·발행 | 8085 |
-| `core-api` | 서버 *(예정)* | REST 메인서버 — 인증·검색·스트림 조회·커뮤니티 | 8080 |
 
 ## 기술 스택
 
@@ -131,7 +131,7 @@ RSS 기사가 요약을 거쳐 브라우저 카드로 뜨는 것까지 눈으로
 ./gradlew :worker-llm:test   # 뉴스 요약 워커만
 ```
 
-통합 테스트는 Testcontainers가 Redis·PostgreSQL을 직접 띄우므로 따로 준비할 게 없다. 현재 306개가 모두 통과한다.
+통합 테스트는 Testcontainers가 Redis·PostgreSQL을 직접 띄우므로 따로 준비할 게 없다. 현재 561개가 모두 통과한다.
 
 몇 가지 알아둘 것:
 
@@ -148,9 +148,9 @@ RSS 기사가 요약을 거쳐 브라우저 카드로 뜨는 것까지 눈으로
 | 뉴스 파이프라인(`worker-ingest` · `worker-llm`) | 수집부터 클러스터링·요약·감성·fan-out·일일 브리핑·DLQ까지 동작 |
 | KIS 실시간(`kis-client` · `worker-price`) | 세션 풀·conflation·발행·REST 폴링 강등·일봉 적재까지 동작 |
 | 배치(`worker-batch`) | 종목마스터 적재 완료. 수급·재무·투자의견은 명세만 |
-| 메인서버(`core-api`) | 명세 작성 완료, 구현 착수 전 |
+| 메인서버(`core-api`) | 인증·검색·관심목록·스트림·알림·커뮤니티·종목정보 REST 30개 동작. 남은 건 배포 경화(CORS·메트릭) |
 
-다음 순서는 `core-api` 스캐폴딩, 워커 수요 연동, 부하 스모크다.
+다음 순서는 배치 잔여 잡(수급·재무·투자의견), `core-api` 배포 경화, 부하 스모크다.
 
 ## 면책
 
