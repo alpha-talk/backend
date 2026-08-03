@@ -34,6 +34,8 @@ class AuthServiceTest {
         override fun findById(id: Long) = rows[id]
         override fun existsByEmail(email: String) = rows.values.any { it.email == email }
         override fun existsByNickname(nickname: String) = rows.values.any { it.nickname == nickname }
+        override fun nicknames(ids: Collection<Long>) =
+            rows.filterKeys(ids::contains).mapValues { (_, user) -> user.nickname }
     }
 
     private class InMemoryRefreshStore : RefreshTokenStore {
@@ -222,4 +224,5 @@ class AuthServiceTest {
         assertEquals("민균", me.nickname)
         assertEquals(Instant.parse("2026-07-01T00:00:00Z").toEpochMilli(), me.createdAt)
     }
+
 }

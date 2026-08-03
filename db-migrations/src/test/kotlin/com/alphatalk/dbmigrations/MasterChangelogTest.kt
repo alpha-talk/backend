@@ -34,7 +34,7 @@ class MasterChangelogTest {
         withConnection { connection ->
             update(connection)
 
-            assertEquals(13, appliedChangeSetCount(connection))
+            assertEquals(17, appliedChangeSetCount(connection))
             assertTrue(tableExists(connection, "news_cluster"))
             assertTrue(tableExists(connection, "stream_event"))
             assertTrue(tableExists(connection, "daily_candle"))
@@ -45,6 +45,15 @@ class MasterChangelogTest {
             assertTrue(tableExists(connection, "refresh_tokens"))
             assertTrue(tableExists(connection, "watchlist"))
             assertTrue(tableExists(connection, "watchlist_rev"))
+            assertTrue(tableExists(connection, "read_cursor"))
+            assertTrue(tableExists(connection, "post"))
+            assertTrue(tableExists(connection, "comment"))
+            assertTrue(tableExists(connection, "post_like"))
+            assertTrue(tableExists(connection, "report"))
+            assertTrue(tableExists(connection, "idempotency_record"))
+            assertTrue(tableExists(connection, "valuation_daily"))
+            assertTrue(tableExists(connection, "investor_flow_daily"))
+            assertTrue(tableExists(connection, "financial_summary"))
         }
     }
 
