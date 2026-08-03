@@ -33,7 +33,6 @@ alphatalk:
     auth:
       access-ttl: 30m                           # core-api 명세 §1.2
       refresh-ttl: 14d
-      login-attempts-per-minute: 10             # 명세 §1.5 — 키는 IP+email
 
 management:
   endpoints:

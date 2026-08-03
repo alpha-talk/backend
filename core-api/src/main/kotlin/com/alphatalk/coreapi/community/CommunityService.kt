@@ -5,11 +5,8 @@ import com.alphatalk.coreapi.stream.PageInfo
 import com.alphatalk.coreapi.stream.StreamStore
 import com.alphatalk.coreapi.support.ApiException
 import com.alphatalk.coreapi.support.ErrorCode
-import com.alphatalk.coreapi.support.RateLimitExceededException
-import com.alphatalk.coreapi.support.RateLimiter
 import com.fasterxml.jackson.databind.ObjectMapper
 import org.springframework.stereotype.Service
-import java.time.Duration
 
 @Service
 class CommunityService(
@@ -19,7 +16,6 @@ class CommunityService(
     private val likes: LikeStore,
     private val stream: StreamStore,
     private val ids: CommunityIdGenerator,
-    private val rateLimiter: RateLimiter,
     private val ledger: IdempotencyLedger,
     private val mapper: ObjectMapper,
 ) {
@@ -29,7 +25,6 @@ class CommunityService(
         val key = idempotencyKey?.let(::validIdempotencyKey)
         key?.let { replayIfRecorded(userId, it, IdempotencyActions.POST_CREATE, CreatePostResponse::class.java) }
             ?.let { return it }
-        checkRate(POST_ACTION, userId, POST_LIMIT_PER_MINUTE)
         val postId = ids.next()
         return when (val result = command.createPost(userId, code, request.title, request.content, quotedEventId, postId, key)) {
             is CreatePostResult.Created -> result.response
@@ -54,7 +49,6 @@ class CommunityService(
         val key = idempotencyKey?.let(::validIdempotencyKey)
         key?.let { replayIfRecorded(userId, it, IdempotencyActions.COMMENT_CREATE, CreateCommentResponse::class.java) }
             ?.let { return it }
-        checkRate(COMMENT_ACTION, userId, COMMENT_LIMIT_PER_MINUTE)
         val commentId = ids.next()
         return when (val result = command.createComment(userId, postId, request.content, commentId, key)) {
             is CreateCommentResult.Created -> result.response
@@ -221,13 +215,11 @@ class CommunityService(
 
     fun like(userId: Long, rawPostId: String) {
         val postId = validUlid(rawPostId)
-        checkRate(LIKE_ACTION, userId, LIKE_LIMIT_PER_MINUTE)
         if (command.like(userId, postId) == LikeOutcome.POST_NOT_FOUND) throw postNotFound(postId)
     }
 
     fun unlike(userId: Long, rawPostId: String) {
         val postId = validUlid(rawPostId)
-        checkRate(LIKE_ACTION, userId, LIKE_LIMIT_PER_MINUTE)
         if (command.unlike(userId, postId) == LikeOutcome.POST_NOT_FOUND) throw postNotFound(postId)
     }
 
@@ -258,11 +250,6 @@ class CommunityService(
 
     private fun keyActionMismatch() =
         ApiException(ErrorCode.CONFLICT, "Idempotency-Key가 다른 요청에 이미 사용되었습니다", mapOf("field" to "Idempotency-Key"))
-
-    private fun checkRate(action: String, userId: Long, limit: Int) {
-        val decision = rateLimiter.tryAcquire(action, userId.toString(), limit, Duration.ofMinutes(1))
-        if (!decision.allowed) throw RateLimitExceededException(action, decision.retryAfterSeconds)
-    }
 
     private fun postNotFound(postId: String) =
         ApiException(ErrorCode.NOT_FOUND, "존재하지 않는 글입니다", mapOf("postId" to postId))
@@ -337,12 +324,6 @@ class CommunityService(
         const val MIN_LIMIT = 1
         const val MAX_LIMIT = 100
         const val COMMENT_PAGE_SIZE = 50
-        const val POST_ACTION = "post"
-        const val COMMENT_ACTION = "comment"
-        const val LIKE_ACTION = "like"
-        const val POST_LIMIT_PER_MINUTE = 5
-        const val COMMENT_LIMIT_PER_MINUTE = 10
-        const val LIKE_LIMIT_PER_MINUTE = 60
         private val CODE_PATTERN = Regex("^\\d{6}$")
         private val ULID_PATTERN = Regex("^[0-9A-HJKMNP-TV-Z]{26}$")
     }

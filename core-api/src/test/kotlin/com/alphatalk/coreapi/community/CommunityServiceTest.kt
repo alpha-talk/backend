@@ -7,12 +7,8 @@ import com.alphatalk.coreapi.stream.StreamQuery
 import com.alphatalk.coreapi.stream.StreamStore
 import com.alphatalk.coreapi.support.ApiException
 import com.alphatalk.coreapi.support.ErrorCode
-import com.alphatalk.coreapi.support.RateLimitDecision
-import com.alphatalk.coreapi.support.RateLimitExceededException
-import com.alphatalk.coreapi.support.RateLimiter
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
-import java.time.Duration
 import java.time.Instant
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -188,15 +184,6 @@ class CommunityServiceTest {
         override fun next(): String = queue.removeFirst()
     }
 
-    private class FakeRateLimiter(private val allowed: Boolean = true) : RateLimiter {
-        val attempts = mutableListOf<Triple<String, String, Int>>()
-
-        override fun tryAcquire(action: String, key: String, limit: Int, window: Duration): RateLimitDecision {
-            attempts += Triple(action, key, limit)
-            return RateLimitDecision(allowed, retryAfterSeconds = 17)
-        }
-    }
-
     private fun post(
         id: String = POST_ID,
         code: String = "005930",
@@ -227,9 +214,8 @@ class CommunityServiceTest {
         likes: LikeStore = FakeLikeStore(),
         stream: StreamStore = FakeStreamStore(),
         ids: CommunityIdGenerator = SequenceIds(POST_ID, COMMENT_ID),
-        rateLimiter: RateLimiter = FakeRateLimiter(),
         ledger: IdempotencyLedger = InMemoryLedger(),
-    ) = CommunityService(command, posts, comments, likes, stream, ids, rateLimiter, ledger, mapper)
+    ) = CommunityService(command, posts, comments, likes, stream, ids, ledger, mapper)
 
     @Test
     fun `글을 만들면 postId와 eventId가 같은 ULID다`() {
@@ -240,36 +226,12 @@ class CommunityServiceTest {
     }
 
     @Test
-    fun `글 작성은 분당 5회 한도를 검사한다`() {
-        val limiter = FakeRateLimiter()
-
-        service(rateLimiter = limiter).createPost(1, "005930", CreatePostRequest("제목", "본문"), null)
-
-        assertEquals(Triple("post", "1", 5), limiter.attempts.single())
-    }
-
-    @Test
-    fun `한도를 넘긴 글 작성은 429와 재시도 시각을 준다`() {
-        val command = RecordingCommand()
-
-        val e = assertFailsWith<RateLimitExceededException> {
-            service(command = command, rateLimiter = FakeRateLimiter(allowed = false))
-                .createPost(1, "005930", CreatePostRequest("제목", "본문"), null)
-        }
-
-        assertEquals(17, e.retryAfterSeconds)
-        assertTrue(command.calls.isEmpty(), "한도 초과인데 커맨드가 실행됐다")
-    }
-
-    @Test
-    fun `기록된 Idempotency-Key 재요청은 원장 응답을 재생하고 커맨드도 유량도 건드리지 않는다`() {
+    fun `기록된 Idempotency-Key 재요청은 원장 응답을 재생하고 커맨드를 다시 실행하지 않는다`() {
         val ledger = InMemoryLedger()
         val command = RecordingCommand(ledger)
-        val limiter = FakeRateLimiter()
         val target = service(
             command = command,
             ids = SequenceIds(POST_ID, "01JA000000000000000000000B"),
-            rateLimiter = limiter,
             ledger = ledger,
         )
 
@@ -278,7 +240,6 @@ class CommunityServiceTest {
 
         assertEquals(first, replay)
         assertEquals(1, command.calls.size)
-        assertEquals(1, limiter.attempts.size, "재생인데 유량을 소비했다")
     }
 
     @Test
@@ -334,14 +295,11 @@ class CommunityServiceTest {
     }
 
     @Test
-    fun `댓글 작성은 분당 10회 한도를 검사하고 commentId를 준다`() {
-        val limiter = FakeRateLimiter()
-        val target = service(ids = SequenceIds(COMMENT_ID), rateLimiter = limiter)
-
-        val response = target.createComment(1, POST_ID, CreateCommentRequest("댓글"), null)
+    fun `댓글을 만들면 commentId를 준다`() {
+        val response = service(ids = SequenceIds(COMMENT_ID))
+            .createComment(1, POST_ID, CreateCommentRequest("댓글"), null)
 
         assertEquals(COMMENT_ID, response.commentId)
-        assertEquals(Triple("comment", "1", 10), limiter.attempts.single())
     }
 
     @Test
@@ -463,15 +421,6 @@ class CommunityServiceTest {
         val e = assertFailsWith<ApiException> { service().updatePost(1, POST_ID, UpdatePostRequest(null, null)) }
 
         assertEquals(ErrorCode.VALIDATION_FAILED, e.code)
-    }
-
-    @Test
-    fun `공감은 분당 60회 한도를 검사한다`() {
-        val limiter = FakeRateLimiter()
-
-        service(rateLimiter = limiter).like(1, POST_ID)
-
-        assertEquals(Triple("like", "1", 60), limiter.attempts.single())
     }
 
     @Test

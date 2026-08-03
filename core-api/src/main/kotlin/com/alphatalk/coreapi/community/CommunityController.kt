@@ -1,6 +1,8 @@
 package com.alphatalk.coreapi.community
 
 import com.alphatalk.coreapi.support.CurrentUser
+import com.alphatalk.coreapi.support.RateLimited
+import com.alphatalk.coreapi.support.RateLimits
 import jakarta.validation.Valid
 import org.springframework.http.HttpStatus
 import org.springframework.web.bind.annotation.DeleteMapping
@@ -23,6 +25,7 @@ class CommunityController(
 ) {
     @PostMapping("/rooms/{code}/posts")
     @ResponseStatus(HttpStatus.CREATED)
+    @RateLimited(action = RateLimits.POST, limit = RateLimits.POST_PER_MINUTE)
     fun createPost(
         @PathVariable code: String,
         @Valid @RequestBody request: CreatePostRequest,
@@ -55,6 +58,7 @@ class CommunityController(
 
     @PostMapping("/posts/{postId}/comments")
     @ResponseStatus(HttpStatus.CREATED)
+    @RateLimited(action = RateLimits.COMMENT, limit = RateLimits.COMMENT_PER_MINUTE)
     fun createComment(
         @PathVariable postId: String,
         @Valid @RequestBody request: CreateCommentRequest,
@@ -77,12 +81,14 @@ class CommunityController(
 
     @PutMapping("/posts/{postId}/like")
     @ResponseStatus(HttpStatus.NO_CONTENT)
+    @RateLimited(action = RateLimits.LIKE, limit = RateLimits.LIKE_PER_MINUTE)
     fun like(@PathVariable postId: String) {
         community.like(CurrentUser.id(), postId)
     }
 
     @DeleteMapping("/posts/{postId}/like")
     @ResponseStatus(HttpStatus.NO_CONTENT)
+    @RateLimited(action = RateLimits.LIKE, limit = RateLimits.LIKE_PER_MINUTE)
     fun unlike(@PathVariable postId: String) {
         community.unlike(CurrentUser.id(), postId)
     }

@@ -3,9 +3,6 @@ package com.alphatalk.coreapi.auth
 import com.alphatalk.auth.TokenIssuer
 import com.alphatalk.coreapi.support.ApiException
 import com.alphatalk.coreapi.support.ErrorCode
-import com.alphatalk.coreapi.support.RateLimitDecision
-import com.alphatalk.coreapi.support.RateLimitExceededException
-import com.alphatalk.coreapi.support.RateLimiter
 import org.springframework.security.crypto.password.PasswordEncoder
 import java.time.Clock
 import java.time.Duration
@@ -77,19 +74,8 @@ class AuthServiceTest {
             encodedPassword == "hashed:$rawPassword"
     }
 
-    private class CountingRateLimiter(private val limitOverride: Int? = null) : RateLimiter {
-        val attempts = mutableListOf<Pair<String, String>>()
-
-        override fun tryAcquire(action: String, key: String, limit: Int, window: Duration): RateLimitDecision {
-            attempts += action to key
-            val effectiveLimit = limitOverride ?: limit
-            return RateLimitDecision(allowed = attempts.size <= effectiveLimit, retryAfterSeconds = 42)
-        }
-    }
-
     private val users = InMemoryUserStore()
     private val refreshTokens = InMemoryRefreshStore()
-    private val rateLimiter = CountingRateLimiter()
     private val issuer = object : TokenIssuer {
         override fun issue(userId: Long, ttl: Duration): String = "access-$userId-${ttl.seconds}"
     }
@@ -99,13 +85,12 @@ class AuthServiceTest {
         issuer = issuer,
         passwords = PlainPasswordEncoder(),
         props = AuthProperties(),
-        rateLimiter = rateLimiter,
         clock = Clock.fixed(now, ZoneOffset.UTC),
     )
 
     private fun signupAndLogin(): TokenPair {
         service.signup(SignupRequest("a@b.c", "password1", "민균"))
-        return service.login(LoginRequest("a@b.c", "password1"), CLIENT_IP)
+        return service.login(LoginRequest("a@b.c", "password1"))
     }
 
     @Test
@@ -154,14 +139,14 @@ class AuthServiceTest {
     fun `비밀번호가 틀리면 로그인에 실패한다`() {
         service.signup(SignupRequest("a@b.c", "password1", "민균"))
 
-        val e = assertFailsWith<ApiException> { service.login(LoginRequest("a@b.c", "wrongpass1"), CLIENT_IP) }
+        val e = assertFailsWith<ApiException> { service.login(LoginRequest("a@b.c", "wrongpass1")) }
 
         assertEquals(ErrorCode.UNAUTHORIZED, e.code)
     }
 
     @Test
     fun `없는 계정도 같은 응답으로 막는다`() {
-        val e = assertFailsWith<ApiException> { service.login(LoginRequest("nobody@b.c", "password1"), CLIENT_IP) }
+        val e = assertFailsWith<ApiException> { service.login(LoginRequest("nobody@b.c", "password1")) }
 
         assertEquals(ErrorCode.UNAUTHORIZED, e.code)
     }
@@ -197,11 +182,10 @@ class AuthServiceTest {
             issuer = issuer,
             passwords = PlainPasswordEncoder(),
             props = AuthProperties(refreshTtl = Duration.ofSeconds(1)),
-            rateLimiter = CountingRateLimiter(),
             clock = Clock.fixed(now, ZoneOffset.UTC),
         )
         expiringService.signup(SignupRequest("a@b.c", "password1", "민균"))
-        val tokens = expiringService.login(LoginRequest("a@b.c", "password1"), CLIENT_IP)
+        val tokens = expiringService.login(LoginRequest("a@b.c", "password1"))
 
         val later = AuthService(
             users = users,
@@ -209,7 +193,6 @@ class AuthServiceTest {
             issuer = issuer,
             passwords = PlainPasswordEncoder(),
             props = AuthProperties(),
-            rateLimiter = CountingRateLimiter(),
             clock = Clock.fixed(now.plusSeconds(60), ZoneOffset.UTC),
         )
 
@@ -242,35 +225,4 @@ class AuthServiceTest {
         assertEquals(Instant.parse("2026-07-01T00:00:00Z").toEpochMilli(), me.createdAt)
     }
 
-    @Test
-    fun `로그인 시도는 IP와 이메일로 유량을 센다`() {
-        signupAndLogin()
-
-        assertEquals("login" to "$CLIENT_IP:a@b.c", rateLimiter.attempts.single())
-    }
-
-    @Test
-    fun `로그인 한도를 넘으면 429로 막는다`() {
-        val throttled = AuthService(
-            users = users,
-            refreshTokens = refreshTokens,
-            issuer = issuer,
-            passwords = PlainPasswordEncoder(),
-            props = AuthProperties(),
-            rateLimiter = CountingRateLimiter(limitOverride = 0),
-            clock = Clock.fixed(now, ZoneOffset.UTC),
-        )
-        users.create("a@b.c", "hashed:password1", "민균")
-
-        val e = assertFailsWith<RateLimitExceededException> {
-            throttled.login(LoginRequest("a@b.c", "password1"), CLIENT_IP)
-        }
-
-        assertEquals(ErrorCode.RATE_LIMITED, e.code)
-        assertEquals(42, e.retryAfterSeconds)
-    }
-
-    companion object {
-        private const val CLIENT_IP = "10.0.0.1"
-    }
 }
