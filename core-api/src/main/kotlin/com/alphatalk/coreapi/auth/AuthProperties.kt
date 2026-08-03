@@ -7,5 +7,4 @@ import java.time.Duration
 data class AuthProperties(
     val accessTtl: Duration = Duration.ofMinutes(30),
     val refreshTtl: Duration = Duration.ofDays(14),
-    val loginAttemptsPerMinute: Int = 10,
 )

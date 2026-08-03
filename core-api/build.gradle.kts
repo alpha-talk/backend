@@ -16,6 +16,7 @@ kotlin {
     jvmToolchain(21)
     compilerOptions {
         freeCompilerArgs.add("-Xjsr305=strict")
+        javaParameters = true
     }
 }
 
@@ -33,6 +34,7 @@ dependencies {
     implementation(project(":db-migrations"))
 
     implementation("org.springframework.boot:spring-boot-starter-web")
+    implementation("org.springframework.boot:spring-boot-starter-aop")
     implementation("org.springframework.boot:spring-boot-starter-security")
     implementation("org.springframework.boot:spring-boot-starter-validation")
     implementation("org.springframework.boot:spring-boot-starter-data-jpa")
