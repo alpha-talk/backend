@@ -6,5 +6,4 @@ spring:
 
 alphatalk:
   price:
-    symbols: ["005930"]
     market-hours-enforced: true    # 장 운영 창(07:50~20:00, §2.7) 준수 — 창 밖 심야 스모크만 false로 완화

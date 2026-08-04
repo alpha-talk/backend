@@ -1,7 +1,9 @@
-# Alpha Talk — Redis 계약 (`:contracts`) v0.10
+# Alpha Talk — Redis 계약 (`:contracts`) v0.12
 
 게이트웨이 · 워커(price/batch/ingest/llm) · 메인서버가 공유하는 Redis 키/채널/스트림 규약이다. 서버끼리는 코드로 의존하지 않고 이 계약으로만 통신하므로, 채널명·키·봉투 스키마·소유권은 이 문서가 서비스 간 단일 진실이다. 새 채널·키가 필요하면 코드보다 먼저 여기에 합의 내용을 반영한다. 클라이언트 쪽 계약은 별도 문서 몫이다 — 게이트웨이↔클라 STOMP는 WS API 명세, 메인서버↔클라 REST는 core-api 명세가 다룬다.
 
+> v0.12 (2026-08-04): 수요 해시 **쓰기 방식을 mutation별 `HINCRBY`에서 게이트웨이 인메모리 스냅샷 전체 재기록(Lua DEL+HSET 원자)으로 정정** — PR 리뷰 반영. 게이트웨이는 주기(5s)와 0↔1 전이 트리거마다 DemandRegistry 스냅샷을 통째로 기록하므로, mutation 유실로 인한 refcount 드리프트가 다음 주기에 자가 치유되고 인메모리 락 안에서 Redis I/O를 하지 않는다. worker-price가 보는 계약(해시 스키마·TTL·`demand:updated` 전이 발행·`gw:alive` 게이팅)은 v0.11과 동일.
+> v0.11 (2026-08-04): [KIS 워커 명세](alphatalk_kis_worker_spec.md) §2.1의 **수요(demand) 신호 계약 병합** — 게이트웨이가 `demand:quote:{gwId}`·`demand:room:{gwId}` 해시에 종목별 refcount를 `HINCRBY ±1`로 유지하고, 종목 참조수 0↔1 전이 시에만 `demand:updated`를 발행한다. `gw:alive:{gwId}`(TTL 15s) 하트비트로 살아있는 게이트웨이를 식별하고, 수요 해시는 하트비트가 TTL 60s로 연장해 죽은 게이트웨이의 수요가 자가 소멸한다. worker-price는 `demand:updated` 수신 시 즉시 + 60초 주기로 전체 리컨실(alive gw 합산)한다. §1.3·§3·§4 참조.
 > v0.10 (2026-08-03): `cursor:{userId}:{code}`에 **TTL 1일** 부여 — DB `read_cursor`가 진실이고 Redis는 미러 캐시이므로, 미러 쓰기 실패·커밋 직후 종료로 stale해진 키가 영구히 DB 폴백을 가리는 문제를 TTL 만료로 자가 치유한다. 만료 후 조회는 DB에서 읽어 재적재(TTL 갱신)한다.
 > v0.9 (2026-08-02): 메인서버 전용 키에 `badge:{userId}`(미읽음 배지 집계 캐시, TTL 10s) 추가 — 서비스 간 계약이 아니며 게이트웨이·워커는 접근하지 않는다. `cursor:{userId}:{code}` 쓰기 주체를 core-api notification 모듈로 확정(전진 전용 — 역행 값은 Lua 비교로 폐기, 기록 값은 DB `read_cursor`의 최종 커서). `idem:{userId}:{key}` Redis 캐시는 **제거** — 멱등 응답은 DB 원장 `idempotency_record`가 커밋과 동일 트랜잭션으로 영속한다(core-api 명세 §1.6). 메인서버 전용 키(`rl:*`·`badge:*`)도 `:contracts`의 `Keys` 생성 함수로 고정한다.
 > v0.8 (2026-07-31): `watchlist:rev:{userId}` 키 추가 — 메인서버 전용, 미러 동기화의 최신성 판정(rev)에 사용하며 게이트웨이는 읽지 않는다. 메인서버의 미러 교체와 `watchlist:updated` 발행은 하나의 Lua 스크립트에서 원자적으로 수행되어, 오래된 동기화는 폐기되고 발행 순서가 rev(커밋) 순서를 따른다.
@@ -22,9 +24,9 @@ Redis를 세 가지 용도로 쓴다. **이름이 비슷해도 메커니즘이 �
 
 | 메커니즘 | 무엇 | 키/채널 패턴 | 보장 | 누가 봄 |
 |---|---|---|---|---|
-| **Pub/Sub** | 실시간 1→N 브로드캐스트 | `quote:{code}` · `stream:{code}` · `post:{code}` · `watchlist:updated` | 구독한 **전원이 사본** · 휘발 · ACK 없음 · best-effort | 게이트웨이가 구독 |
+| **Pub/Sub** | 실시간 1→N 브로드캐스트 | `quote:{code}` · `stream:{code}` · `post:{code}` · `watchlist:updated` · `demand:updated` | 구독한 **전원이 사본** · 휘발 · ACK 없음 · best-effort | 게이트웨이가 구독 (`demand:updated`만 반대로 worker-price가 구독) |
 | **Redis Streams** | 신뢰성 **작업 큐** | `queue:ingest` (+DLQ `queue:ingest:dlq`) | **경쟁 소비**(한 건=한 워커) · ACK · 재시도(PEL) | 워커끼리만 |
-| **자료구조** | 상태/캐시 | `price:{code}` · `presence:{userId}` · `cursor:*` · `seen:ingest:*` · `lock:cluster:*` · `rate:article-fetch:*` · `rate:kis-rest:*` | 영속(메모리) · TTL | 워커/메인/게이트웨이 |
+| **자료구조** | 상태/캐시 | `price:{code}` · `presence:{userId}` · `cursor:*` · `seen:ingest:*` · `lock:cluster:*` · `rate:article-fetch:*` · `rate:kis-rest:*` · `demand:*:{gwId}` · `gw:alive:{gwId}` | 영속(메모리) · TTL | 워커/메인/게이트웨이 |
 
 > ⚠️ **`stream:{code}`는 Pub/Sub 채널이다 — Redis Stream(데이터 구조)이 아니다.**
 > 이 시스템에서 진짜 Redis Stream은 **`queue:ingest`(와 그 DLQ `queue:ingest:dlq`)뿐**이다.
@@ -66,7 +68,19 @@ Redis를 세 가지 용도로 쓴다. **이름이 비슷해도 메커니즘이 �
 ```json
 { "userId": 123, "added": ["005930"], "removed": ["000660"], "ts": 1719600000000 }
 ```
- 
+
+### 1.3 수요 신호 채널 `demand:updated` — 게이트웨이 → worker-price (v0.11)
+
+§1.1과 방향이 반대다: **게이트웨이가 발행하고 worker-price가 구독한다.** WS 구독 용량이 유한하므로 worker-price는 전 종목이 아니라 수요가 있는 종목만 KIS에 구독한다. 수요 = ⋃(접속 중 유저의 관심목록) ∪ (입장 중인 방) — 이를 모두 아는 쪽은 게이트웨이라서 카운트는 게이트웨이가 유지하고(§3의 `demand:*:{gwId}` 해시) worker-price는 소비만 한다.
+
+```json
+{ "kind": "quote|room", "code": "005930", "active": true, "ts": 1719600000000 }
+```
+
+- 게이트웨이는 종목 참조수가 **0↔1 전이할 때만** 발행한다(모든 증감마다 발행하지 않는다).
+- best-effort다. worker-price는 이 메시지를 **리컨실 트리거**로만 쓰고, 목표 종목 집합은 항상 §3의 해시 합산으로 재계산한다(payload의 `active`를 단독 신뢰해 즉시 해제하지 않는다). 유실은 60초 주기 전체 리컨실이 자기치유한다.
+- 증감 시점: CONNECT 시 관심목록 해소분 +1씩 / DISCONNECT −1씩 / `watchlist:updated` 반영 시 ± / 방 토픽 SUBSCRIBE·UNSUBSCRIBE 시 room ±.
+
 ---
 
 ## 2. Redis Streams — 작업 큐 `queue:ingest` (워커 간)
@@ -150,7 +164,11 @@ ingest-worker 스케줄러(싱글턴)가 매일 18:00 KST에 적재하고 같은
 | `lock:cluster:{code}` | String (`SET NX PX 3000`) | 뉴스 클러스터 판정 직렬화 락(뉴스 워커 명세 §3.3) | llm-worker | llm-worker | 3초 |
 | `rate:article-fetch:{host}` | String (`SET PX`) | robots.txt·원문 fetch의 호스트별 다음 요청 간격을 llm-worker 인스턴스 간 직렬화 | llm-worker | llm-worker | 요청 간격(기본 1초) |
 | `rate:kis-rest:{keyId}` | Hash(token bucket) | 같은 KIS 계정을 쓰는 price·batch 프로세스의 일반 REST 합산 유량 제한 | price/batch-worker | price/batch-worker | 마지막 소비 후 2분 |
+| `demand:quote:{gwId}` | Hash `{code: refCount}` | 접속 세션의 관심목록 기준 종목 참조 수(유저 단위) — 주기·전이 트리거마다 스냅샷 전체 재기록(v0.12) | 게이트웨이 | worker-price | **60s** — 재기록이 연장 |
+| `demand:room:{gwId}` | Hash `{code: refCount}` | 방 토픽 구독(입장) 기준 참조 수(구독 단위) — trade/depth·우선순위 판단 | 게이트웨이 | worker-price | **60s** — 재기록이 연장 |
+| `gw:alive:{gwId}` | String | 살아있는 게이트웨이 식별(하트비트 5s 주기 갱신). worker-price는 리컨실 때 alive gw의 수요만 합산 | 게이트웨이 | worker-price | **15s** |
 
+- **`{gwId}`는 게이트웨이 부팅마다 새로 발급**한다(인메모리 수요 인덱스가 0에서 재구축되는 것과 정합). 이전 부팅의 해시는 하트비트가 끊겨 TTL로 자가 소멸하고, worker-price는 `gw:alive` 없는 gwId를 합산에서 제외하므로 TTL 만료 전에도 무해하다. graceful shutdown 시 게이트웨이는 자기 키 3개를 즉시 DEL한다.
 - **현재가 스냅샷**은 REST(메인서버가 `price:{code}` 읽기)로 준다. 게이트웨이는 `quote:{code}` 라이브만 relay하고 캐시를 직접 읽지 않는다(얇은 엣지 유지).
 - 봉(OHLCV)은 KIS에서 받아 캐시하되, 권위 있는 가격 저장소로 쓰지 않는다(틱은 영속화 안 함).
 - 메인서버 **전용** 키(서비스 간 계약 아님 — 게이트웨이·워커는 접근 금지): `rl:{action}:{key}:{windowIndex}`(레이트리밋 고정 윈도 카운터, TTL=윈도), `badge:{userId}`(미읽음 배지 집계 캐시, TTL 10초 — 커서 전진·모두 읽음 시 DEL). 둘 다 `:contracts` `Keys` 생성 함수 사용. 멱등 응답은 Redis가 아니라 DB 원장(`idempotency_record`)이다 — core-api 명세 §1.6.
@@ -177,8 +195,11 @@ ingest-worker 스케줄러(싱글턴)가 매일 18:00 KST에 적재하고 같은
 | `lock:cluster:{code}` | — | — | — | **WRITE/READ** | — | — |
 | `rate:article-fetch:{host}` | — | — | — | **WRITE/READ** | — | — |
 | `rate:kis-rest:{keyId}` | **WRITE/READ** | **WRITE/READ** | — | — | — | — |
+| `demand:updated` (P/S) | **SUBSCRIBE** | — | — | — | — | **PUBLISH** |
+| `demand:quote/room:{gwId}` (자료구조) | READ | — | — | — | — | **WRITE** |
+| `gw:alive:{gwId}` (자료구조) | READ | — | — | — | — | **WRITE** |
 
-게이트웨이는 **Pub/Sub SUBSCRIBE만** 한다(+프레즌스). Streams·DB 쓰기는 만지지 않는다.
+게이트웨이는 **Pub/Sub SUBSCRIBE만** 한다(+프레즌스·수요 쓰기, `demand:updated` 발행). Streams·DB 쓰기는 만지지 않는다.
  
 ---
 
@@ -238,6 +259,7 @@ Streams를 타는 경로는 뉴스 기반 소식(stream) 하나뿐이다. 틱·�
 | `queue:ingest` 엔트리 스키마(§2.1·§2.3) | — | ingest=생산, llm=소비 | — |
 | 봉투/`eventId`(ULID) 규약 | 파싱 | 생성 | 생성 |
 | `watchlist:updated` payload | 구독·세션조정 | — | 발행 |
+| `demand:*:{gwId}`·`gw:alive:{gwId}`·`demand:updated` (§1.3) | refcount 쓰기·전이 발행·하트비트 | price=합산·구독 | — |
 | `cursor` 의미(읽음 위치) | — | — | 쓰기/복구 |
 
 - 이 표의 모든 문자열·DTO는 Gradle `:contracts` 서브프로젝트에 상수/레코드로 박아 세 앱이 공유한다.

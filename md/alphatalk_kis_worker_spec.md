@@ -65,22 +65,22 @@ KIS 유량은 슬라이딩 윈도로 측정되는 것으로 알려져 있다. �
 
 ## 2. worker-price (실시간)
 
-### 2.1 수요(demand) 정의와 신호 — ★ Redis 계약 v0.2 증보 제안
+### 2.1 수요(demand) 정의와 신호 — Redis 계약 v0.12에 반영됨
 
 WS 구독 용량이 유한하므로(§1.3) 전 종목이 아니라 수요가 있는 종목만 구독한다. **수요 = ⋃(접속 중 유저의 관심목록) ∪ (입장 중인 방)** (기획안 §2.5 검증 #2). 세션·관심목록 해소·방 토픽 구독을 모두 아는 쪽은 게이트웨이다. 그래서 카운트는 게이트웨이가 유지하고 worker-price는 소비만 한다.
 
-> ⚠️ **아래는 Redis 계약 v0.1에 없는 신규 제안이다. 게이트웨이 담당자와 합의 후 계약 문서 v0.2에 병합할 것.**
+> ✅ **2026-08-04 [Redis 계약](redis_contract.md) v0.12 §1.3·§3에 반영·구현됨.** 단일 진실은 계약 문서다 — 아래 표는 요약이며 어긋나면 계약 문서를 따른다.
 
 | 키/채널 | 타입 | 쓰기 | 읽기 | 내용 |
 |---|---|---|---|---|
-| `demand:quote:{gwId}` | Hash `{code: refCount}` | 게이트웨이 (`HINCRBY ±1`) | worker-price | 접속 세션의 관심목록 기준 참조 수 |
-| `demand:room:{gwId}` | Hash `{code: refCount}` | 게이트웨이 | worker-price | 방 토픽 구독(입장) 기준 — trade/depth·우선순위 판단 |
+| `demand:quote:{gwId}` | Hash `{code: refCount}` | 게이트웨이(스냅샷 전체 재기록) | worker-price | 접속 세션의 관심목록 기준 참조 수 |
+| `demand:room:{gwId}` | Hash `{code: refCount}` | 게이트웨이(스냅샷 전체 재기록) | worker-price | 방 토픽 구독(입장) 기준 — trade/depth·우선순위 판단 |
 | `demand:updated` | Pub/Sub | 게이트웨이 | worker-price | `{"kind":"quote|room","code":"005930","active":true,"ts":...}` — 종목 참조수 0↔1 전이 시만 발행 |
 | `gw:alive:{gwId}` | String TTL 15s | 게이트웨이(하트비트) | worker-price | 살아있는 게이트웨이 식별. 죽은 gwId의 해시는 수요 합산에서 제외(스테일 정리) |
 
-- 게이트웨이 증감 시점: CONNECT 시 관심목록 해소분 +1씩 / DISCONNECT −1씩 / `watchlist:updated` 반영 시 ± / 방 토픽 SUBSCRIBE·UNSUBSCRIBE 시 room ±.
+- 게이트웨이 인메모리 수요 변경 시점: CONNECT 후 첫 SUBSCRIBE에서 관심목록 부착 / 마지막 세션 DISCONNECT에서 관심목록 제거 / `watchlist:updated` diff 반영 / 방 토픽 SUBSCRIBE·UNSUBSCRIBE에서 room 증감. 종목 수요의 0↔1 전이는 즉시 동기화를 트리거하고, 5초 주기 동기화가 refcount 변화와 실패·유실을 보정한다.
 - worker-price 소비는 두 경로다. ① `demand:updated` 구독으로 즉시 반영한다. ② **60초마다 전체 리컨실**(`gw:alive` 스캔 → 살아있는 gw들의 해시 HGETALL 합산 → 목표 구독 집합 재계산)로 메시지 유실·스테일을 자기치유한다.
-- **MVP 단순화(게이트웨이 1대)**: `{gwId}` 생략한 단일 해시 + 게이트웨이 기동 시 `DEL` 후 재구축. 다중화 시 위 형태로 확장.
+- **구현 확정(v0.12)**: `{gwId}`는 생략하지 않고 게이트웨이 부팅마다 새로 발급한다. 단일 동기화 스레드가 5초 주기와 0↔1 전이 트리거마다 `DemandRegistry` 스냅샷을 Lua `DEL+HSET`으로 원자적 전체 재기록하고 해시 TTL 60초·`gw:alive` TTL 15초를 갱신한다. worker-price는 `demand:updated`를 리컨실 트리거로만 쓰고 목표 집합은 항상 alive gw 해시 합산으로 재계산한다.
 
 ### 2.2 세션 풀 & 구독 배정
 
@@ -154,7 +154,12 @@ KIS 프레임 → 파싱 → 종목별 최신값 버퍼(덮어쓰기)
 ### 2.6 봉(OHLCV) 수집·백필
 
 - **기간별 시세**: `GET /uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice` · TR `FHKST03010100` · `FID_INPUT_DATE_1/2`(범위), `FID_PERIOD_DIV_CODE=D`, `FID_ORG_ADJ_PRC=0`(수정주가) → **1콜 최대 100봉**.
-- 정기: 매 영업일 16:30 전 상장 종목 최신 일봉 upsert. ~2,600콜 → 실전 15/s 페이싱으로 약 3분, 모의 1.5/s로 약 29분 — 모의에선 관심 유니버스만.
+- 정기: 매 영업일 16:30 전 상장 종목 최신 일봉 upsert. ~2,600콜 → 실전 15/s 페이싱으로 약 3분, 모의 1.5/s로 약 29분 — 모의에선 수요 종목(§2.1)만.
+- **유니버스 원천**: 실전은 `stock_master`의 활성 종목(worker-batch 적재)이다. 수요(§2.1)는 접속자에 따라 휘발하므로 일봉 대상이 될 수 없다 — 둘은 분리한다.
+    - `stock_master`가 **비어 있으면**(초기 구축 전) 수요 종목으로 대체하고 경고를 남긴다 — 정상 축소 경로다.
+    - `stock_master` **조회가 실패하면**(DB 장애) 축소하지 않는다. exponential backoff+jitter로 3회 재시도 후에도 실패하면 회차를 중단하고 `candle_sync_aborted`를 올린다 — 축소된 채 "성공"으로 끝나 다음 영업일까지 종목이 누락되는 것을 막는다.
+- **부분 실패 = 미완주**: 개별 종목 실패는 나머지 종목의 처리를 막지 않지만(계속 진행) 실패 수를 `candle_sync_failed`로 기록하고 **회차는 미완료로 남긴다**. 한 종목이라도 실패하면 완주로 치지 않는다.
+- **미완주 재시도**: 완주하지 못한 영업일에는 17·18·19시에 리더가 재시도한다(완주한 날은 no-op). 이미 적재된 종목은 `latestDate()` 비교로 건너뛰므로 재조회 대상은 실패분뿐이고, 장 마감 후라 재조회는 같은 확정 일봉을 upsert하므로 멱등이다.
 - 백필: 신규 종목/초기 구축 시 종목당 `(영업일수/100)`콜을 야간 슬롯에서 수행한다. 액면분할 등으로 마스터의 상장주식수 급변을 감지하면 해당 종목을 **전 구간 재적재**한다(수정주가 재계산 반영).
 
 ### 2.7 장 운영 캘린더
@@ -175,7 +180,7 @@ KIS 프레임 → 파싱 → 종목별 최신값 버퍼(덮어쓰기)
 | 잡 | 소스 · TR/엔드포인트 | 스케줄 (KST) | 대상·볼륨 | 멱등 키 |
 |---|---|---|---|---|
 | `stock_master_sync` | KIS 마스터 파일 `https://new.real.download.dws.co.kr/common/master/kospi_code.mst.zip`·`kosdaq_code.mst.zip`·`idxcode.mst.zip` (CP949, 고정폭 — KIS GitHub 파서 참조) | 매일 08:00 (원본 07:40경 갱신) | 전 종목 ~2,600 + 업종 ~490 | `code` upsert |
-| `daily_candle_sync` | KIS `FHKST03010100` (§2.6 — 실행 주체는 price, 트리거·이력 관리는 batch 잡 테이블로 일원화 가능. MVP: price 내 스케줄) | 영업일 16:30 | 전 종목 | `(code,date)` |
+| `daily_candle_sync` | KIS `FHKST03010100` (§2.6 — 실행 주체는 price, 트리거·이력 관리는 batch 잡 테이블로 일원화 가능. MVP: price 내 스케줄) | 영업일 16:30 (+미완주 시 17·18·19시 재시도) | 전 종목(`stock_master` 활성) | `(code,date)` |
 | `valuation_daily` | KIS `FHKST01010100` 응답의 `per,pbr,eps,bps` + 마스터 시총 | 영업일 16:50 | 전 종목 (~2,600콜) | `(code,date)` |
 | `investor_flow_daily` | KIS `GET .../inquire-investor` · TR `FHKST01010900` — **장마감 후 확정치** | 영업일 17:10 | 전 종목 | `(code,date)` |
 | `invest_opinion_sync` | KIS `GET /uapi/domestic-stock/v1/quotations/invest-opbysec` · TR `FHKST663400C0` — 회원사 코드별 전 종목 투자의견(의견·직전의견·목표가) | 영업일 07:00 이상 18:00 미만 **10분 주기**(07:00~17:50) | 활성 회원사 `B`개 × 연속조회 페이지 `P` | `(code, business_date, broker_code, content_hash)` |
@@ -297,7 +302,7 @@ batch_job_run(id, job, run_date, status, ok_count, fail_count, started_at, finis
 
 ## 6. 관측성
 
-메트릭: `kis_ws_sessions{state}` · `kis_subscribed_symbols` · `demand_symbols` · `degraded_symbols` · `tick_in_rate`/`quote_publish_rate` · `conflation_lag_ms` · `pingpong_miss` · `rest_call_rate{keyId}` · `rest_throttled` · `token_refresh_total` · `batch_job_duration/fail{job}`. 로그는 구조화 JSON으로 남기고 appkey/token은 마스킹한다. 프레임 원문은 DEBUG+샘플링으로만 남긴다. 알람: WS 세션 전멸 5분, 장중 tick_in=0, 배치 실패, throttled 급증.
+메트릭: `kis_ws_sessions{state}` · `kis_subscribed_symbols` · `demand_symbols` · `degraded_symbols` · `tick_in_rate`/`quote_publish_rate` · `conflation_lag_ms` · `pingpong_miss` · `rest_call_rate{keyId}` · `rest_throttled` · `token_refresh_total` · `batch_job_duration/fail{job}`. 로그는 구조화 JSON으로 남기고 appkey/token은 마스킹한다. 프레임 원문은 DEBUG+샘플링으로만 남긴다. 알람: WS 세션 전멸 5분, 장중 tick_in=0, 배치 실패, throttled 급증, `candle_sync_aborted`(유니버스 조회 실패로 일봉 회차 중단), `candle_sync_failed` 지속(재시도 회차까지 남는 종목 실패 — 둘 다 §2.6).
 
 ## 7. 장애 시나리오 & 대응
 
@@ -325,9 +330,8 @@ batch_job_run(id, job, run_date, status, ok_count, fail_count, started_at, finis
 4. 마스터 파일 URL 안정성(비공식 경로) — 포털 "종목 다운로드" 링크 주소와 대조, 변경 대비 설정화.
 5. `FID_ORG_ADJ_PRC` 값 의미(0=수정주가) 문서 재확인.
 6. OpenDART 일일 호출 한도 수치.
-7. **demand 계약 증보(§2.1) — 게이트웨이 담당자 합의** 후 Redis 계약 v0.2 병합.
-8. `FHKST663400C0`의 **모의투자(vts) 지원 여부**, 활성 회원사 코드 원천·갱신 주기, 응답 1페이지 건수와 `tr_cont` 최대 페이지를 실계정 스모크로 확정. 결과로 §3.1의 `B × P` 호출량과 10분 주기 지속 가능성을 검증한다.
-9. **업종 분류의 세분도** — `idxcode.mst`가 주는 대분류는 KOSPI 11종·KOSDAQ 20여 종이라 "제조"에 대부분이 몰린다. worker-llm의 섹터 fan-out이 이 정도 해상도로 쓸 만한지 실데이터로 확인하고, 부족하면 중·소분류(마스터 파일의 [68:72]·[72:76]) 사용이나 서비스 자체 분류를 검토한다.
+7. `FHKST663400C0`의 **모의투자(vts) 지원 여부**, 활성 회원사 코드 원천·갱신 주기, 응답 1페이지 건수와 `tr_cont` 최대 페이지를 실계정 스모크로 확정. 결과로 §3.1의 `B × P` 호출량과 10분 주기 지속 가능성을 검증한다.
+8. **업종 분류의 세분도** — `idxcode.mst`가 주는 대분류는 KOSPI 11종·KOSDAQ 20여 종이라 "제조"에 대부분이 몰린다. worker-llm의 섹터 fan-out이 이 정도 해상도로 쓸 만한지 실데이터로 확인하고, 부족하면 중·소분류(마스터 파일의 [68:72]·[72:76]) 사용이나 서비스 자체 분류를 검토한다.
 ---
 
-*KIS 수집 워커 명세 v0.2 — Redis 계약 v0.7·WS API v0.6·core-api 명세 v0.1과 정합. KIS 수치는 2026-07 공식 샘플 대조 기준이며 §9 항목은 실계정 재확인 대상.*
+*KIS 수집 워커 명세 v0.2 — Redis 계약 v0.12·WS API v0.6·core-api 명세 v0.1과 정합. KIS 수치는 2026-07 공식 샘플 대조 기준이며 §9 항목은 실계정 재확인 대상.*

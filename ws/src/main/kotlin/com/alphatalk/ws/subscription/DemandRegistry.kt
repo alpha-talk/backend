@@ -11,7 +11,8 @@ import kotlin.concurrent.withLock
 @Component
 class DemandRegistry(
     private val channelSubscriber: ChannelSubscriber,
-) : DemandQuery, DemandMutator {
+    private val syncTrigger: DemandSyncTrigger,
+) : DemandQuery, DemandMutator, DemandSnapshotSource {
     private class SessionInfo(
         val userId: Long,
 
@@ -43,6 +44,13 @@ class DemandRegistry(
     private val watchlistIndex = ConcurrentHashMap<String, Set<Long>>()
 
     override fun usersWatching(code: String): Set<Long> = watchlistIndex[code] ?: emptySet()
+
+    override fun demandSnapshot(): DemandSnapshot = lock.withLock {
+        val quote = watchlistIndex.mapValues { it.value.size }
+        val room = HashMap<String, Int>()
+        roomIndex.forEach { (key, count) -> room.merge(key.second, count, Int::plus) }
+        DemandSnapshot(quote = quote, room = room)
+    }
 
     override fun isUserConnected(userId: Long): Boolean = lock.withLock { userId in userSessions }
 
@@ -101,6 +109,7 @@ class DemandRegistry(
             val count = roomIndex.merge(kind to code, 1, Int::plus)
             if (count == 1) {
                 channelSubscriber.subscribe(Channels.of(kind, code))
+                syncTrigger.request()
             }
         }
     }
@@ -136,6 +145,7 @@ class DemandRegistry(
         if (before.isEmpty()) {
             channelSubscriber.subscribe(Channels.quote(code))
             channelSubscriber.subscribe(Channels.stream(code))
+            syncTrigger.request()
         }
     }
 
@@ -147,6 +157,7 @@ class DemandRegistry(
             watchlistIndex.remove(code)
             channelSubscriber.unsubscribe(Channels.quote(code))
             channelSubscriber.unsubscribe(Channels.stream(code))
+            syncTrigger.request()
         } else {
             watchlistIndex[code] = after
         }
@@ -158,6 +169,7 @@ class DemandRegistry(
         if (count <= 1) {
             roomIndex.remove(key)
             channelSubscriber.unsubscribe(Channels.of(sub.kind, sub.code))
+            syncTrigger.request()
         } else {
             roomIndex[key] = count - 1
         }

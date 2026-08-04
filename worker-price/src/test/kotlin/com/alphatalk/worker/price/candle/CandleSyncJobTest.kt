@@ -10,6 +10,7 @@ import java.time.ZoneId
 import java.time.ZonedDateTime
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class CandleSyncJobTest {
@@ -67,8 +68,16 @@ class CandleSyncJobTest {
         symbols: Set<String> = setOf("005930"),
         calendar: MarketCalendar = MarketCalendar(enforced = false, clock = Instant::now),
         leader: LeaderLock = ToggleLeaderLock(leader = true),
+    ) = job(fetcher, store, { symbols }, calendar, leader)
+
+    private fun job(
+        fetcher: DailyCandleFetcher,
+        store: DailyCandleStore,
+        symbols: () -> Set<String>,
+        calendar: MarketCalendar = MarketCalendar(enforced = false, clock = Instant::now),
+        leader: LeaderLock = ToggleLeaderLock(leader = true),
     ) = CandleSyncJob(
-        symbols = { symbols },
+        symbols = symbols,
         fetcher = fetcher,
         store = store,
         backfillDays = 90,
@@ -83,7 +92,7 @@ class CandleSyncJobTest {
         val fetcher = RecordingFetcher { code -> listOf(candle(code, "20260723"), candle(code, "20260724")) }
         val store = InMemoryCandleStore()
 
-        val synced = job(fetcher, store).syncOnce()
+        val synced = job(fetcher, store).syncOnce().synced
 
         assertEquals(1, synced)
         assertEquals(Triple("005930", today.minusDays(90), today), fetcher.requested.single())
@@ -107,7 +116,7 @@ class CandleSyncJobTest {
         val store = InMemoryCandleStore()
         store.upsert(listOf(candle("005930", "20260724")))
 
-        val synced = job(fetcher, store).syncOnce()
+        val synced = job(fetcher, store).syncOnce().synced
 
         assertEquals(0, synced)
         assertTrue(fetcher.requested.isEmpty())
@@ -121,9 +130,11 @@ class CandleSyncJobTest {
         }
         val store = InMemoryCandleStore()
 
-        val synced = job(fetcher, store, symbols = linkedSetOf("005930", "000660")).syncOnce()
+        val result = job(fetcher, store, symbols = linkedSetOf("005930", "000660")).syncOnce()
 
-        assertEquals(1, synced)
+        assertEquals(1, result.synced)
+        assertEquals(1, result.failed)
+        assertFalse(result.complete)
         assertEquals(setOf("000660" to "20260724"), store.rows.keys)
     }
 
@@ -155,5 +166,73 @@ class CandleSyncJobTest {
         job(fetcher, store, calendar = calendarAt(27), leader = ToggleLeaderLock(leader = false)).syncDaily()
 
         assertTrue(fetcher.requested.isEmpty())
+    }
+
+    @Test
+    fun `종목 실패가 있으면 회차를 미완료로 두고 후속 회차가 재시도한다`() {
+        val store = InMemoryCandleStore()
+        var attempt = 0
+        val fetcher = RecordingFetcher { code ->
+            if (code == "005930" && attempt == 0) throw IllegalStateException("boom")
+            listOf(candle(code, "20260724"))
+        }
+
+        val job = job(fetcher, store, symbols = linkedSetOf("005930", "000660"), calendar = calendarAt(27))
+        job.syncDaily()
+        attempt = 1
+
+        job.retryUnfinished()
+
+        assertEquals(setOf("005930" to "20260724", "000660" to "20260724"), store.rows.keys)
+    }
+
+    @Test
+    fun `재시도 회차는 이미 적재된 종목을 다시 조회하지 않는다`() {
+        val store = InMemoryCandleStore()
+        var attempt = 0
+        val fetcher = RecordingFetcher { code ->
+            if (code == "005930" && attempt == 0) throw IllegalStateException("boom")
+            listOf(candle(code, "20260724"))
+        }
+
+        val job = job(fetcher, store, symbols = linkedSetOf("005930", "000660"), calendar = calendarAt(27))
+        job.syncDaily()
+        attempt = 1
+        fetcher.requested.clear()
+
+        job.retryUnfinished()
+
+        assertEquals(listOf("005930"), fetcher.requested.map { it.first })
+    }
+
+    @Test
+    fun `유니버스 조회 실패로 중단되면 후속 회차가 재시도해 완주한다`() {
+        val fetcher = RecordingFetcher { code -> listOf(candle(code, "20260724")) }
+        val store = InMemoryCandleStore()
+        var universeCalls = 0
+        val flaky = {
+            universeCalls += 1
+            if (universeCalls == 1) throw IllegalStateException("db down") else setOf("005930")
+        }
+
+        val job = job(fetcher, store, flaky, calendar = calendarAt(27))
+        job.syncDaily()
+        assertTrue(fetcher.requested.isEmpty())
+
+        job.retryUnfinished()
+
+        assertEquals(listOf("005930"), fetcher.requested.map { it.first })
+    }
+
+    @Test
+    fun `정기 회차가 완주했으면 후속 재시도는 다시 조회하지 않는다`() {
+        val fetcher = RecordingFetcher { code -> listOf(candle(code, "20260724")) }
+        val store = InMemoryCandleStore()
+
+        val job = job(fetcher, store, calendar = calendarAt(27))
+        job.syncDaily()
+        job.retryUnfinished()
+
+        assertEquals(1, fetcher.requested.size)
     }
 }
