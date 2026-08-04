@@ -1,10 +1,12 @@
 package com.alphatalk.worker.price.candle
 
 import com.alphatalk.worker.price.calendar.MarketCalendar
+import com.alphatalk.worker.price.leader.LeaderLock
 import java.time.LocalDate
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 
 class MinuteCandleDailySyncJobTest {
     private val date = "20260804"
@@ -24,6 +26,11 @@ class MinuteCandleDailySyncJobTest {
         override fun purgeBefore(dateExclusive: String): Int = 0
     }
 
+    private class AlwaysLeader : LeaderLock {
+        override fun tryAcquire() = true
+        override fun release() {}
+    }
+
     private fun job(
         store: StubMinuteStore,
         symbols: Set<String>,
@@ -34,11 +41,9 @@ class MinuteCandleDailySyncJobTest {
         syncDay = syncDay,
         isDayComplete = { code, d -> (store.latestTime(code, d) ?: "") >= "1530" },
         calendar = MarketCalendar(enforced = false),
-        leader = object : com.alphatalk.worker.price.leader.LeaderLock {
-            override fun tryAcquire() = true
-            override fun release() {}
-        },
+        leader = AlwaysLeader(),
         today = { LocalDate.of(2026, 8, 4) },
+        sleeper = { },
     )
 
     @Test
@@ -51,12 +56,15 @@ class MinuteCandleDailySyncJobTest {
             391
         }
 
-        assertEquals(1, job.syncOnce())
+        val result = job.syncOnce()
+
+        assertEquals(1, result.completed)
+        assertTrue(result.complete)
         assertEquals(listOf("005930"), calls)
     }
 
     @Test
-    fun `부분 적재로 미완주면 같은 날 즉시 재시도해 완주시킨다`() {
+    fun `부분 적재로 미완주면 같은 회차에서 즉시 재시도해 완주시킨다`() {
         val store = StubMinuteStore()
         val calls = mutableListOf<String>()
         val job = job(store, setOf("005930")) { code ->
@@ -65,36 +73,74 @@ class MinuteCandleDailySyncJobTest {
             1
         }
 
-        assertEquals(1, job.syncOnce())
+        val result = job.syncOnce()
+
+        assertEquals(1, result.completed)
         assertEquals(2, calls.size)
-        assertEquals("1530", store.latestTime("005930", date))
     }
 
     @Test
-    fun `재시도에도 미완주면 성공으로 세지 않는다`() {
+    fun `첫 시도가 예외로 죽어도 같은 회차에서 재시도한다`() {
         val store = StubMinuteStore()
         val calls = mutableListOf<String>()
         val job = job(store, setOf("005930")) { code ->
             calls += code
-            store.setLatest(code, "1230")
-            1
+            if (calls.size == 1) throw IllegalStateException("kis timeout")
+            store.setLatest(code, "1530")
+            391
         }
 
-        assertEquals(0, job.syncOnce())
+        val result = job.syncOnce()
+
+        assertEquals(1, result.completed)
         assertEquals(2, calls.size)
     }
 
     @Test
-    fun `이미 완주한 종목은 KIS 동기화를 건너뛴다`() {
+    fun `경합으로 진전이 없으면 시도 상한까지 반복하고 미완주로 센다`() {
         val store = StubMinuteStore()
-        store.setLatest("005930", "1530")
         val calls = mutableListOf<String>()
         val job = job(store, setOf("005930")) { code ->
             calls += code
             0
         }
 
-        assertEquals(1, job.syncOnce())
-        assertEquals(0, calls.size)
+        val result = job.syncOnce()
+
+        assertEquals(0, result.completed)
+        assertEquals(1, result.incomplete)
+        assertEquals(3, calls.size)
+    }
+
+    @Test
+    fun `정기 회차가 완주하면 재시도 회차는 동기화를 건너뛴다`() {
+        val store = StubMinuteStore()
+        val calls = mutableListOf<String>()
+        val job = job(store, setOf("005930")) { code ->
+            calls += code
+            store.setLatest(code, "1530")
+            391
+        }
+
+        job.syncDaily()
+        assertEquals(1, calls.size)
+        job.retryUnfinished()
+        assertEquals(1, calls.size)
+    }
+
+    @Test
+    fun `정기 회차가 미완주면 재시도 회차가 다시 동기화한다`() {
+        val store = StubMinuteStore()
+        val calls = mutableListOf<String>()
+        val job = job(store, setOf("005930")) { code ->
+            calls += code
+            if (calls.size >= 4) store.setLatest(code, "1530")
+            1
+        }
+
+        job.syncDaily()
+        assertEquals(3, calls.size)
+        job.retryUnfinished()
+        assertEquals(4, calls.size)
     }
 }
