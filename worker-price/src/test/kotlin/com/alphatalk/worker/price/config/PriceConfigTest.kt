@@ -1,7 +1,5 @@
 package com.alphatalk.worker.price.config
 
-import com.alphatalk.kis.model.KisEnv
-import com.alphatalk.kis.rest.KisRestClient
 import com.alphatalk.worker.price.conflation.ConflationBuffer
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory
@@ -22,12 +20,6 @@ class PriceConfigTest {
         config.sessionPool(props, ConflationBuffer(), SimpleMeterRegistry())
 
     private fun demandSource() = config.demandSource(redisTemplate, connectionFactory)
-
-    @Test
-    fun `분봉 시장 코드는 실전에서 통합 모의에서 KRX다`() {
-        assertEquals(KisRestClient.MARKET_DIV_UNIFIED, config.minuteMarketDiv(KisEnv.PROD))
-        assertEquals(KisRestClient.MARKET_DIV_KRX, config.minuteMarketDiv(KisEnv.VTS))
-    }
 
     @Test
     fun `계정이 비어 있으면 기동에 실패한다`() {
@@ -52,19 +44,6 @@ class PriceConfigTest {
     }
 
     @Test
-    fun `지원하지 않는 env면 기동에 실패한다`() {
-        assertFailsWith<IllegalArgumentException> {
-            sessionPool(
-                PriceProperties(
-                    enabled = true,
-                    env = "staging",
-                    accountsJson = validAccounts,
-                ),
-            )
-        }
-    }
-
-    @Test
     fun `유효한 설정이면 풀과 수요 소스가 조립된다`() {
         val props = PriceProperties(enabled = true, accountsJson = validAccounts)
 
@@ -73,9 +52,8 @@ class PriceConfigTest {
     }
 
     @Test
-    fun `실전은 통합·시간외 TR을, 모의는 KRX 정규장 TR만 구독한다`() {
-        assertEquals(listOf("H0UNCNT0", "H0STOUP0"), config.tickTrIds(KisEnv.PROD))
-        assertEquals(listOf("H0STCNT0"), config.tickTrIds(KisEnv.VTS))
+    fun `틱 구독은 통합·시간외 TR만 쓴다 - KRX 전용 TR은 NXT 체결분이 빠진다`() {
+        assertEquals(listOf("H0UNCNT0", "H0STOUP0"), PriceConfig.TICK_TR_IDS)
     }
 
     @Test
