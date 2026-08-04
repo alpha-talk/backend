@@ -10,11 +10,14 @@ import com.alphatalk.kis.rest.KisRestClient
 import com.alphatalk.kis.ws.KisFrameParser
 import com.alphatalk.worker.price.calendar.MarketCalendar
 import com.alphatalk.worker.price.candle.CandleSyncJob
+import com.alphatalk.worker.price.candle.CandleUniverse
 import com.alphatalk.worker.price.candle.DailyCandleFetcher
 import com.alphatalk.worker.price.candle.DailyCandleStore
+import com.alphatalk.worker.price.candle.MasterCandleUniverse
+import com.alphatalk.worker.price.candle.StockMasterCodeRepository
 import com.alphatalk.worker.price.conflation.ConflationBuffer
 import com.alphatalk.worker.price.demand.DemandSource
-import com.alphatalk.worker.price.demand.FixedDemandSource
+import com.alphatalk.worker.price.demand.RedisDemandSource
 import com.alphatalk.worker.price.leader.LeaderLock
 import com.alphatalk.worker.price.leader.RedisLeaderLock
 import com.alphatalk.worker.price.poll.QuoteSnapshotFetcher
@@ -30,6 +33,7 @@ import io.micrometer.core.instrument.MeterRegistry
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
+import org.springframework.data.redis.connection.RedisConnectionFactory
 import org.springframework.data.redis.core.StringRedisTemplate
 import java.lang.management.ManagementFactory
 import java.time.LocalDate
@@ -41,12 +45,10 @@ class PriceConfig {
 
     @Bean
     @ConditionalOnProperty("alphatalk.price.enabled", havingValue = "true")
-    fun demandSource(props: PriceProperties): DemandSource {
-        check(props.symbols.isNotEmpty()) {
-            "alphatalk.price.enabled=true에는 symbols가 최소 1개 필요하다"
-        }
-        return FixedDemandSource(props.symbols)
-    }
+    fun demandSource(
+        redis: StringRedisTemplate,
+        connectionFactory: RedisConnectionFactory,
+    ): DemandSource = RedisDemandSource(redis, connectionFactory)
 
     @Bean
     @ConditionalOnProperty("alphatalk.price.enabled", havingValue = "true")
@@ -171,8 +173,25 @@ class PriceConfig {
         name = ["alphatalk.price.enabled", "alphatalk.price.candle-enabled"],
         havingValue = "true",
     )
-    fun candleSyncJob(
+    fun candleUniverse(
+        props: PriceProperties,
         demand: DemandSource,
+        masterCodes: StockMasterCodeRepository,
+    ): CandleUniverse = when (kisEnv(props)) {
+        KisEnv.PROD -> MasterCandleUniverse(
+            activeCodes = { masterCodes.findActiveCodes() },
+            fallback = { demand.targetSymbols() },
+        )
+        KisEnv.VTS -> CandleUniverse { demand.targetSymbols() }
+    }
+
+    @Bean
+    @ConditionalOnProperty(
+        name = ["alphatalk.price.enabled", "alphatalk.price.candle-enabled"],
+        havingValue = "true",
+    )
+    fun candleSyncJob(
+        universe: CandleUniverse,
         fetcher: DailyCandleFetcher,
         store: DailyCandleStore,
         calendar: MarketCalendar,
@@ -180,7 +199,7 @@ class PriceConfig {
         meters: MeterRegistry,
         props: PriceProperties,
     ): CandleSyncJob = CandleSyncJob(
-        symbols = { demand.targetSymbols() },
+        symbols = { universe.symbols() },
         fetcher = fetcher,
         store = store,
         backfillDays = props.candleBackfillDays,

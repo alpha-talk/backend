@@ -24,7 +24,10 @@ class DemandRegistryTest {
     }
 
     private val subscriber = FakeSubscriber()
-    private val registry = DemandRegistry(subscriber)
+    private val syncTrigger = DemandSyncTrigger()
+    private val registry = DemandRegistry(subscriber, syncTrigger)
+
+    private fun syncRequested(): Boolean = syncTrigger.await(0)
 
     private fun connectAndAttach(sessionId: String, userId: Long, watchlist: Set<String>) {
         registry.registerSession(sessionId, userId)
@@ -292,6 +295,102 @@ class DemandRegistryTest {
 
             registry.unsubscribeById("s1", "sub-1")
             assertThat(subscriber.active).containsExactlyInAnyOrder("quote:005930", "stream:005930")
+        }
+    }
+
+    @Nested
+    inner class Snapshot {
+        @Test
+        fun `quote 스냅샷 - 유저 단위로 세고 마지막 유저가 나가면 코드가 사라진다`() {
+            connectAndAttach("s1", 1L, setOf("005930"))
+            connectAndAttach("s2", 2L, setOf("005930"))
+            assertThat(registry.demandSnapshot().quote).isEqualTo(mapOf("005930" to 2))
+
+            registry.removeSession("s1")
+            assertThat(registry.demandSnapshot().quote).isEqualTo(mapOf("005930" to 1))
+
+            registry.removeSession("s2")
+            assertThat(registry.demandSnapshot().quote).isEmpty()
+        }
+
+        @Test
+        fun `같은 유저 세션 두 개 - quote는 유저당 1만 센다`() {
+            connectAndAttach("s1", 1L, setOf("005930"))
+            registry.registerSession("s2", 1L)
+
+            assertThat(registry.demandSnapshot().quote).isEqualTo(mapOf("005930" to 1))
+
+            registry.removeSession("s1")
+            assertThat(registry.demandSnapshot().quote).isEqualTo(mapOf("005930" to 1))
+
+            registry.removeSession("s2")
+            assertThat(registry.demandSnapshot().quote).isEmpty()
+        }
+
+        @Test
+        fun `room 스냅샷 - 구독 단위로 세고 kind가 달라도 code로 합산한다`() {
+            registry.registerSession("s1", 1L)
+            registry.subscribeRoom("s1", "sub-1", ChannelKind.POST, "005930")
+            registry.subscribeRoom("s1", "sub-2", ChannelKind.TRADE, "005930")
+            assertThat(registry.demandSnapshot().room).isEqualTo(mapOf("005930" to 2))
+
+            registry.unsubscribeById("s1", "sub-1")
+            assertThat(registry.demandSnapshot().room).isEqualTo(mapOf("005930" to 1))
+
+            registry.removeSession("s1")
+            assertThat(registry.demandSnapshot().room).isEmpty()
+        }
+
+        @Test
+        fun `watchlist diff - added·removed가 스냅샷에 반영된다`() {
+            connectAndAttach("s1", 1L, setOf("005930"))
+
+            registry.applyWatchlistDiff(1L, added = listOf("000660"), removed = listOf("005930"))
+
+            assertThat(registry.demandSnapshot().quote).isEqualTo(mapOf("000660" to 1))
+        }
+    }
+
+    @Nested
+    inner class SyncTriggering {
+        @Test
+        fun `0↔1 전이에서만 동기화를 트리거한다 - quote`() {
+            connectAndAttach("s1", 1L, setOf("005930"))
+            assertThat(syncRequested()).isTrue()
+
+            connectAndAttach("s2", 2L, setOf("005930"))
+            assertThat(syncRequested()).isFalse()
+
+            registry.removeSession("s1")
+            assertThat(syncRequested()).isFalse()
+
+            registry.removeSession("s2")
+            assertThat(syncRequested()).isTrue()
+        }
+
+        @Test
+        fun `0↔1 전이에서만 동기화를 트리거한다 - room`() {
+            registry.registerSession("s1", 1L)
+            registry.registerSession("s2", 2L)
+            registry.subscribeRoom("s1", "sub-1", ChannelKind.POST, "005930")
+            assertThat(syncRequested()).isTrue()
+
+            registry.subscribeRoom("s2", "sub-1", ChannelKind.POST, "005930")
+            assertThat(syncRequested()).isFalse()
+
+            registry.unsubscribeById("s1", "sub-1")
+            assertThat(syncRequested()).isFalse()
+
+            registry.unsubscribeById("s2", "sub-1")
+            assertThat(syncRequested()).isTrue()
+        }
+
+        @Test
+        fun `트리거는 락을 잡지 않는 논블로킹 신호다 - 연속 요청이 코얼레싱된다`() {
+            connectAndAttach("s1", 1L, setOf("005930", "000660", "035420"))
+
+            assertThat(syncRequested()).isTrue()
+            assertThat(syncRequested()).isFalse()
         }
     }
 }

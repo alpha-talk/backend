@@ -156,7 +156,10 @@ SOLID는 이음새가 있는 곳의 도구다. 이음새가 없는데 인터페�
 |---|---|---|
 | `DemandQuery` | **포트(읽기)** | `usersWatching(code): Set<userId>`(불변 스냅샷) 등. relay 핸들러가 의존 |
 | `DemandMutator` | **포트(쓰기)** | `registerSession`/`attachWatchlist`/`removeSession`/`subscribeRoom`/`unsubscribeById`/`applyWatchlistDiff`. 세션 리스너가 의존 |
-| `DemandRegistry` | 구현(둘 다) | §5 인덱스 단일 소유. 수요 전이(0↔1) 감지 시 `ChannelSubscriber` 호출. **상태 변경은 락 안에서 직렬화** |
+| `DemandRegistry` | 구현(셋 다) | §5 인덱스 단일 소유. 수요 전이(0↔1) 감지 시 `ChannelSubscriber` 호출 + `DemandSyncTrigger.request()`(논블로킹). **상태 변경은 락 안에서 직렬화 — 락 안에서 Redis I/O 금지** |
+| `DemandSnapshotSource` | **포트(읽기)** | `demandSnapshot(): {quote: code→유저 수, room: code→구독 수}`. 락 안 순수 메모리 복사. `DemandRegistry`가 구현 |
+| `DemandSyncTrigger` | 구현(공유 신호) | 세마포어 기반 코얼레싱 신호. 레지스트리(요청)와 동기화 스레드(대기)가 공유 — 빈 의존 순환 없이 트리거 채널 제공 |
+| `RedisDemandSynchronizer` | 구현 | 단일 스레드가 주기(5s)·트리거마다 스냅샷을 Redis 해시에 **전체 재기록**(Lua DEL+HSET 원자, TTL 연장) 후 직전 기록과 비교해 0↔1 전이만 `demand:updated` 발행 — 유실·드리프트는 다음 주기에 자가 치유. gwId(부팅마다 발급)·`gw:alive` 갱신·stop 시 키 DEL 소유 |
 | `SessionEventListener` | 구현 | Spring 이벤트 4종 → 포트 호출 번역 + 세션 수명 정책(CONNECTED→`registerSession`, 첫 SUBSCRIBE에서 resolve→`attachWatchlist`, §11.6). resolve는 락 밖(I/O), 등록·부착은 멱등 |
 
 ### 4.4 relay 계층 (relay/ · client/)

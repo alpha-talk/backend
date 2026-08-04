@@ -62,7 +62,7 @@ backend/
 ## 불변 규칙 (어기면 설계 위반)
 
 1. **푸시 전용 엣지**: 클라 SEND 프레임은 무조건 거부. 콘텐츠를 받는 코드를 만들지 않는다.
-2. **게이트웨이는 Redis Pub/Sub SUBSCRIBE + 프레즌스 쓰기만**: DB 접근, `queue:ingest`(Streams), `price:{code}` 캐시 읽기 코드 금지.
+2. **게이트웨이는 Redis Pub/Sub SUBSCRIBE + 프레즌스·수요(demand) 쓰기만**: 수요 쓰기는 `demand:*:{gwId}` refcount·`demand:updated` 전이 발행·`gw:alive:{gwId}` 하트비트([redis_contract.md](md/redis_contract.md) §1.3)로 한정. DB 접근, `queue:ingest`(Streams), `price:{code}` 캐시 읽기 코드 금지.
 3. **채널명·키·목적지 문자열 하드코딩 금지**: 반드시 `:contracts`의 `Channels`/`Keys`/`Destinations` 상수 사용.
 4. **best-effort 푸시**: 재전송·전달 보장 로직을 만들지 않는다. 유실 복구는 클라의 REST 몫.
 5. **보안**: JWT는 STOMP CONNECT 헤더로만 받는다 (URL 쿼리파라미터 금지). 토큰 원문·시크릿 로그 금지. 시크릿은 환경변수 주입.
