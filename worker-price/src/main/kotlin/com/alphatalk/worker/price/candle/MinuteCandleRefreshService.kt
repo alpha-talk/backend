@@ -67,40 +67,43 @@ class MinuteCandleRefreshService(
     private fun doRefresh(code: String): Int {
         if (!calendar.isTradingDay()) return 0
         val at = now()
-        if (at.toLocalTime() < OPEN_TIME) return 0
         val date = at.toLocalDate().format(DateTimeFormatter.BASIC_ISO_DATE)
         val latest = store.latestTime(code, date)
         if (latest != null && latest >= CLOSE_BAR) return 0
         val last = lastFetchedAt[code]
         if (last != null && Duration.between(last, at.toInstant()).seconds < freshSeconds) return 0
+        val ceiling = minOf(at.toLocalTime().minusMinutes(1), CLOSE_TIME)
+        if (at.toLocalTime() < OPEN_TIME || ceiling < OPEN_TIME) return 0
         val gapStart = latest?.let { nextMinute(it) } ?: OPEN_BAR
-        val ceiling = minOf(at.toLocalTime(), CLOSE_TIME)
-        val fetched = fetchGap(code, date, gapStart, ceiling)
-        lastFetchedAt[code] = at.toInstant()
-        if (fetched.isEmpty()) return 0
+        if (gapStart > ceiling.format(HHMM)) {
+            lastFetchedAt[code] = at.toInstant()
+            return 0
+        }
+        val fetched = fetchGapForward(code, date, gapStart, ceiling)
+        if (fetched.isEmpty()) {
+            lastFetchedAt[code] = at.toInstant()
+            return 0
+        }
         val upserted = store.upsert(withMinuteValues(code, date, fetched))
+        lastFetchedAt[code] = at.toInstant()
         meters.counter("minute.candle.refresh").increment(upserted.toDouble())
         log.info("minute candle refresh: code={} date={} gapStart={} rows={}", code, date, gapStart, upserted)
         return upserted
     }
 
-    private fun fetchGap(code: String, date: String, gapStart: String, ceiling: LocalTime): List<KisMinuteCandle> {
+    private fun fetchGapForward(code: String, date: String, gapStart: String, ceiling: LocalTime): List<KisMinuteCandle> {
         val byTime = sortedMapOf<String, KisMinuteCandle>()
         val startedAt = System.nanoTime()
-        var to = ceiling
+        var from = LocalTime.parse(gapStart, HHMM)
         repeat(MAX_PAGES) { page ->
             if (page > 0 && elapsedMillis(startedAt) >= fetchDeadlineMillis) {
                 log.warn("minute candle fetch deadline: code={} gapStart={} fetched={}", code, gapStart, byTime.size)
                 return byTime.values.toList()
             }
-            val rows = fetcher.fetch(code, to).filter { it.date == date }
-            if (rows.isEmpty()) return byTime.values.toList()
-            rows.forEach { byTime[it.time] = it }
-            val earliest = rows.minOf { it.time }
-            if (earliest <= gapStart) return byTime.values.toList()
-            val nextTo = LocalTime.parse(earliest, HHMM).minusMinutes(1)
-            if (nextTo < OPEN_TIME) return byTime.values.toList()
-            to = nextTo
+            val to = minOf(from.plusMinutes(PAGE_SPAN_MINUTES), ceiling)
+            fetcher.fetch(code, to).filter { it.date == date }.forEach { byTime[it.time] = it }
+            if (to >= ceiling) return byTime.values.toList()
+            from = to.plusMinutes(1)
         }
         return byTime.values.toList()
     }
@@ -137,6 +140,7 @@ class MinuteCandleRefreshService(
         private const val OPEN_BAR = "0900"
         private const val CLOSE_BAR = "1530"
         private const val MAX_PAGES = 15
-        private const val LOCK_MARGIN_MILLIS = 35_000L
+        private const val PAGE_SPAN_MINUTES = 29L
+        private const val LOCK_MARGIN_MILLIS = 80_000L
     }
 }
