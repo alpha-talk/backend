@@ -36,7 +36,8 @@ data class MinuteWindow(
 )
 
 object MinuteCandleAggregator {
-    fun fetchLimit(period: MinutePeriod, count: Int): Int = count * period.unitMinutes + 2
+    fun fetchLimit(period: MinutePeriod, count: Int): Int =
+        minOf(count * period.unitMinutes + 2, MAX_FETCH_ROWS)
 
     fun aggregate(
         minutesDescending: List<MinuteCandleRow>,
@@ -93,6 +94,7 @@ object MinuteCandleAggregator {
 
     private const val OPEN_MINUTES = 9 * 60
     private const val LAST_SESSION_MINUTE = 15 * 60 + 29
+    private const val MAX_FETCH_ROWS = 12_000
     private val HHMM: DateTimeFormatter = DateTimeFormatter.ofPattern("HHmm")
     private val YYYYMMDDHHMM: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyyMMddHHmm")
 }
