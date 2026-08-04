@@ -1,6 +1,6 @@
 # Alpha Talk — Redis 계약 (`:contracts`) v0.13
 
-> v0.13 (2026-08-04): worker-price 내부 키 `lock:minute-refresh:{code}` 추가 — 분봉 신선화의 종목별 인스턴스 간 single-flight 락(SET NX PX, [KIS 워커 명세](alphatalk_kis_worker_spec.md) §2.6). worker-price 전용이며 다른 서버는 접근하지 않는다. `:contracts` `Keys.minuteRefreshLock` 생성 함수 사용.
+> v0.13 (2026-08-04): worker-price 내부 키 2종 추가 — 분봉 신선화의 종목별 인스턴스 간 single-flight 락 `lock:minute-refresh:{code}`(SET NX PX)와 완주 워터마크 `minute:through:{code}:{date}`(TTL 2일). 둘 다 [KIS 워커 명세](alphatalk_kis_worker_spec.md) §2.6이 소유하고 worker-price 전용이며 다른 서버는 접근하지 않는다. `:contracts`의 `Keys.minuteRefreshLock`·`Keys.minuteRefreshWatermark` 생성 함수 사용. 아울러 §1.3의 `rate:kis-rest:{keyId}` 토큰 버킷이 구현됐다 — 시각은 Lua 안에서 Redis `TIME`으로 읽어 인스턴스 시계 오차가 합산 한도를 깨지 않게 한다(**Redis 5+ effects replication 전제**).
 
 게이트웨이 · 워커(price/batch/ingest/llm) · 메인서버가 공유하는 Redis 키/채널/스트림 규약이다. 서버끼리는 코드로 의존하지 않고 이 계약으로만 통신하므로, 채널명·키·봉투 스키마·소유권은 이 문서가 서비스 간 단일 진실이다. 새 채널·키가 필요하면 코드보다 먼저 여기에 합의 내용을 반영한다. 클라이언트 쪽 계약은 별도 문서 몫이다 — 게이트웨이↔클라 STOMP는 WS API 명세, 메인서버↔클라 REST는 core-api 명세가 다룬다.
 
@@ -167,6 +167,7 @@ ingest-worker 스케줄러(싱글턴)가 매일 18:00 KST에 적재하고 같은
 | `rate:article-fetch:{host}` | String (`SET PX`) | robots.txt·원문 fetch의 호스트별 다음 요청 간격을 llm-worker 인스턴스 간 직렬화 | llm-worker | llm-worker | 요청 간격(기본 1초) |
 | `rate:kis-rest:{keyId}` | Hash(token bucket) | 같은 KIS 계정을 쓰는 price·batch 프로세스의 일반 REST 합산 유량 제한 | price/batch-worker | price/batch-worker | 마지막 소비 후 2분 |
 | `lock:minute-refresh:{code}` | String (`SET NX PX`) | 분봉 신선화의 종목별 인스턴스 간 single-flight 락(KIS 워커 명세 §2.6) — 미획득 인스턴스는 no-op | worker-price | worker-price | 페치 데드라인+여유 (기본 90s·일 확정 시 200s) |
+| `minute:through:{code}:{date}` | String (`HHmm`) | 그 종목·일자를 몇 시까지 조회 완료했는지(완주 워터마크, §2.6) — 인스턴스 간 공유해 재기동·리더 전환 후 전 구간 재조회를 막는다 | worker-price | worker-price | **2일** |
 | `demand:quote:{gwId}` | Hash `{code: refCount}` | 접속 세션의 관심목록 기준 종목 참조 수(유저 단위) — 주기·전이 트리거마다 스냅샷 전체 재기록(v0.12) | 게이트웨이 | worker-price | **60s** — 재기록이 연장 |
 | `demand:room:{gwId}` | Hash `{code: refCount}` | 방 토픽 구독(입장) 기준 참조 수(구독 단위) — trade/depth·우선순위 판단 | 게이트웨이 | worker-price | **60s** — 재기록이 연장 |
 | `gw:alive:{gwId}` | String | 살아있는 게이트웨이 식별(하트비트 5s 주기 갱신). worker-price는 리컨실 때 alive gw의 수요만 합산 | 게이트웨이 | worker-price | **15s** |
