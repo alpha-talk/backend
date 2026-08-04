@@ -3,6 +3,7 @@ package com.alphatalk.coreapi.stockinfo
 import com.alphatalk.coreapi.support.ApiException
 import com.alphatalk.coreapi.support.ErrorCode
 import org.springframework.stereotype.Service
+import java.time.LocalDate
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 
@@ -10,6 +11,8 @@ import java.time.format.DateTimeFormatter
 class StockInfoService(
     private val profiles: StockProfileStore,
     private val candles: CandleStore,
+    private val minuteCandles: MinuteCandleStore,
+    private val minuteRefresher: MinuteCandleRefresher,
     private val valuations: ValuationStore,
     private val financials: FinancialsStore,
     private val investors: InvestorFlowStore,
@@ -30,7 +33,9 @@ class StockInfoService(
 
     fun candles(rawCode: String, rawPeriod: String?, rawCount: Int?, rawTo: String?): CandlesResponse {
         val code = validCode(rawCode)
-        val period = validPeriod(rawPeriod)
+        val trimmedPeriod = rawPeriod?.trim().orEmpty()
+        MinutePeriod.fromToken(trimmedPeriod)?.let { return minuteCandles(code, it, rawCount, rawTo) }
+        val period = validPeriod(trimmedPeriod)
         val count = validCount(rawCount)
         val to = validTo(rawTo)
         requireActive(code)
@@ -53,6 +58,38 @@ class StockInfoService(
             pageInfo = CandlePageInfo(
                 hasMoreBefore = window.hasMoreBefore,
                 nextTo = CandleAggregator.nextTo(window, period),
+            ),
+        )
+    }
+
+    private fun minuteCandles(code: String, period: MinutePeriod, rawCount: Int?, rawTo: String?): CandlesResponse {
+        val count = validCount(rawCount)
+        val to = validMinuteTo(rawTo)
+        requireActive(code)
+        val today = LocalDate.now(SEOUL).format(DATE_FORMAT)
+        if (to == null || to.first >= today) {
+            runCatching { minuteRefresher.refresh(code) }
+        }
+        val fetchLimit = MinuteCandleAggregator.fetchLimit(period, count)
+        val rows = minuteCandles.findLatestUpTo(code, to?.first, to?.second, fetchLimit)
+        val window = MinuteCandleAggregator.aggregate(rows, period, count, fetchLimit)
+        return CandlesResponse(
+            period = period.token,
+            items = window.buckets.map {
+                CandleView(
+                    date = it.date,
+                    time = it.time,
+                    open = it.open,
+                    high = it.high,
+                    low = it.low,
+                    close = it.close,
+                    volume = it.volume,
+                    value = it.value,
+                )
+            },
+            pageInfo = CandlePageInfo(
+                hasMoreBefore = window.hasMoreBefore,
+                nextTo = MinuteCandleAggregator.nextTo(window, period),
             ),
         )
     }
@@ -131,15 +168,27 @@ class StockInfoService(
         return code
     }
 
-    private fun validPeriod(period: String?): CandlePeriod {
-        val trimmed = period?.trim().orEmpty()
+    private fun validPeriod(trimmed: String): CandlePeriod {
         if (trimmed.isEmpty()) return CandlePeriod.DAILY
         return CandlePeriod.fromToken(trimmed)
             ?: throw ApiException(
                 ErrorCode.VALIDATION_FAILED,
-                "period는 D, W, M 중 하나여야 합니다",
+                "period는 D, W, M, 1m, 5m, 15m, 30m, 60m 중 하나여야 합니다",
                 mapOf("field" to "period"),
             )
+    }
+
+    private fun validMinuteTo(to: String?): Pair<String, String>? {
+        val trimmed = to?.trim().orEmpty()
+        if (trimmed.isEmpty()) return null
+        if (!MINUTE_TO_PATTERN.matches(trimmed)) {
+            throw ApiException(
+                ErrorCode.VALIDATION_FAILED,
+                "분봉의 to는 yyyyMMddHHmm 형식이어야 합니다",
+                mapOf("field" to "to"),
+            )
+        }
+        return trimmed.take(8) to trimmed.drop(8)
     }
 
     private fun validCount(count: Int?): Int {
@@ -207,6 +256,7 @@ class StockInfoService(
         )
         private val CODE_PATTERN = Regex("^\\d{6}$")
         private val DATE_PATTERN = Regex("^\\d{8}$")
+        private val MINUTE_TO_PATTERN = Regex("^\\d{12}$")
         private val DATE_FORMAT = DateTimeFormatter.BASIC_ISO_DATE
         private val SEOUL: ZoneId = ZoneId.of("Asia/Seoul")
     }

@@ -1,6 +1,7 @@
-# Alpha Talk — KIS 수집 워커 명세 v0.2
+# Alpha Talk — KIS 수집 워커 명세 v0.3
 **worker-price · worker-batch · `:kis-client` 공유 라이브러리 · 담당: 민균**
 
+> **v0.3 (2026-08-04)**: 분봉 수집 추가(FR-15 확장, §2.6). **오늘 분봉은 조회 시 동기 신선화** — core-api가 worker-price 내부 API를 트리거하고 worker-price가 KIS 당일분봉 `FHKST03010200`을 공백만큼 사 와 upsert(60s 신선 임계·single-flight·타임아웃 시 저장분 반환). **과거 분봉은 일 배치**(16:00 당일 확정) + 콜드 종목 7영업일 수요 전이 백필(`FHKST03010230`). 1분봉 원본만 `minute_candle`에 보존 30일, 5/15/30/60분은 core-api가 조회 시 파생(core-api 명세 v0.2 §8). 내부 신선화 API는 서버 간 Redis/DB 원칙의 명시 예외(멱등 트리거·무데이터·best-effort).
 > **v0.2 (2026-07-27)**: 증권사별 투자의견 수집·소식 발행 추가. 회원사 코드별 `FHKST663400C0` 조회 → immutable observation 적재 → 기존 `eventId`를 재사용하는 at-least-once Pub/Sub 통보로 확정. WS payload는 v0.6의 하위 호환 확장을 사용한다.
 
 worker-price·worker-batch와 두 워커가 공유하는 `:kis-client`의 구현 기준 문서다. KIS 인증·유량 정책(§1), 실시간 구독·conflation(§2), 배치 잡 카탈로그(§3), 워커 적재 테이블 스키마(§4)를 여기서 결정한다. 서비스 간 Redis 채널·키는 [redis_contract.md](redis_contract.md)가 단일 진실이고, 클라이언트가 받는 payload 구조는 [ws_api_spec.md](ws_api_spec.md)가 소유한다 — 이 문서는 워커 내부 동작과 KIS 연동 세부를 다룬다. 두 워커를 구현·수정하기 전에 해당 절부터 확인한다.
@@ -55,7 +56,7 @@ KIS 유량은 슬라이딩 윈도로 측정되는 것으로 알려져 있다. �
 
 구현: Resilience4j `RateLimiter`를 **계정(keyId) 단위**로 생성하고 모든 REST 호출이 이를 통과한다. 429/유량 오류를 받으면 지수 백오프 후 재시도하고 메트릭 `rest_throttled`를 올린다.
 
-프로세스별 limiter만으로는 부족하다. `worker-price`와 `worker-batch`가 같은 계정을 공유하면 각자 한도를 지켜도 합산 유량이 한도를 넘는다. 그래서 `:kis-client`에 `KisRateGate` 포트를 두고, 서버는 Redis 토큰 버킷 `rate:kis-rest:{keyId}` 구현을 주입한다. 모든 일반 REST 시세·배치 호출은 **로컬 smoothing limiter → 공용 Redis gate** 순서로 통과한다. 토큰 버킷은 Lua로 `{tokens, updatedAt}` 계산·차감을 원자화한다. 파라미터는 실전 `capacity=15, refill=15/s`, 모의 `capacity=2, refill=1.5/s`, 마지막 소비 후 TTL 2분. permit이 없으면 다음 충전 시각까지 기다리고, 호출별 타임아웃을 넘으면 실패 처리한다. 토큰 발급의 1분 가드와 Approval 발급은 §1.2의 별도 제한을 따른다.
+프로세스별 limiter만으로는 부족하다. `worker-price`와 `worker-batch`가 같은 계정을 공유하면 각자 한도를 지켜도 합산 유량이 한도를 넘는다. 그래서 `:kis-client`에 `KisRateGate` 포트를 두고, 서버는 Redis 토큰 버킷 `rate:kis-rest:{keyId}` 구현을 주입한다. 모든 일반 REST 시세·배치 호출은 **로컬 smoothing limiter → 공용 Redis gate** 순서로 통과한다. 토큰 버킷은 Lua로 `{tokens, updatedAt}` 계산·차감을 원자화한다. 파라미터는 실전 `capacity=15, refill=15/s`, 모의 `capacity=2, refill=1.5/s`, 마지막 소비 후 TTL 2분. permit이 없으면 다음 충전 시각까지 기다리고, 호출별 타임아웃을 넘으면 실패 처리한다. 토큰 발급의 1분 가드와 Approval 발급은 §1.2의 별도 제한을 따른다. **구현 상태**: 포트는 `:kis-client`(`KisRateGate`), Redis 토큰 버킷 구현은 worker-price(`RedisKisRateGate`)가 주입해 REST 전 호출이 통과한다. worker-batch는 KIS REST 잡 착수 시 같은 구현을 주입한다. 버킷의 시각은 **Lua 안에서 Redis `TIME`으로 읽는다** — 호출자 프로세스 시각을 쓰면 인스턴스 간 시계 오차가 `updatedAt`을 과거로 되돌려 매 호출이 큰 경과시간만큼 재충전되므로 합산 한도가 깨진다. Redis 호스트 시각이 뒤로 점프하는 경우를 대비해 경과시간은 음수를 0으로 절삭한다.
 
 ### 1.4 REST 공통 헤더
 
@@ -162,6 +163,22 @@ KIS 프레임 → 파싱 → 종목별 최신값 버퍼(덮어쓰기)
 - **미완주 재시도**: 완주하지 못한 영업일에는 17·18·19시에 리더가 재시도한다(완주한 날은 no-op). 이미 적재된 종목은 `latestDate()` 비교로 건너뛰므로 재조회 대상은 실패분뿐이고, 장 마감 후라 재조회는 같은 확정 일봉을 upsert하므로 멱등이다.
 - 백필: 신규 종목/초기 구축 시 종목당 `(영업일수/100)`콜을 야간 슬롯에서 수행한다. 액면분할 등으로 마스터의 상장주식수 급변을 감지하면 해당 종목을 **전 구간 재적재**한다(수정주가 재계산 반영).
 
+**분봉 (FR-15 확장) — 오늘은 조회 시 동기 신선화, 과거는 일 배치**
+
+- **수집 창은 08:00–20:00**이다 — §2.7의 수신 세션 전체(NXT 프리 08:00–08:50 · KRX/NXT 메인 09:00–15:30 · NXT 애프터 15:30–20:00 · KRX 시간외 15:40–18:00)를 **연속으로** 담는다. 실시간 틱은 이 창 전체를 푸시하는데 봉이 정규장만 있으면 장외 시간에 차트가 비고 시세 핀만 움직이는 불일치가 생긴다. 세션 사이 공백(08:50–09:00 등)은 봉이 없는 구간으로 자연스럽게 비고, 전방 페이징이 빈 창을 건너뛰며 전진한다(희소 데이터와 같은 처리). 하루 최대 봉 수는 **721**이다(08:00~20:00 양끝 포함).
+
+- **소스 API**: 당일은 `GET /uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice` · TR `FHKST03010200` · `FID_INPUT_HOUR_1`(기준 시각) → **1콜 최근 30개 1분봉**. **시장 구분 `FID_COND_MRKT_DIV_CODE`는 실전에서 `UN`(통합)**이다 — 기본값 `J`는 KRX 전용이라 NXT 프리·애프터 봉이 아예 오지 않는다(창만 08:00–20:00으로 넓히면 빈 구간을 완주로 오판한다). 모의(vts)는 통합 지원이 미확인이라 `J`로 두고 정규장만 쌓는다 — 실시간 TR을 env별로 나누는 §2.3과 같은 원칙이며, vts의 `UN` 지원은 §9.10에서 확인한다. **vts의 한계는 그대로 남는다**: 조회 창은 08:00~20:00인데 응답은 KRX뿐이라 NXT 구간이 빈 채로 20:00 워터마크가 찍혀 완주로 판정된다. `minute_candle`에는 시장 차원이 없어 저장된 행만으로는 `J`로 받은 것인지 `UN`으로 받은 것인지 구분할 수 없으므로, **vts→prod 전환은 장 시작 전에 하고 전환 당일 데이터는 신뢰하지 않는다**(장중 전환 시 그날 이전 구간은 전방 페이징 특성상 다시 채워지지 않는다). 시장 구분이 바뀐 채 이어 적재되면 누적 거래대금 앵커가 어긋나는데, 역행은 `minute.candle.value.regressed` 카운터로 드러난다. 과거 일자는 주식일별분봉조회 `GET /uapi/domestic-stock/v1/quotations/inquire-time-dailychartprice` · TR `FHKST03010230`(**실전 전용**). 원천은 KIS 공식 분봉이다 — 자체 틱 집계로 분봉을 만들지 않는다. §0의 "틱 비영속" 원칙은 유지된다: 틱을 대체하는 영속형이 봉이고, 그 봉의 값은 KIS가 준다.
+- **오늘 분봉 — 조회 시 신선화(read-through)**: core-api는 분봉 조회 요청을 받으면 먼저 worker-price의 **내부 신선화 API** `POST /internal/minute-candles/{code}/refresh`를 호출한다. worker-price는 `minute_candle`의 당일 최신 행이 신선하면(기본 **60s**, 설정) 그대로 완료를 반환하고, 아니면 `FHKST03010200`을 공백 구간만큼 **전방(저장분 다음 분→최신) 페이징** 호출해(공용 gate 통과, 콜드 최대 25콜 — 08:00~19:59 24콜 + 20:00 마감 행 1콜) upsert 후 반환한다. 같은 종목의 동시 신선화는 **single-flight**로 합친다(대기 후 동일 결과 공유 — KIS 중복 구매 금지). core-api는 완료(또는 **타임아웃** — 연결 0.5s + 응답 1.0s) 후 테이블을 읽는다 — 타임아웃·워커 다운이면 저장분만 반환한다(**stale-while-revalidate**: 신선화는 워커에서 계속 진행되고 클라 재조회로 수렴). **데이터 경로는 항상 DB 단일**이고 내부 API는 신선화 트리거일 뿐이다 — 시세 응답 스키마는 core-api가 소유한다.
+- **신선화 경계 안전장치**: single-flight는 프로세스 내 합류에 더해 종목별 **분산 락**(`lock:minute-refresh:{code}` — Redis 계약 v0.13, TTL=페치 데드라인+여유)으로 다중 인스턴스에서도 KIS 조회를 1회로 묶는다 — 락 미획득 인스턴스는 no-op(저장분 반환 경로와 동일). 전체 **페치 데드라인**(조회 경로 10s·일 확정 120s)을 넘기면 채운 만큼만 적재하고 종료하는데, 전방 페이징이라 항상 저장분과 연속된 구간만 적재되므로 **중간 구멍이 생기지 않고** 다음 조회가 이어 채운다(누적 거래대금→분당 값 변환의 앵커도 이 연속성에 기대므로 전방 페이징이 전제다). **진행 중인 현재 분은 사 오지 않는다** — 페치 상한은 `min(now−1분, 20:00)`이라 확정 분만 적재된다(진행 분은 클라의 WS quote 오버레이 몫, core-api 명세 §8). KIS REST 호출은 연결 3s·요청 10s 타임아웃을 가지며, 분봉·일봉 fetcher는 **계정 단위 REST 리미터를 공유하고 그 예산은 `rate-factor×(1−poll-budget-factor)`**(실전 7.5/s)라 폴링 예산(7.5/s)과의 합이 내부 한도(15/s)를 넘지 않는다. 여기에 더해 worker-price의 모든 KIS REST 호출은 **공용 Redis gate**(`rate:kis-rest:{keyId}` 토큰 버킷, §1.3 — capacity·refill=내부 한도, 획득 대기 10s 초과 시 실패)를 통과해 **인스턴스 간 합산도 계정 한도 아래로 묶인다**. worker-batch는 KIS REST 잡 착수 시 같은 gate 구현을 주입한다.
+- **서버 간 통신 예외**: 이 내부 API는 "서버 간 통신은 Redis/DB 계약만" 원칙(기획안 §3.1)의 **명시 예외**다 — 멱등 트리거·응답에 데이터 없음·best-effort(실패해도 조회는 저장분으로 동작)로 한정한다. AGENTS.md 의존 규칙에 예외를 기록하고, 이 예외를 데이터 전달 채널로 확장하지 않는다.
+- **과거 분봉 — 일 배치 확정**: `minute_candle_daily_sync`가 영업일 **20:05**(마지막 세션 20:00 종료 직후)에 그날 수요·조회 이력이 있던 종목의 당일 1분봉을 확정 적재한다(종목당 최대 25콜 — 장중 조회 경로가 이미 채운 구간은 스킵되어 실제 콜은 훨씬 적다). 콜드 종목의 그 이전 **7영업일**(설정)은 수요 0→1 전이(`demand:updated`, §2.1) 시 비동기로 `FHKST03010230`으로 채운다 — 이미 채워진 날은 스킵, 재입장 전이가 중복 콜을 만들지 않는다. 모의(vts)는 과거 API 미지원이라 당일 축적분만 쌓인다. ⚠️ **이 백필은 후속 구현이다** — §9.9(`FHKST03010230` 계측) 확정 후 착수하며, 그 전까지 과거 구간은 일 배치가 확정한 날부터만 쌓인다.
+- **저장·보존**: 1분봉 원본만 `minute_candle`(§4)에 적재하고 5/15/30/60분은 core-api가 조회 시 파생한다(일→주/월 사다리와 동일, core-api 명세 §8). 보존 **30 달력일**(설정, ≈21 영업일) — 새벽 퍼지 잡이 초과분을 **배치(5천 행) 단위로** 삭제한다(단일 대량 삭제 금지, 상한 도달 시 다음 회차 계속). 조회·수요된 종목만 쌓이므로 안 보는 종목의 콜과 행은 0이다.
+- **완주 워터마크**: "20:00까지 조회 완료" 표식은 Redis `minute:through:{code}:{date}`(TTL 2일, Redis 계약 v0.13)에 둔다 — 프로세스 로컬이면 리더 전환·재기동 때마다 거래정지·희소 종목을 다시 전 구간 조회하게 된다. 완주 판정은 `20:00 봉 존재 ∨ 워터마크 ≥ 20:00`이다.
+- **범위 통제**: 내부 신선화 API는 `stock_master` 활성 종목만 받는다(그 외 404) — 임의 코드가 KIS 콜을 유발하고 `minute_candle`에 적재되어 일 확정 대상으로 영구 유입되는 것을 막는다. 접근 인증은 §9.11.
+- **스케줄러 격리**: 봉 잡은 200ms 틱 flush와 같은 `ThreadPoolTaskScheduler`를 쓰므로 `spring.task.scheduling.pool.size`를 1보다 크게 둔다(기본값 1이면 장시간 봉 잡이 실시간 발행을 굶긴다). 일 확정 잡은 전체 시간 예산(기본 30분)을 넘기면 남은 종목을 다음 회차로 넘긴다.
+- **진행 중인 현재 분**: 서버 책임이 아니다 — 클라가 WS `quote`를 마지막 봉에 얹는다(일봉과 동일 패턴, core-api 명세 §5 quote). 신선화 주기(60s)는 확정 분봉의 지연 상한일 뿐 실시간성은 WS가 담당한다.
+- **가격 기준**: 분봉은 **원시가**다(수정주가 아님). 보존 30일 안에서 액면분할 등을 감지하면(일봉 재적재 트리거와 동일) 해당 종목 분봉을 전량 삭제 후 재백필한다.
+
 ### 2.7 장 운영 캘린더
 
 수신 대상 세션 전체(KST): NXT 프리마켓 08:00–08:50 · KRX/NXT 메인 09:00–15:30 · NXT 애프터마켓 15:30–20:00 · KRX 장후 시간외종가 15:40–16:00 · KRX 시간외단일가 16:00–18:00. **07:50 세션 준비(토큰·Approval·연결) → 08:00 구독 → 20:00 구독 해제·유휴.** 주말·KRX 휴장일은 스킵한다(MVP: 휴장일 YAML 수동 관리, P3: 캘린더 소스 자동화). KIS 새벽 점검 시간대에는 재접속을 억제한다.
@@ -181,6 +198,10 @@ KIS 프레임 → 파싱 → 종목별 최신값 버퍼(덮어쓰기)
 |---|---|---|---|---|
 | `stock_master_sync` | KIS 마스터 파일 `https://new.real.download.dws.co.kr/common/master/kospi_code.mst.zip`·`kosdaq_code.mst.zip`·`idxcode.mst.zip` (CP949, 고정폭 — KIS GitHub 파서 참조) | 매일 08:00 (원본 07:40경 갱신) | 전 종목 ~2,600 + 업종 ~490 | `code` upsert |
 | `daily_candle_sync` | KIS `FHKST03010100` (§2.6 — 실행 주체는 price, 트리거·이력 관리는 batch 잡 테이블로 일원화 가능. MVP: price 내 스케줄) | 영업일 16:30 (+미완주 시 17·18·19시 재시도) | 전 종목(`stock_master` 활성) | `(code,date)` |
+| `minute_candle_refresh` | KIS `FHKST03010200` (§2.6 — worker-price 내부 API, core-api 조회가 트리거) | 조회 시 (신선 60s 이내면 no-op, single-flight) | 조회된 종목의 당일 공백 구간 | `(code,date,time)` |
+| `minute_candle_daily_sync` | KIS `FHKST03010200` (§2.6 — 실행 주체는 price. **완주 판정 = 20:00 봉 존재 또는 20:00까지 조회 완료 워터마크**(희소·거래정지 종목은 마지막 체결이 일러도 완주). 종목별 시도 3회·백오프, 예외·경합은 다음 회차 재시도) | 영업일 **20:05** + 21·22·23시 15분 재시도 — **회차마다 대상을 재계산**해 미완주가 없으면 no-op | 당일 수요·조회 이력 종목(`symbols ∪ minute_candle` 당일 적재 종목) | `(code,date,time)` |
+| `minute_candle_backfill` | KIS `FHKST03010230` (§2.6 — 실행 주체는 price, **실전 전용**, ⚠️ 후속 구현 — §9.9 계측 후) | 수요 0→1 전이 즉시(비동기) | 콜드 종목 × 직전 7영업일 | `(code,date,time)` |
+| `minute_candle_purge` | DB 삭제 (§2.6 — 보존 30일 초과분) | 매일 04:30 | `minute_candle` 보존 초과 행 | `(code,date,time)` |
 | `valuation_daily` | KIS `FHKST01010100` 응답의 `per,pbr,eps,bps` + 마스터 시총 | 영업일 16:50 | 전 종목 (~2,600콜) | `(code,date)` |
 | `investor_flow_daily` | KIS `GET .../inquire-investor` · TR `FHKST01010900` — **장마감 후 확정치** | 영업일 17:10 | 전 종목 | `(code,date)` |
 | `invest_opinion_sync` | KIS `GET /uapi/domestic-stock/v1/quotations/invest-opbysec` · TR `FHKST663400C0` — 회원사 코드별 전 종목 투자의견(의견·직전의견·목표가) | 영업일 07:00 이상 18:00 미만 **10분 주기**(07:00~17:50) | 활성 회원사 `B`개 × 연속조회 페이지 `P` | `(code, business_date, broker_code, content_hash)` |
@@ -189,7 +210,7 @@ KIS 프레임 → 파싱 → 종목별 최신값 버퍼(덮어쓰기)
 
 업종은 `idxcode.mst`(45바이트 고정폭 — 코드 5자리 + 이름)가 코드와 이름을 함께 준다. 종목 마스터의 업종 필드는 4자리라 그대로는 `sector.code`와 맞지 않는다. **앞에 시장 접두어(KOSPI `0`, KOSDAQ `1`)를 붙여 5자리로 맞춘다** — 예: KOSPI `0027` → `00027`(제조), KOSDAQ `1009` → `11009`(제조). 두 시장이 별개 코드 대역을 쓰므로 접두어 없이는 서로 충돌한다.
 
-일일 KIS 호출 예산(실전 1계정): candle 2.6k + valuation 2.6k + investor 2.6k ≈ **7.8k콜**(15/s 페이싱 ~9분) + opinion `B × P × 66회`. `B`와 `P`는 실응답으로 계측해 확정한다(§9). opinion 잡 자체 상한은 **4콜/s**로 두고, 공용 Redis gate가 price REST 폴링과의 합산을 계정 내부 한도(실전 15/s) 아래로 묶는다. 앞 회차가 10분 안에 끝나지 않으면 다음 회차는 ShedLock 획득 실패로 건너뛰고 `opinion_sync_overrun`을 기록한다. 모의투자는 지원 여부·페이지 수를 확인하기 전까지 비활성이다. 지원이 확인돼도 공용 gate 한도 안에서만 실행한다. OpenDART는 일일 한도 내 여유가 있다(분기 시즌에도 수천 콜) — 정확한 한도는 포털에서 확인한다(§9).
+일일 KIS 호출 예산(실전 1계정): candle 2.6k + valuation 2.6k + investor 2.6k ≈ **7.8k콜**(15/s 페이싱 ~9분) + 분봉(상시 폴링 없음 — 조회 연동 신선화·일 배치·콜드 백필 모두 조회/수요 종목에 비례, 공용 gate 안에서 흡수) + opinion `B × P × 66회`. `B`와 `P`는 실응답으로 계측해 확정한다(§9). opinion 잡 자체 상한은 **4콜/s**로 두고, 공용 Redis gate가 price REST 폴링과의 합산을 계정 내부 한도(실전 15/s) 아래로 묶는다. 앞 회차가 10분 안에 끝나지 않으면 다음 회차는 ShedLock 획득 실패로 건너뛰고 `opinion_sync_overrun`을 기록한다. 모의투자는 지원 여부·페이지 수를 확인하기 전까지 비활성이다. 지원이 확인돼도 공용 gate 한도 안에서만 실행한다. OpenDART는 일일 한도 내 여유가 있다(분기 시즌에도 수천 콜) — 정확한 한도는 포털에서 확인한다(§9).
 
 ### 3.2 실행 프레임워크
 
@@ -266,6 +287,8 @@ stock_master(code CHAR(6) PK, name, market, sector_code NULL, shares_outstanding
 sector(code TEXT PK, name)   -- KIS 업종 마스터 idxcode.mst에서 stock_master_sync가 함께 적재(§3.1)
 daily_candle(code, date CHAR(8), open, high, low, close INT, volume BIGINT, value BIGINT,
              PK(code, date))
+minute_candle(code, date CHAR(8), time CHAR(4), open, high, low, close INT, volume BIGINT, value BIGINT,
+             PK(code, date, time))  -- 1분봉 원본(원시가), time=봉 시작 HHmm, 보존 30일(§2.6) — 5/15/30/60분은 core-api가 조회 시 파생
 valuation_daily(code, date, per NUMERIC, pbr NUMERIC, eps INT, bps INT, market_cap BIGINT,
              PK(code, date))
 investor_flow_daily(code, date, individual BIGINT, foreign BIGINT, institution BIGINT,  -- 순매수 백만원
@@ -297,6 +320,7 @@ batch_job_run(id, job, run_date, status, ok_count, fail_count, started_at, finis
 | `KIS_RATE_FACTOR` | `0.75` | 공식 유량 대비 내부 한도 비율 |
 | `DART_API_KEY` | — | OpenDART |
 | `DEMAND_RECONCILE_SEC` / `CONFLATION_MS` | `60` / `200` | §2 파라미터 |
+| `MINUTE_CANDLE_FRESH_SEC` / `MINUTE_CANDLE_RETENTION_DAYS` | `60` / `30` | §2.6 분봉 신선화 임계·보존 |
 | `MARKET_HOLIDAYS_FILE` | `holidays-2026.yml` | 휴장일 |
 | `REDIS_URL` / `DB_URL` | — | 공용 |
 
@@ -332,6 +356,9 @@ batch_job_run(id, job, run_date, status, ok_count, fail_count, started_at, finis
 6. OpenDART 일일 호출 한도 수치.
 7. `FHKST663400C0`의 **모의투자(vts) 지원 여부**, 활성 회원사 코드 원천·갱신 주기, 응답 1페이지 건수와 `tr_cont` 최대 페이지를 실계정 스모크로 확정. 결과로 §3.1의 `B × P` 호출량과 10분 주기 지속 가능성을 검증한다.
 8. **업종 분류의 세분도** — `idxcode.mst`가 주는 대분류는 KOSPI 11종·KOSDAQ 20여 종이라 "제조"에 대부분이 몰린다. worker-llm의 섹터 fan-out이 이 정도 해상도로 쓸 만한지 실데이터로 확인하고, 부족하면 중·소분류(마스터 파일의 [68:72]·[72:76]) 사용이나 서비스 자체 분류를 검토한다.
+9. **분봉 API 계측(§2.6)** — `FHKST03010200`·`FHKST03010230`의 모의(vts) 지원 여부, 1콜 최대 건수(30건·과거분 추정치), 시각 필드가 봉 시작인지 종료인지, 분 거래량·거래대금 필드가 분값인지 누적값인지(누적이면 diff 계산)를 실응답으로 확정한다.
+10. **분봉 시장 구분 코드(§2.6)** — `FID_COND_MRKT_DIV_CODE`의 모의(vts) `UN` 지원 여부, 그리고 실전 `UN` 응답이 NXT 프리(08:00–08:50)·애프터(15:30–20:00) 봉을 실제로 포함하는지를 실응답으로 확정한다. 함께 확인할 것: (a) **미지원 시 KIS가 `rt_cd≠0` 에러를 주는지 빈 `output2`를 주는지** — 빈 응답이면 조회가 조용히 완주로 굳으므로 `minute.candle.empty.complete` 카운터로만 감지된다, (b) `UN`의 `acml_tr_pbmn`이 통합 누적인지 시장별 누적인지, (c) 같은 `stck_cntg_hour`에 KRX·NXT 행이 각각 오는지(오면 현재 구현은 뒤엣것만 남긴다). 일봉(`FHKST03010100`)·현재가(`FHKST01010100`)는 아직 `J`(KRX)를 쓰므로, 분봉만 통합으로 가면 같은 날 일봉 OHLCV와 분봉 합계가 어긋난다 — 통합 전환 범위를 여기서 함께 정한다.
+11. **분봉 신선화 내부 API의 접근 통제(§2.6)** — core-api → worker-price 호출의 인증 방식(내부 네트워크 경계만으로 충분한지, 공유 시크릿 헤더가 필요한지)을 배포 토폴로지 확정 시 결정한다.
 ---
 
-*KIS 수집 워커 명세 v0.2 — Redis 계약 v0.12·WS API v0.6·core-api 명세 v0.1과 정합. KIS 수치는 2026-07 공식 샘플 대조 기준이며 §9 항목은 실계정 재확인 대상.*
+*KIS 수집 워커 명세 v0.3 — Redis 계약 v0.12·WS API v0.6·core-api 명세 v0.2와 정합. KIS 수치는 2026-07 공식 샘플 대조 기준이며 §9 항목은 실계정 재확인 대상.*
