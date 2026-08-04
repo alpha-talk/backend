@@ -154,7 +154,11 @@ KIS 프레임 → 파싱 → 종목별 최신값 버퍼(덮어쓰기)
 ### 2.6 봉(OHLCV) 수집·백필
 
 - **기간별 시세**: `GET /uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice` · TR `FHKST03010100` · `FID_INPUT_DATE_1/2`(범위), `FID_PERIOD_DIV_CODE=D`, `FID_ORG_ADJ_PRC=0`(수정주가) → **1콜 최대 100봉**.
-- 정기: 매 영업일 16:30 전 상장 종목 최신 일봉 upsert. ~2,600콜 → 실전 15/s 페이싱으로 약 3분, 모의 1.5/s로 약 29분 — 모의에선 수요 종목(§2.1)만. 전 종목의 원천은 `stock_master`(worker-batch 적재)이며, 비어 있으면(초기 구축 전) 수요 종목으로 대체하고 경고를 남긴다.
+- 정기: 매 영업일 16:30 전 상장 종목 최신 일봉 upsert. ~2,600콜 → 실전 15/s 페이싱으로 약 3분, 모의 1.5/s로 약 29분 — 모의에선 수요 종목(§2.1)만.
+- **유니버스 원천**: 실전은 `stock_master`의 활성 종목(worker-batch 적재)이다. 수요(§2.1)는 접속자에 따라 휘발하므로 일봉 대상이 될 수 없다 — 둘은 분리한다.
+    - `stock_master`가 **비어 있으면**(초기 구축 전) 수요 종목으로 대체하고 경고를 남긴다 — 정상 축소 경로다.
+    - `stock_master` **조회가 실패하면**(DB 장애) 축소하지 않는다. 3회 재시도 후에도 실패하면 회차를 중단하고 `candle_sync_aborted`를 올린다 — 축소된 채 "성공"으로 끝나 다음 영업일까지 종목이 누락되는 것을 막는다.
+- **미완주 재시도**: 정기 회차가 완주하지 못한 영업일에는 17·18·19시에 리더가 재시도한다(완주한 날은 no-op). 장 마감 후라 재조회는 같은 확정 일봉을 upsert하므로 멱등이다.
 - 백필: 신규 종목/초기 구축 시 종목당 `(영업일수/100)`콜을 야간 슬롯에서 수행한다. 액면분할 등으로 마스터의 상장주식수 급변을 감지하면 해당 종목을 **전 구간 재적재**한다(수정주가 재계산 반영).
 
 ### 2.7 장 운영 캘린더
@@ -175,7 +179,7 @@ KIS 프레임 → 파싱 → 종목별 최신값 버퍼(덮어쓰기)
 | 잡 | 소스 · TR/엔드포인트 | 스케줄 (KST) | 대상·볼륨 | 멱등 키 |
 |---|---|---|---|---|
 | `stock_master_sync` | KIS 마스터 파일 `https://new.real.download.dws.co.kr/common/master/kospi_code.mst.zip`·`kosdaq_code.mst.zip`·`idxcode.mst.zip` (CP949, 고정폭 — KIS GitHub 파서 참조) | 매일 08:00 (원본 07:40경 갱신) | 전 종목 ~2,600 + 업종 ~490 | `code` upsert |
-| `daily_candle_sync` | KIS `FHKST03010100` (§2.6 — 실행 주체는 price, 트리거·이력 관리는 batch 잡 테이블로 일원화 가능. MVP: price 내 스케줄) | 영업일 16:30 | 전 종목 | `(code,date)` |
+| `daily_candle_sync` | KIS `FHKST03010100` (§2.6 — 실행 주체는 price, 트리거·이력 관리는 batch 잡 테이블로 일원화 가능. MVP: price 내 스케줄) | 영업일 16:30 (+미완주 시 17·18·19시 재시도) | 전 종목(`stock_master` 활성) | `(code,date)` |
 | `valuation_daily` | KIS `FHKST01010100` 응답의 `per,pbr,eps,bps` + 마스터 시총 | 영업일 16:50 | 전 종목 (~2,600콜) | `(code,date)` |
 | `investor_flow_daily` | KIS `GET .../inquire-investor` · TR `FHKST01010900` — **장마감 후 확정치** | 영업일 17:10 | 전 종목 | `(code,date)` |
 | `invest_opinion_sync` | KIS `GET /uapi/domestic-stock/v1/quotations/invest-opbysec` · TR `FHKST663400C0` — 회원사 코드별 전 종목 투자의견(의견·직전의견·목표가) | 영업일 07:00 이상 18:00 미만 **10분 주기**(07:00~17:50) | 활성 회원사 `B`개 × 연속조회 페이지 `P` | `(code, business_date, broker_code, content_hash)` |
@@ -297,7 +301,7 @@ batch_job_run(id, job, run_date, status, ok_count, fail_count, started_at, finis
 
 ## 6. 관측성
 
-메트릭: `kis_ws_sessions{state}` · `kis_subscribed_symbols` · `demand_symbols` · `degraded_symbols` · `tick_in_rate`/`quote_publish_rate` · `conflation_lag_ms` · `pingpong_miss` · `rest_call_rate{keyId}` · `rest_throttled` · `token_refresh_total` · `batch_job_duration/fail{job}`. 로그는 구조화 JSON으로 남기고 appkey/token은 마스킹한다. 프레임 원문은 DEBUG+샘플링으로만 남긴다. 알람: WS 세션 전멸 5분, 장중 tick_in=0, 배치 실패, throttled 급증.
+메트릭: `kis_ws_sessions{state}` · `kis_subscribed_symbols` · `demand_symbols` · `degraded_symbols` · `tick_in_rate`/`quote_publish_rate` · `conflation_lag_ms` · `pingpong_miss` · `rest_call_rate{keyId}` · `rest_throttled` · `token_refresh_total` · `batch_job_duration/fail{job}`. 로그는 구조화 JSON으로 남기고 appkey/token은 마스킹한다. 프레임 원문은 DEBUG+샘플링으로만 남긴다. 알람: WS 세션 전멸 5분, 장중 tick_in=0, 배치 실패, throttled 급증, `candle_sync_aborted`(유니버스 조회 실패로 일봉 회차 중단 — §2.6).
 
 ## 7. 장애 시나리오 & 대응
 

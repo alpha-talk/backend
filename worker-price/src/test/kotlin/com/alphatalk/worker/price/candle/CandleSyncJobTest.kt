@@ -67,8 +67,16 @@ class CandleSyncJobTest {
         symbols: Set<String> = setOf("005930"),
         calendar: MarketCalendar = MarketCalendar(enforced = false, clock = Instant::now),
         leader: LeaderLock = ToggleLeaderLock(leader = true),
+    ) = job(fetcher, store, { symbols }, calendar, leader)
+
+    private fun job(
+        fetcher: DailyCandleFetcher,
+        store: DailyCandleStore,
+        symbols: () -> Set<String>,
+        calendar: MarketCalendar = MarketCalendar(enforced = false, clock = Instant::now),
+        leader: LeaderLock = ToggleLeaderLock(leader = true),
     ) = CandleSyncJob(
-        symbols = { symbols },
+        symbols = symbols,
         fetcher = fetcher,
         store = store,
         backfillDays = 90,
@@ -155,5 +163,36 @@ class CandleSyncJobTest {
         job(fetcher, store, calendar = calendarAt(27), leader = ToggleLeaderLock(leader = false)).syncDaily()
 
         assertTrue(fetcher.requested.isEmpty())
+    }
+
+    @Test
+    fun `유니버스 조회 실패로 중단되면 후속 회차가 재시도해 완주한다`() {
+        val fetcher = RecordingFetcher { code -> listOf(candle(code, "20260724")) }
+        val store = InMemoryCandleStore()
+        var universeCalls = 0
+        val flaky = {
+            universeCalls += 1
+            if (universeCalls == 1) throw IllegalStateException("db down") else setOf("005930")
+        }
+
+        val job = job(fetcher, store, flaky, calendar = calendarAt(27))
+        job.syncDaily()
+        assertTrue(fetcher.requested.isEmpty())
+
+        job.retryUnfinished()
+
+        assertEquals(listOf("005930"), fetcher.requested.map { it.first })
+    }
+
+    @Test
+    fun `정기 회차가 완주했으면 후속 재시도는 다시 조회하지 않는다`() {
+        val fetcher = RecordingFetcher { code -> listOf(candle(code, "20260724")) }
+        val store = InMemoryCandleStore()
+
+        val job = job(fetcher, store, calendar = calendarAt(27))
+        job.syncDaily()
+        job.retryUnfinished()
+
+        assertEquals(1, fetcher.requested.size)
     }
 }
