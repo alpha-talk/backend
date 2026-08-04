@@ -41,15 +41,8 @@ class PriceConfigTest {
     }
 
     @Test
-    fun `fixed 모드에서 종목이 비어 있으면 demandSource가 실패한다`() {
-        assertFailsWith<IllegalStateException> {
-            demandSource(PriceProperties(enabled = true, accountsJson = validAccounts, symbols = emptyList()))
-        }
-    }
-
-    @Test
-    fun `redis 모드는 종목 없이도 조립되고 fixed 모드 종목은 상시 유지분으로 남는다`() {
-        val empty = PriceProperties(enabled = true, accountsJson = validAccounts, demandMode = DemandMode.REDIS)
+    fun `수요 소스는 종목 없이도 조립되고 symbols는 상시 유지분으로 남는다`() {
+        val empty = PriceProperties(enabled = true, accountsJson = validAccounts)
         assertNotNull(demandSource(empty))
 
         val withBase = empty.copy(symbols = listOf("005930"))
