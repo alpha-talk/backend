@@ -21,7 +21,10 @@ import com.alphatalk.worker.price.candle.MinuteCandlePurgeJob
 import com.alphatalk.worker.price.candle.MinuteCandleRefreshService
 import com.alphatalk.worker.price.candle.MinuteCandleStore
 import com.alphatalk.worker.price.candle.MinuteRefreshLock
+import com.alphatalk.worker.price.candle.MinuteRefreshUniverse
+import com.alphatalk.worker.price.candle.MinuteRefreshWatermarkStore
 import com.alphatalk.worker.price.candle.RedisMinuteRefreshLock
+import com.alphatalk.worker.price.candle.RedisMinuteRefreshWatermarkStore
 import com.alphatalk.worker.price.candle.StockMasterCodeRepository
 import com.alphatalk.worker.price.conflation.ConflationBuffer
 import com.alphatalk.worker.price.demand.DemandSource
@@ -291,11 +294,28 @@ class PriceConfig {
         name = ["alphatalk.price.enabled", "alphatalk.price.minute-candle-enabled"],
         havingValue = "true",
     )
+    fun minuteRefreshWatermarkStore(redis: StringRedisTemplate): MinuteRefreshWatermarkStore =
+        RedisMinuteRefreshWatermarkStore(redis)
+
+    @Bean
+    @ConditionalOnProperty(
+        name = ["alphatalk.price.enabled", "alphatalk.price.minute-candle-enabled"],
+        havingValue = "true",
+    )
+    fun minuteRefreshUniverse(masterCodes: StockMasterCodeRepository): MinuteRefreshUniverse =
+        MinuteRefreshUniverse { code -> masterCodes.existsByCodeAndActiveIsTrue(code) }
+
+    @Bean
+    @ConditionalOnProperty(
+        name = ["alphatalk.price.enabled", "alphatalk.price.minute-candle-enabled"],
+        havingValue = "true",
+    )
     fun minuteCandleRefreshService(
         fetcher: MinuteCandleFetcher,
         store: MinuteCandleStore,
         calendar: MarketCalendar,
         refreshLock: MinuteRefreshLock,
+        watermarks: MinuteRefreshWatermarkStore,
         props: PriceProperties,
         meters: MeterRegistry,
     ): MinuteCandleRefreshService = MinuteCandleRefreshService(
@@ -303,6 +323,7 @@ class PriceConfig {
         store = store,
         calendar = calendar,
         refreshLock = refreshLock,
+        watermarks = watermarks,
         freshSeconds = props.minuteCandleFreshSec,
         meters = meters,
     )
