@@ -3,6 +3,8 @@ package com.alphatalk.worker.price.config
 import com.alphatalk.kis.model.KisEnv
 import com.alphatalk.worker.price.conflation.ConflationBuffer
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
+import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory
+import org.springframework.data.redis.core.StringRedisTemplate
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -12,9 +14,14 @@ import kotlin.test.assertTrue
 class PriceConfigTest {
     private val config = PriceConfig()
     private val validAccounts = """[{"keyId":"a1b2c3d4","appkey":"app-key","appsecret":"app-secret"}]"""
+    private val connectionFactory = LettuceConnectionFactory()
+    private val redisTemplate = StringRedisTemplate()
 
     private fun sessionPool(props: PriceProperties) =
         config.sessionPool(props, ConflationBuffer(), SimpleMeterRegistry())
+
+    private fun demandSource(props: PriceProperties) =
+        config.demandSource(props, redisTemplate, connectionFactory)
 
     @Test
     fun `계정이 비어 있으면 기동에 실패한다`() {
@@ -34,10 +41,19 @@ class PriceConfigTest {
     }
 
     @Test
-    fun `종목이 비어 있으면 demandSource가 실패한다`() {
+    fun `fixed 모드에서 종목이 비어 있으면 demandSource가 실패한다`() {
         assertFailsWith<IllegalStateException> {
-            config.demandSource(PriceProperties(enabled = true, accountsJson = validAccounts, symbols = emptyList()))
+            demandSource(PriceProperties(enabled = true, accountsJson = validAccounts, symbols = emptyList()))
         }
+    }
+
+    @Test
+    fun `redis 모드는 종목 없이도 조립되고 fixed 모드 종목은 상시 유지분으로 남는다`() {
+        val empty = PriceProperties(enabled = true, accountsJson = validAccounts, demandMode = DemandMode.REDIS)
+        assertNotNull(demandSource(empty))
+
+        val withBase = empty.copy(symbols = listOf("005930"))
+        assertEquals(setOf("005930"), demandSource(withBase).targetSymbols())
     }
 
     @Test
@@ -59,7 +75,7 @@ class PriceConfigTest {
         val props = PriceProperties(enabled = true, accountsJson = validAccounts, symbols = listOf("005930"))
 
         assertNotNull(sessionPool(props))
-        assertNotNull(config.demandSource(props))
+        assertNotNull(demandSource(props))
     }
 
     @Test
