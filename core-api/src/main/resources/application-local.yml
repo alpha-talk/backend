@@ -8,3 +8,5 @@ alphatalk:
   auth:
     jwt:
       secret: insecure-local-dev-only-secret-0123456789abcdef
+  stockinfo:
+    minute-refresh-url: http://localhost:8082   # worker-price 분봉 신선화 내부 API — 미설정이면 저장분만 반환 (워커 명세 §2.6)
