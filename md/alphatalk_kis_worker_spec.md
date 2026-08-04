@@ -65,22 +65,22 @@ KIS 유량은 슬라이딩 윈도로 측정되는 것으로 알려져 있다. �
 
 ## 2. worker-price (실시간)
 
-### 2.1 수요(demand) 정의와 신호 — Redis 계약 v0.11에 병합됨
+### 2.1 수요(demand) 정의와 신호 — Redis 계약 v0.12에 반영됨
 
 WS 구독 용량이 유한하므로(§1.3) 전 종목이 아니라 수요가 있는 종목만 구독한다. **수요 = ⋃(접속 중 유저의 관심목록) ∪ (입장 중인 방)** (기획안 §2.5 검증 #2). 세션·관심목록 해소·방 토픽 구독을 모두 아는 쪽은 게이트웨이다. 그래서 카운트는 게이트웨이가 유지하고 worker-price는 소비만 한다.
 
-> ✅ **2026-08-04 [Redis 계약](redis_contract.md) v0.11 §1.3·§3에 병합·구현됨.** 단일 진실은 계약 문서다 — 아래 표는 요약이며 어긋나면 계약 문서를 따른다.
+> ✅ **2026-08-04 [Redis 계약](redis_contract.md) v0.12 §1.3·§3에 반영·구현됨.** 단일 진실은 계약 문서다 — 아래 표는 요약이며 어긋나면 계약 문서를 따른다.
 
 | 키/채널 | 타입 | 쓰기 | 읽기 | 내용 |
 |---|---|---|---|---|
-| `demand:quote:{gwId}` | Hash `{code: refCount}` | 게이트웨이 (`HINCRBY ±1`) | worker-price | 접속 세션의 관심목록 기준 참조 수 |
-| `demand:room:{gwId}` | Hash `{code: refCount}` | 게이트웨이 | worker-price | 방 토픽 구독(입장) 기준 — trade/depth·우선순위 판단 |
+| `demand:quote:{gwId}` | Hash `{code: refCount}` | 게이트웨이(스냅샷 전체 재기록) | worker-price | 접속 세션의 관심목록 기준 참조 수 |
+| `demand:room:{gwId}` | Hash `{code: refCount}` | 게이트웨이(스냅샷 전체 재기록) | worker-price | 방 토픽 구독(입장) 기준 — trade/depth·우선순위 판단 |
 | `demand:updated` | Pub/Sub | 게이트웨이 | worker-price | `{"kind":"quote|room","code":"005930","active":true,"ts":...}` — 종목 참조수 0↔1 전이 시만 발행 |
 | `gw:alive:{gwId}` | String TTL 15s | 게이트웨이(하트비트) | worker-price | 살아있는 게이트웨이 식별. 죽은 gwId의 해시는 수요 합산에서 제외(스테일 정리) |
 
-- 게이트웨이 증감 시점: CONNECT 시 관심목록 해소분 +1씩 / DISCONNECT −1씩 / `watchlist:updated` 반영 시 ± / 방 토픽 SUBSCRIBE·UNSUBSCRIBE 시 room ±.
+- 게이트웨이 인메모리 수요 변경 시점: CONNECT 후 첫 SUBSCRIBE에서 관심목록 부착 / 마지막 세션 DISCONNECT에서 관심목록 제거 / `watchlist:updated` diff 반영 / 방 토픽 SUBSCRIBE·UNSUBSCRIBE에서 room 증감. 종목 수요의 0↔1 전이는 즉시 동기화를 트리거하고, 5초 주기 동기화가 refcount 변화와 실패·유실을 보정한다.
 - worker-price 소비는 두 경로다. ① `demand:updated` 구독으로 즉시 반영한다. ② **60초마다 전체 리컨실**(`gw:alive` 스캔 → 살아있는 gw들의 해시 HGETALL 합산 → 목표 구독 집합 재계산)로 메시지 유실·스테일을 자기치유한다.
-- **구현 확정(v0.11)**: `{gwId}` 생략 없이 gwId 형태로 구현한다. gwId는 게이트웨이 부팅마다 새로 발급되고(인메모리 재구축과 정합), 수요 해시는 하트비트가 TTL 60s로 연장해 죽은 게이트웨이의 수요가 자가 소멸한다. worker-price는 `demand:updated`를 리컨실 트리거로만 쓰고 목표 집합은 항상 alive gw 해시 합산으로 재계산한다.
+- **구현 확정(v0.12)**: `{gwId}`는 생략하지 않고 게이트웨이 부팅마다 새로 발급한다. 단일 동기화 스레드가 5초 주기와 0↔1 전이 트리거마다 `DemandRegistry` 스냅샷을 Lua `DEL+HSET`으로 원자적 전체 재기록하고 해시 TTL 60초·`gw:alive` TTL 15초를 갱신한다. worker-price는 `demand:updated`를 리컨실 트리거로만 쓰고 목표 집합은 항상 alive gw 해시 합산으로 재계산한다.
 
 ### 2.2 세션 풀 & 구독 배정
 
@@ -325,9 +325,8 @@ batch_job_run(id, job, run_date, status, ok_count, fail_count, started_at, finis
 4. 마스터 파일 URL 안정성(비공식 경로) — 포털 "종목 다운로드" 링크 주소와 대조, 변경 대비 설정화.
 5. `FID_ORG_ADJ_PRC` 값 의미(0=수정주가) 문서 재확인.
 6. OpenDART 일일 호출 한도 수치.
-7. **demand 계약 증보(§2.1) — 게이트웨이 담당자 합의** 후 Redis 계약 v0.2 병합.
-8. `FHKST663400C0`의 **모의투자(vts) 지원 여부**, 활성 회원사 코드 원천·갱신 주기, 응답 1페이지 건수와 `tr_cont` 최대 페이지를 실계정 스모크로 확정. 결과로 §3.1의 `B × P` 호출량과 10분 주기 지속 가능성을 검증한다.
-9. **업종 분류의 세분도** — `idxcode.mst`가 주는 대분류는 KOSPI 11종·KOSDAQ 20여 종이라 "제조"에 대부분이 몰린다. worker-llm의 섹터 fan-out이 이 정도 해상도로 쓸 만한지 실데이터로 확인하고, 부족하면 중·소분류(마스터 파일의 [68:72]·[72:76]) 사용이나 서비스 자체 분류를 검토한다.
+7. `FHKST663400C0`의 **모의투자(vts) 지원 여부**, 활성 회원사 코드 원천·갱신 주기, 응답 1페이지 건수와 `tr_cont` 최대 페이지를 실계정 스모크로 확정. 결과로 §3.1의 `B × P` 호출량과 10분 주기 지속 가능성을 검증한다.
+8. **업종 분류의 세분도** — `idxcode.mst`가 주는 대분류는 KOSPI 11종·KOSDAQ 20여 종이라 "제조"에 대부분이 몰린다. worker-llm의 섹터 fan-out이 이 정도 해상도로 쓸 만한지 실데이터로 확인하고, 부족하면 중·소분류(마스터 파일의 [68:72]·[72:76]) 사용이나 서비스 자체 분류를 검토한다.
 ---
 
-*KIS 수집 워커 명세 v0.2 — Redis 계약 v0.7·WS API v0.6·core-api 명세 v0.1과 정합. KIS 수치는 2026-07 공식 샘플 대조 기준이며 §9 항목은 실계정 재확인 대상.*
+*KIS 수집 워커 명세 v0.2 — Redis 계약 v0.12·WS API v0.6·core-api 명세 v0.1과 정합. KIS 수치는 2026-07 공식 샘플 대조 기준이며 §9 항목은 실계정 재확인 대상.*
