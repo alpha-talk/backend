@@ -18,7 +18,6 @@ import kotlin.concurrent.thread
 class RedisDemandSource(
     private val redis: StringRedisTemplate,
     private val connectionFactory: RedisConnectionFactory,
-    private val baseSymbols: Set<String>,
     private val reconcileIntervalMs: Long = 60_000,
 ) : DemandSource, SmartLifecycle {
     private val log = LoggerFactory.getLogger(javaClass)
@@ -32,7 +31,7 @@ class RedisDemandSource(
     private var listenerExecutor: ThreadPoolTaskExecutor? = null
     private var reconciler: Thread? = null
 
-    override fun targetSymbols(): Set<String> = baseSymbols + demanded
+    override fun targetSymbols(): Set<String> = demanded
 
     fun refresh() {
         runCatching {
