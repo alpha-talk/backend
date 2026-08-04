@@ -26,23 +26,32 @@ interface StockMasterCodeRepository : JpaRepository<StockMasterEntity, String> {
     fun findActiveCodes(): List<String>
 }
 
+class CandleUniverseUnavailableException(attempts: Int, cause: Throwable) :
+    IllegalStateException("stock_master 조회가 ${attempts}회 연속 실패했다", cause)
+
 class MasterCandleUniverse(
     private val activeCodes: () -> List<String>,
     private val fallback: () -> Set<String>,
+    private val maxAttempts: Int = 3,
+    private val retryDelayMillis: Long = 2_000,
+    private val sleep: (Long) -> Unit = Thread::sleep,
 ) : CandleUniverse {
     private val log = LoggerFactory.getLogger(javaClass)
 
     override fun symbols(): Set<String> {
-        val codes = try {
-            activeCodes()
-        } catch (e: Exception) {
-            log.warn("stock_master lookup failed - falling back to demanded symbols", e)
-            return fallback()
+        var lastFailure: Throwable? = null
+        repeat(maxAttempts) { attempt ->
+            try {
+                val codes = activeCodes()
+                if (codes.isNotEmpty()) return codes.toSet()
+                log.warn("stock_master is empty - falling back to demanded symbols (초기 구축 전)")
+                return fallback()
+            } catch (e: Exception) {
+                lastFailure = e
+                log.warn("stock_master lookup failed ({}/{})", attempt + 1, maxAttempts, e)
+                if (attempt < maxAttempts - 1) sleep(retryDelayMillis)
+            }
         }
-        if (codes.isEmpty()) {
-            log.warn("stock_master is empty - falling back to demanded symbols")
-            return fallback()
-        }
-        return codes.toSet()
+        throw CandleUniverseUnavailableException(maxAttempts, lastFailure!!)
     }
 }

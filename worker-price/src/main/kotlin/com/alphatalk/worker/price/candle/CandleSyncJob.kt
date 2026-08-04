@@ -21,11 +21,33 @@ class CandleSyncJob(
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
 
+    @Volatile
+    private var completedDate: LocalDate? = null
+
     @Scheduled(cron = "0 30 16 * * MON-FRI", zone = "Asia/Seoul")
     fun syncDaily() {
         if (!calendar.isTradingDay()) return
         if (!leader.tryAcquire()) return
-        syncOnce()
+        attemptSync()
+    }
+
+    @Scheduled(cron = "0 0 17,18,19 * * MON-FRI", zone = "Asia/Seoul")
+    fun retryUnfinished() {
+        if (!calendar.isTradingDay()) return
+        if (completedDate == today()) return
+        if (!leader.tryAcquire()) return
+        log.warn("candle sync retry: 정기 회차가 완료되지 않았다. date={}", today())
+        attemptSync()
+    }
+
+    private fun attemptSync() {
+        try {
+            syncOnce()
+            completedDate = today()
+        } catch (e: Exception) {
+            meters.counter("candle.sync.aborted").increment()
+            log.error("candle sync aborted - 다음 회차에 재시도한다", e)
+        }
     }
 
     fun syncOnce(): Int {
