@@ -14,6 +14,7 @@ import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import java.nio.charset.StandardCharsets
+import java.time.Duration
 import java.time.LocalDate
 import java.time.LocalTime
 import java.time.format.DateTimeFormatter
@@ -22,7 +23,8 @@ class KisRestClient(
     private val restBaseUrl: String,
     private val tokens: KisTokenManager,
     private val limiters: KisRateLimiters,
-    private val http: HttpClient = HttpClient.newHttpClient(),
+    private val http: HttpClient = HttpClient.newBuilder().connectTimeout(CONNECT_TIMEOUT).build(),
+    private val requestTimeout: Duration = REQUEST_TIMEOUT,
 ) {
     private val mapper: ObjectMapper = jacksonObjectMapper()
 
@@ -150,6 +152,7 @@ class KisRestClient(
         val uri = URI.create(restBaseUrl + path + if (query.isEmpty()) "" else "?$query")
         val request = HttpRequest.newBuilder()
             .uri(uri)
+            .timeout(requestTimeout)
             .header("content-type", "application/json; charset=utf-8")
             .header("authorization", "Bearer ${tokens.accessToken(account)}")
             .header("appkey", account.appkey)
@@ -173,6 +176,8 @@ class KisRestClient(
     private fun encode(value: String): String = URLEncoder.encode(value, StandardCharsets.UTF_8)
 
     companion object {
+        val CONNECT_TIMEOUT: Duration = Duration.ofSeconds(3)
+        val REQUEST_TIMEOUT: Duration = Duration.ofSeconds(10)
         const val TR_INQUIRE_PRICE = "FHKST01010100"
         const val TR_DAILY_CHART = "FHKST03010100"
         const val TR_MINUTE_CHART = "FHKST03010200"
