@@ -23,8 +23,24 @@ class DemandRegistryTest {
         }
     }
 
+    private class FakeDemandSignal : DemandSignalPublisher {
+        val counts = mutableMapOf<Pair<DemandSignalKind, String>, Int>()
+
+        override fun increment(kind: DemandSignalKind, code: String) {
+            counts.merge(kind to code, 1, Int::plus)
+        }
+
+        override fun decrement(kind: DemandSignalKind, code: String) {
+            counts.merge(kind to code, -1, Int::plus)
+        }
+
+        fun quote(code: String) = counts[DemandSignalKind.QUOTE to code] ?: 0
+        fun room(code: String) = counts[DemandSignalKind.ROOM to code] ?: 0
+    }
+
     private val subscriber = FakeSubscriber()
-    private val registry = DemandRegistry(subscriber)
+    private val demandSignal = FakeDemandSignal()
+    private val registry = DemandRegistry(subscriber, demandSignal)
 
     private fun connectAndAttach(sessionId: String, userId: Long, watchlist: Set<String>) {
         registry.registerSession(sessionId, userId)
@@ -292,6 +308,73 @@ class DemandRegistryTest {
 
             registry.unsubscribeById("s1", "sub-1")
             assertThat(subscriber.active).containsExactlyInAnyOrder("quote:005930", "stream:005930")
+        }
+    }
+
+    @Nested
+    inner class DemandSignal {
+        @Test
+        fun `관심목록 부착과 마지막 세션 종료 - quote refcount가 유저 단위로 증감해 0으로 복귀`() {
+            connectAndAttach("s1", 1L, setOf("005930"))
+            connectAndAttach("s2", 2L, setOf("005930"))
+            assertThat(demandSignal.quote("005930")).isEqualTo(2)
+
+            registry.removeSession("s1")
+            assertThat(demandSignal.quote("005930")).isEqualTo(1)
+
+            registry.removeSession("s2")
+            assertThat(demandSignal.quote("005930")).isEqualTo(0)
+        }
+
+        @Test
+        fun `같은 유저 세션 두 개 - quote refcount는 유저당 1만 센다`() {
+            connectAndAttach("s1", 1L, setOf("005930"))
+            registry.registerSession("s2", 1L)
+
+            assertThat(demandSignal.quote("005930")).isEqualTo(1)
+
+            registry.removeSession("s1")
+            assertThat(demandSignal.quote("005930")).isEqualTo(1)
+
+            registry.removeSession("s2")
+            assertThat(demandSignal.quote("005930")).isEqualTo(0)
+        }
+
+        @Test
+        fun `watchlist diff - added는 증가, removed는 감소, 중복 diff는 변화 없음`() {
+            connectAndAttach("s1", 1L, setOf("005930"))
+
+            registry.applyWatchlistDiff(1L, added = listOf("005930", "000660"), removed = emptyList())
+            assertThat(demandSignal.quote("005930")).isEqualTo(1)
+            assertThat(demandSignal.quote("000660")).isEqualTo(1)
+
+            registry.applyWatchlistDiff(1L, added = emptyList(), removed = listOf("000660"))
+            assertThat(demandSignal.quote("000660")).isEqualTo(0)
+        }
+
+        @Test
+        fun `방 구독·해제 - room refcount가 구독 단위로 증감해 0으로 복귀`() {
+            registry.registerSession("s1", 1L)
+            registry.subscribeRoom("s1", "sub-1", ChannelKind.POST, "005930")
+            registry.subscribeRoom("s1", "sub-2", ChannelKind.TRADE, "005930")
+            assertThat(demandSignal.room("005930")).isEqualTo(2)
+
+            registry.unsubscribeById("s1", "sub-1")
+            assertThat(demandSignal.room("005930")).isEqualTo(1)
+
+            registry.removeSession("s1")
+            assertThat(demandSignal.room("005930")).isEqualTo(0)
+        }
+
+        @Test
+        fun `같은 subId 재사용 - 이전 방 감소 후 새 방 증가`() {
+            registry.registerSession("s1", 1L)
+            registry.subscribeRoom("s1", "sub-1", ChannelKind.POST, "005930")
+
+            registry.subscribeRoom("s1", "sub-1", ChannelKind.POST, "000660")
+
+            assertThat(demandSignal.room("005930")).isEqualTo(0)
+            assertThat(demandSignal.room("000660")).isEqualTo(1)
         }
     }
 }

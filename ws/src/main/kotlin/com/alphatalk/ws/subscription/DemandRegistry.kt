@@ -11,6 +11,7 @@ import kotlin.concurrent.withLock
 @Component
 class DemandRegistry(
     private val channelSubscriber: ChannelSubscriber,
+    private val demandSignal: DemandSignalPublisher,
 ) : DemandQuery, DemandMutator {
     private class SessionInfo(
         val userId: Long,
@@ -102,6 +103,7 @@ class DemandRegistry(
             if (count == 1) {
                 channelSubscriber.subscribe(Channels.of(kind, code))
             }
+            demandSignal.increment(DemandSignalKind.ROOM, code)
         }
     }
 
@@ -137,6 +139,7 @@ class DemandRegistry(
             channelSubscriber.subscribe(Channels.quote(code))
             channelSubscriber.subscribe(Channels.stream(code))
         }
+        demandSignal.increment(DemandSignalKind.QUOTE, code)
     }
 
     private fun removeUserFromCode(code: String, userId: Long) {
@@ -150,6 +153,7 @@ class DemandRegistry(
         } else {
             watchlistIndex[code] = after
         }
+        demandSignal.decrement(DemandSignalKind.QUOTE, code)
     }
 
     private fun releaseRoom(sub: RoomSub) {
@@ -161,5 +165,6 @@ class DemandRegistry(
         } else {
             roomIndex[key] = count - 1
         }
+        demandSignal.decrement(DemandSignalKind.ROOM, code = sub.code)
     }
 }
