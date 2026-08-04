@@ -21,4 +21,5 @@ data class PriceProperties(
     val pollBudgetFactor: Double = 0.5,
     val candleEnabled: Boolean = false,
     val candleBackfillDays: Long = 90,
+    val candleSyncOnStartup: Boolean = false,
 )
