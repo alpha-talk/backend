@@ -151,4 +151,87 @@ class KisRestClientTest {
         assertTrue("FID_PERIOD_DIV_CODE=D" in call.query)
         assertTrue("FID_ORG_ADJ_PRC=0" in call.query)
     }
+
+    @Test
+    fun `당일 분봉을 파싱하고 시각은 HHmm으로 자른다`() {
+        server.enqueue("/oauth2/tokenP", 200, tokenBody("T1"))
+        server.enqueue(
+            "/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice",
+            200,
+            """
+            {"rt_cd":"0","output2":[
+              {"stck_bsop_date":"20260804","stck_cntg_hour":"130400","stck_oprc":"230000","stck_hgpr":"230500",
+               "stck_lwpr":"229500","stck_prpr":"230500","cntg_vol":"120000","acml_tr_pbmn":"4700000000000"},
+              {"stck_bsop_date":"20260804","stck_cntg_hour":"130300","stck_oprc":"229500","stck_hgpr":"230000",
+               "stck_lwpr":"229000","stck_prpr":"230000","cntg_vol":"98000","acml_tr_pbmn":"4699972360000"},
+              {"stck_bsop_date":""}]}
+            """.trimIndent(),
+        )
+
+        val candles = client.minuteCandles(
+            account,
+            "005930",
+            java.time.LocalTime.of(13, 4),
+            KisRestClient.MARKET_DIV_UNIFIED,
+        )
+
+        assertEquals(2, candles.size)
+        assertEquals("1304", candles[0].time)
+        assertEquals("20260804", candles[0].date)
+        assertEquals(230500, candles[0].close)
+        assertEquals(120000, candles[0].volume)
+        assertEquals(4700000000000, candles[0].accValue)
+        val call = server.received.single { it.path.endsWith("inquire-time-itemchartprice") }
+        assertEquals("FHKST03010200", call.headers["tr_id"])
+        assertTrue("FID_INPUT_HOUR_1=130400" in call.query)
+        assertTrue("FID_PW_DATA_INCU_YN=Y" in call.query)
+        assertTrue("FID_COND_MRKT_DIV_CODE=UN" in call.query)
+    }
+
+    @Test
+    fun `모든 REST 호출은 공용 gate를 계정 키로 통과한다`() {
+        val gated = mutableListOf<String>()
+        val tokens = KisTokenManager(server.baseUrl, InMemoryKisTokenStore())
+        val gatedClient = KisRestClient(
+            server.baseUrl,
+            tokens,
+            KisRateLimiters(100.0, 1.0),
+            gate = { keyId -> gated += keyId },
+        )
+        server.enqueue("/oauth2/tokenP", 200, tokenBody("T1"))
+        server.enqueue("/uapi/test", 200, """{"rt_cd":"0"}""")
+
+        gatedClient.getJson(account, "/uapi/test", "TR123", emptyMap())
+
+        assertEquals(listOf("key1"), gated)
+    }
+
+    @Test
+    fun `분봉 시장 코드는 호출자가 지정한 값을 그대로 보낸다`() {
+        server.enqueue("/oauth2/tokenP", 200, tokenBody("T1"))
+        server.enqueue(
+            "/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice",
+            200,
+            """{"rt_cd":"0","output2":[]}""",
+        )
+
+        client.minuteCandles(account, "005930", java.time.LocalTime.of(13, 4), KisRestClient.MARKET_DIV_KRX)
+
+        val call = server.received.single { it.path.endsWith("inquire-time-itemchartprice") }
+        assertTrue("FID_COND_MRKT_DIV_CODE=J" in call.query)
+    }
+
+    @Test
+    fun `분봉 rt_cd가 0이 아니면 예외를 던진다`() {
+        server.enqueue("/oauth2/tokenP", 200, tokenBody("T1"))
+        server.enqueue(
+            "/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice",
+            200,
+            """{"rt_cd":"1","msg_cd":"EGW00123"}""",
+        )
+
+        assertFailsWith<KisClientException> {
+            client.minuteCandles(account, "005930", java.time.LocalTime.of(13, 4), KisRestClient.MARKET_DIV_UNIFIED)
+        }
+    }
 }
