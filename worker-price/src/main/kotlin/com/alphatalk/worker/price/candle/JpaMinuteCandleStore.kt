@@ -8,6 +8,8 @@ import jakarta.persistence.EntityManager
 import jakarta.persistence.Table
 import org.hibernate.annotations.JdbcTypeCode
 import org.hibernate.type.SqlTypes
+import org.springframework.data.domain.PageRequest
+import org.springframework.data.domain.Pageable
 import org.springframework.data.jpa.repository.JpaRepository
 import org.springframework.data.jpa.repository.Modifying
 import org.springframework.data.jpa.repository.Query
@@ -61,9 +63,12 @@ interface MinuteCandleJpaRepository : JpaRepository<MinuteCandleEntity, MinuteCa
     @Query("select distinct c.id.code from MinuteCandleEntity c where c.id.date = :date")
     fun findCodesOn(@Param("date") date: String): List<String>
 
+    @Query("select c.id from MinuteCandleEntity c where c.id.date < :date")
+    fun findIdsBefore(@Param("date") date: String, pageable: Pageable): List<MinuteCandleId>
+
     @Modifying
-    @Query("delete from MinuteCandleEntity c where c.id.date < :date")
-    fun deleteBefore(@Param("date") date: String): Int
+    @Query("delete from MinuteCandleEntity c where c.id in :ids")
+    fun deleteByIds(@Param("ids") ids: List<MinuteCandleId>): Int
 }
 
 @Repository
@@ -116,5 +121,9 @@ class JpaMinuteCandleStore(
     override fun codesOn(date: String): Set<String> = repository.findCodesOn(date).toSet()
 
     @Transactional
-    override fun purgeBefore(dateExclusive: String): Int = repository.deleteBefore(dateExclusive)
+    override fun purgeBatchBefore(dateExclusive: String, batchSize: Int): Int {
+        val ids = repository.findIdsBefore(dateExclusive, PageRequest.of(0, batchSize))
+        if (ids.isEmpty()) return 0
+        return repository.deleteByIds(ids)
+    }
 }

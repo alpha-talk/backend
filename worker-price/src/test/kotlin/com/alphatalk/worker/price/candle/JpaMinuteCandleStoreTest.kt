@@ -110,14 +110,15 @@ class JpaMinuteCandleStoreTest {
     }
 
     @Test
-    fun `purgeBefore는 기준일 이전 행을 지우고 개수를 돌려준다`() {
+    fun `purgeBatchBefore는 기준일 이전 행을 배치 크기만큼 지운다`() {
         store.upsert(
             listOf(candle("0900", date = "20260701"), candle("0900", date = "20260702"), candle("0900")),
         )
         readBack()
 
-        assertEquals(2, store.purgeBefore("20260704"))
+        assertEquals(2, store.purgeBatchBefore("20260704", 100))
         readBack()
         assertEquals(1, repository.count())
+        assertEquals(0, store.purgeBatchBefore("20260704", 100))
     }
 }
