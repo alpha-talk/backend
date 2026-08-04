@@ -50,8 +50,8 @@ class MinuteCandleRefreshServiceTest {
     private inner class PagingFetcher(
         private val date: String = "20260804",
         private val accPerMinute: Long = 100,
-        private val firstBar: LocalTime = LocalTime.of(9, 0),
-        private val lastBar: LocalTime = LocalTime.of(15, 30),
+        private val firstBar: LocalTime = LocalTime.of(8, 0),
+        private val lastBar: LocalTime = LocalTime.of(20, 0),
     ) : MinuteCandleFetcher {
         val calls = AtomicInteger()
 
@@ -222,9 +222,9 @@ class MinuteCandleRefreshServiceTest {
     @Test
     fun `당일 마감봉이 있으면 조회하지 않는다`() {
         val store = InMemoryMinuteStore()
-        store.upsert(listOf(MinuteCandle("005930", "20260804", "1530", 1, 1, 1, 1, 1, 1)))
+        store.upsert(listOf(MinuteCandle("005930", "20260804", "2000", 1, 1, 1, 1, 1, 1)))
         val fetcher = PagingFetcher()
-        val service = service(fetcher, store, at = ZonedDateTime.of(2026, 8, 4, 16, 30, 0, 0, seoul))
+        val service = service(fetcher, store, at = ZonedDateTime.of(2026, 8, 4, 20, 30, 0, 0, seoul))
 
         assertEquals(0, service.refresh("005930"))
         assertEquals(0, fetcher.calls.get())
@@ -236,7 +236,7 @@ class MinuteCandleRefreshServiceTest {
         val fetcher = PagingFetcher()
         val saturday = ZonedDateTime.of(2026, 8, 1, 13, 0, 0, 0, seoul)
         assertEquals(0, service(fetcher, store, at = saturday).refresh("005930"))
-        val beforeOpen = ZonedDateTime.of(2026, 8, 4, 8, 30, 0, 0, seoul)
+        val beforeOpen = ZonedDateTime.of(2026, 8, 4, 7, 30, 0, 0, seoul)
         assertEquals(0, service(fetcher, store, at = beforeOpen).refresh("005930"))
         assertEquals(0, fetcher.calls.get())
     }
@@ -324,19 +324,19 @@ class MinuteCandleRefreshServiceTest {
         )
 
         assertEquals(30, service.refresh("005930"))
-        assertEquals("0929", store.latestTime("005930", "20260804"))
+        assertEquals("0829", store.latestTime("005930", "20260804"))
 
         val synced = service.syncDay("005930")
 
         assertEquals("1303", store.latestTime("005930", "20260804"))
-        assertEquals(214, synced)
+        assertEquals(274, synced)
     }
 
     @Test
     fun `마지막 체결이 이른 종목도 마감까지 조회를 마치면 워터마크로 완주다`() {
         val store = InMemoryMinuteStore()
         val fetcher = PagingFetcher(lastBar = LocalTime.of(14, 0))
-        val afterClose = ZonedDateTime.of(2026, 8, 4, 16, 10, 0, 0, seoul)
+        val afterClose = ZonedDateTime.of(2026, 8, 4, 20, 10, 0, 0, seoul)
         val service = service(fetcher, store, at = afterClose)
 
         service.syncDay("005930")
@@ -353,12 +353,12 @@ class MinuteCandleRefreshServiceTest {
     fun `데드라인에 잘린 조회는 워터마크를 남기지 않아 완주로 오판되지 않는다`() {
         val store = InMemoryMinuteStore()
         val fetcher = PagingFetcher()
-        val afterClose = ZonedDateTime.of(2026, 8, 4, 16, 10, 0, 0, seoul)
+        val afterClose = ZonedDateTime.of(2026, 8, 4, 20, 10, 0, 0, seoul)
         val service = service(fetcher, store, at = afterClose, fetchDeadlineMillis = 0, freshSeconds = 0)
 
         service.refresh("005930")
 
-        assertEquals("0929", store.latestTime("005930", "20260804"))
+        assertEquals("0829", store.latestTime("005930", "20260804"))
         assertEquals(false, service.isDayComplete("005930", "20260804"))
     }
 
@@ -366,7 +366,7 @@ class MinuteCandleRefreshServiceTest {
     fun `워터마크는 인스턴스 간에 공유되어 다른 인스턴스도 완주로 본다`() {
         val store = InMemoryMinuteStore()
         val shared = InMemoryWatermarks()
-        val afterClose = ZonedDateTime.of(2026, 8, 4, 16, 10, 0, 0, seoul)
+        val afterClose = ZonedDateTime.of(2026, 8, 4, 20, 10, 0, 0, seoul)
         val instanceA = service(PagingFetcher(lastBar = LocalTime.of(14, 0)), store, at = afterClose, watermarks = shared)
         val fetcherB = PagingFetcher(lastBar = LocalTime.of(14, 0))
         val instanceB = service(fetcherB, store, at = afterClose, watermarks = shared)
@@ -408,15 +408,15 @@ class MinuteCandleRefreshServiceTest {
     }
 
     @Test
-    fun `개장 전 시간외 봉이 섞여 와도 저장하지 않는다`() {
+    fun `수집 창 밖 봉이 섞여 와도 저장하지 않는다`() {
         val store = InMemoryMinuteStore()
-        val fetcher = PagingFetcher(firstBar = LocalTime.of(8, 30))
-        val service = service(fetcher, store, at = ZonedDateTime.of(2026, 8, 4, 9, 20, 30, 0, seoul))
+        val fetcher = PagingFetcher(firstBar = LocalTime.of(7, 30))
+        val service = service(fetcher, store, at = ZonedDateTime.of(2026, 8, 4, 8, 20, 30, 0, seoul))
 
         service.refresh("005930")
 
-        assertTrue(store.rows.keys.all { it.third >= "0900" })
-        assertEquals("0900", store.rows.keys.minOf { it.third })
+        assertTrue(store.rows.keys.all { it.third >= "0800" })
+        assertEquals("0800", store.rows.keys.minOf { it.third })
     }
 
     @Test

@@ -92,9 +92,9 @@ object MinuteCandleAggregator {
         )
     }
 
-    private const val OPEN_MINUTES = 9 * 60
-    private const val LAST_SESSION_MINUTE = 15 * 60 + 29
-    private const val MAX_FETCH_ROWS = 12_000
+    private const val OPEN_MINUTES = 8 * 60
+    private const val LAST_SESSION_MINUTE = 19 * 60 + 59
+    private const val MAX_FETCH_ROWS = 22_000
     private val HHMM: DateTimeFormatter = DateTimeFormatter.ofPattern("HHmm")
     private val YYYYMMDDHHMM: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyyMMddHHmm")
 }

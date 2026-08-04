@@ -193,11 +193,11 @@ class MinuteCandleRefreshService(
     companion object {
         private val SEOUL: ZoneId = ZoneId.of("Asia/Seoul")
         private val HHMM: DateTimeFormatter = DateTimeFormatter.ofPattern("HHmm")
-        private val OPEN_TIME: LocalTime = LocalTime.of(9, 0)
-        private val CLOSE_TIME: LocalTime = LocalTime.of(15, 30)
-        private const val OPEN_BAR = "0900"
-        private const val CLOSE_BAR = "1530"
-        private const val MAX_PAGES = 15
+        private val OPEN_TIME: LocalTime = LocalTime.of(8, 0)
+        private val CLOSE_TIME: LocalTime = LocalTime.of(20, 0)
+        private const val OPEN_BAR = "0800"
+        private const val CLOSE_BAR = "2000"
+        private const val MAX_PAGES = 26
         private const val PAGE_SPAN_MINUTES = 29L
         private const val LOCK_MARGIN_MILLIS = 80_000L
         private const val MAX_CLAIM_ATTEMPTS = 3

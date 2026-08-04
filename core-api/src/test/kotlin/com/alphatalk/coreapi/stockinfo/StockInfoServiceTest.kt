@@ -285,7 +285,7 @@ class StockInfoServiceTest {
         val response = service(minuteCandles = store).candles("005930", "30m", 500, null)
 
         assertEquals(
-            listOf("20260803" to "1500", "20260804" to "0900"),
+            listOf("20260803" to "1500", "20260803" to "1530", "20260804" to "0900"),
             response.items.map { it.date to it.time },
         )
         assertEquals(false, response.pageInfo.hasMoreBefore)
@@ -293,16 +293,40 @@ class StockInfoServiceTest {
     }
 
     @Test
-    fun `마감 직후 count=1 조회도 15시30분이 합산된 마지막 버킷을 돌려준다`() {
-        val store = FakeMinuteCandleStore(minuteRows("20260804", "0900", 391))
+    fun `마감 직후 count=1 조회도 20시 마감 행이 합산된 마지막 버킷을 돌려준다`() {
+        val store = FakeMinuteCandleStore(minuteRows("20260804", "1930", 31))
 
         val response = service(minuteCandles = store).candles("005930", "5m", 1, null)
 
-        assertEquals(listOf("1525"), response.items.map(CandleView::time))
+        assertEquals(listOf("1955"), response.items.map(CandleView::time))
         assertEquals(60, response.items.single().volume)
         assertEquals(6_000, response.items.single().value)
         assertTrue(response.pageInfo.hasMoreBefore)
-        assertEquals("202608041524", response.pageInfo.nextTo)
+        assertEquals("202608041954", response.pageInfo.nextTo)
+    }
+
+    @Test
+    fun `프리마켓과 정규장 봉이 08시 그리드로 나뉘고 세션 공백은 버킷을 만들지 않는다`() {
+        val store = FakeMinuteCandleStore(
+            minuteRows("20260804", "0800", 10) + minuteRows("20260804", "0900", 10),
+        )
+
+        val response = service(minuteCandles = store).candles("005930", "60m", 500, null)
+
+        assertEquals(listOf("0800", "0900"), response.items.map(CandleView::time))
+        assertEquals(false, response.pageInfo.hasMoreBefore)
+    }
+
+    @Test
+    fun `애프터마켓 봉도 정규장과 이어서 조회된다`() {
+        val store = FakeMinuteCandleStore(
+            minuteRows("20260804", "1525", 10),
+        )
+
+        val response = service(minuteCandles = store).candles("005930", "5m", 500, null)
+
+        assertEquals(listOf("1525", "1530"), response.items.map(CandleView::time))
+        assertEquals(50, response.items.last().volume)
     }
 
     @Test

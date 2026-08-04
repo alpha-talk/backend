@@ -21,14 +21,14 @@ class MinuteCandleDailySyncJob(
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
 
-    @Scheduled(cron = "0 0 16 * * MON-FRI", zone = "Asia/Seoul")
+    @Scheduled(cron = "0 5 20 * * MON-FRI", zone = "Asia/Seoul")
     fun syncDaily() {
         if (!calendar.isTradingDay()) return
         if (!leader.tryAcquire()) return
         attemptSync()
     }
 
-    @Scheduled(cron = "0 15 17,18,19 * * MON-FRI", zone = "Asia/Seoul")
+    @Scheduled(cron = "0 15 21,22,23 * * MON-FRI", zone = "Asia/Seoul")
     fun retryUnfinished() {
         if (!calendar.isTradingDay()) return
         if (!leader.tryAcquire()) return
