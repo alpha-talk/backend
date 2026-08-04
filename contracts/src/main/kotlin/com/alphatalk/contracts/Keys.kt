@@ -21,5 +21,7 @@ object Keys {
 
     fun rateLimitWindow(action: String, key: String, windowIndex: Long) = "rl:$action:$key:$windowIndex"
 
+    fun minuteRefreshLock(code: String) = "lock:minute-refresh:$code"
+
     fun badge(userId: Long) = "badge:$userId"
 }
