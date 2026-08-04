@@ -207,7 +207,7 @@ class KisRestClientTest {
     }
 
     @Test
-    fun `분봉 시장 코드를 지정하지 않으면 KRX 전용으로 조회한다`() {
+    fun `분봉 시장 코드는 호출자가 지정한 값을 그대로 보낸다`() {
         server.enqueue("/oauth2/tokenP", 200, tokenBody("T1"))
         server.enqueue(
             "/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice",
@@ -215,7 +215,7 @@ class KisRestClientTest {
             """{"rt_cd":"0","output2":[]}""",
         )
 
-        client.minuteCandles(account, "005930", java.time.LocalTime.of(13, 4))
+        client.minuteCandles(account, "005930", java.time.LocalTime.of(13, 4), KisRestClient.MARKET_DIV_KRX)
 
         val call = server.received.single { it.path.endsWith("inquire-time-itemchartprice") }
         assertTrue("FID_COND_MRKT_DIV_CODE=J" in call.query)
@@ -231,7 +231,7 @@ class KisRestClientTest {
         )
 
         assertFailsWith<KisClientException> {
-            client.minuteCandles(account, "005930", java.time.LocalTime.of(13, 4))
+            client.minuteCandles(account, "005930", java.time.LocalTime.of(13, 4), KisRestClient.MARKET_DIV_UNIFIED)
         }
     }
 }
