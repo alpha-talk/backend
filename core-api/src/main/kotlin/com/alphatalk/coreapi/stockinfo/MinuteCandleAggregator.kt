@@ -36,7 +36,7 @@ data class MinuteWindow(
 )
 
 object MinuteCandleAggregator {
-    fun fetchLimit(period: MinutePeriod, count: Int): Int = count * period.unitMinutes + 1
+    fun fetchLimit(period: MinutePeriod, count: Int): Int = count * period.unitMinutes + 2
 
     fun aggregate(
         minutesDescending: List<MinuteCandleRow>,

@@ -293,6 +293,33 @@ class StockInfoServiceTest {
     }
 
     @Test
+    fun `마감 직후 count=1 조회도 15시30분이 합산된 마지막 버킷을 돌려준다`() {
+        val store = FakeMinuteCandleStore(minuteRows("20260804", "0900", 391))
+
+        val response = service(minuteCandles = store).candles("005930", "5m", 1, null)
+
+        assertEquals(listOf("1525"), response.items.map(CandleView::time))
+        assertEquals(60, response.items.single().volume)
+        assertEquals(6_000, response.items.single().value)
+        assertTrue(response.pageInfo.hasMoreBefore)
+        assertEquals("202608041524", response.pageInfo.nextTo)
+    }
+
+    @Test
+    fun `희소 데이터가 저장분 전부여도 count 상한을 지킨다`() {
+        val sparse = listOf("0900", "0930", "1000", "1030").map { time ->
+            MinuteCandleRow("20260804", time, 100, 110, 90, 105, 10, 1000)
+        }
+
+        val response = service(minuteCandles = FakeMinuteCandleStore(sparse))
+            .candles("005930", "5m", 2, null)
+
+        assertEquals(listOf("1000", "1030"), response.items.map(CandleView::time))
+        assertTrue(response.pageInfo.hasMoreBefore)
+        assertEquals("202608040959", response.pageInfo.nextTo)
+    }
+
+    @Test
     fun `신선화 실패는 분봉 조회를 막지 않는다`() {
         val store = FakeMinuteCandleStore(minuteRows("20260804", "0900", 5))
         val refresher = RecordingRefresher(failure = IllegalStateException("worker down"))
