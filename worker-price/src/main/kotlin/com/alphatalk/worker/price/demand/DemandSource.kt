@@ -1,5 +1,5 @@
 package com.alphatalk.worker.price.demand
 
-interface DemandSource {
+fun interface DemandSource {
     fun targetSymbols(): Set<String>
 }
