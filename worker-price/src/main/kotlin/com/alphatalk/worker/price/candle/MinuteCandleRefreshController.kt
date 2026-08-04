@@ -1,9 +1,11 @@
 package com.alphatalk.worker.price.candle
 
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
+import org.springframework.http.HttpStatus
 import org.springframework.web.bind.annotation.PathVariable
 import org.springframework.web.bind.annotation.PostMapping
 import org.springframework.web.bind.annotation.RestController
+import org.springframework.web.server.ResponseStatusException
 
 @RestController
 @ConditionalOnProperty(
@@ -12,10 +14,20 @@ import org.springframework.web.bind.annotation.RestController
 )
 class MinuteCandleRefreshController(
     private val service: MinuteCandleRefreshService,
+    private val universe: MinuteRefreshUniverse,
 ) {
     @PostMapping("/internal/minute-candles/{code}/refresh")
     fun refresh(@PathVariable code: String): Map<String, Int> {
-        require(code.length == 6 && code.all(Char::isDigit)) { "잘못된 종목코드: $code" }
+        if (!CODE_PATTERN.matches(code)) {
+            throw ResponseStatusException(HttpStatus.BAD_REQUEST, "종목 코드는 6자리 숫자여야 한다")
+        }
+        if (!universe.contains(code)) {
+            throw ResponseStatusException(HttpStatus.NOT_FOUND, "상장 종목이 아니다")
+        }
         return mapOf("synced" to service.refresh(code))
+    }
+
+    private companion object {
+        val CODE_PATTERN = Regex("^\\d{6}$")
     }
 }

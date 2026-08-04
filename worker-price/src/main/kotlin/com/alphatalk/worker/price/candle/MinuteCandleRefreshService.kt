@@ -21,6 +21,7 @@ class MinuteCandleRefreshService(
     private val store: MinuteCandleStore,
     private val calendar: MarketCalendar,
     private val refreshLock: MinuteRefreshLock,
+    private val watermarks: MinuteRefreshWatermarkStore,
     private val freshSeconds: Long,
     private val meters: MeterRegistry,
     private val waitTimeoutMillis: Long = 2_000,
@@ -31,32 +32,53 @@ class MinuteCandleRefreshService(
     private val log = LoggerFactory.getLogger(javaClass)
     private val inFlight = ConcurrentHashMap<String, CompletableFuture<Int>>()
     private val lastFetchedAt = ConcurrentHashMap<String, Instant>()
-    private val fetchedThrough = ConcurrentHashMap<String, Pair<String, String>>()
 
     fun refresh(code: String): Int =
         coalesced(code, fetchDeadlineMillis) { doRefresh(code, fetchDeadlineMillis, honorFreshness = true) }
 
     fun syncDay(code: String): Int =
-        coalesced(code, dailySyncDeadlineMillis) { doRefresh(code, dailySyncDeadlineMillis, honorFreshness = false) }
+        exclusive(code, dailySyncDeadlineMillis) { doRefresh(code, dailySyncDeadlineMillis, honorFreshness = false) }
 
-    fun isDayComplete(code: String, date: String): Boolean {
-        if ((store.latestTime(code, date) ?: "") >= CLOSE_BAR) return true
-        val through = fetchedThrough[code] ?: return false
-        return through.first == date && through.second >= CLOSE_BAR
+    fun isDayComplete(code: String, date: String): Boolean =
+        isComplete(code, date, store.latestTime(code, date))
+
+    private fun isComplete(code: String, date: String, latest: String?): Boolean {
+        if ((latest ?: "") >= CLOSE_BAR) return true
+        return (watermarks.fetchedThrough(code, date) ?: "") >= CLOSE_BAR
     }
 
     private fun coalesced(code: String, deadlineMillis: Long, work: () -> Int): Int {
         val mine = CompletableFuture<Int>()
         val existing = inFlight.putIfAbsent(code, mine)
-        if (existing != null) {
-            return try {
-                existing.get(waitTimeoutMillis, TimeUnit.MILLISECONDS)
-            } catch (e: TimeoutException) {
-                0
-            } catch (e: ExecutionException) {
-                throw e.cause ?: e
-            }
+        if (existing != null) return awaitExisting(existing)
+        return runClaimed(code, deadlineMillis, mine, work)
+    }
+
+    private fun exclusive(code: String, deadlineMillis: Long, work: () -> Int): Int {
+        repeat(MAX_CLAIM_ATTEMPTS) {
+            val mine = CompletableFuture<Int>()
+            val existing = inFlight.putIfAbsent(code, mine)
+            if (existing == null) return runClaimed(code, deadlineMillis, mine, work)
+            runCatching { existing.get(waitTimeoutMillis, TimeUnit.MILLISECONDS) }
         }
+        log.warn("minute candle syncDay could not claim in-flight slot: code={}", code)
+        return 0
+    }
+
+    private fun awaitExisting(existing: CompletableFuture<Int>): Int = try {
+        existing.get(waitTimeoutMillis, TimeUnit.MILLISECONDS)
+    } catch (e: TimeoutException) {
+        0
+    } catch (e: ExecutionException) {
+        throw e.cause ?: e
+    }
+
+    private fun runClaimed(
+        code: String,
+        deadlineMillis: Long,
+        mine: CompletableFuture<Int>,
+        work: () -> Int,
+    ): Int {
         try {
             val synced = withDistributedLock(code, deadlineMillis, work)
             mine.complete(synced)
@@ -82,14 +104,14 @@ class MinuteCandleRefreshService(
         if (!calendar.isTradingDay()) return 0
         val at = now()
         val date = at.toLocalDate().format(DateTimeFormatter.BASIC_ISO_DATE)
-        if (isDayComplete(code, date)) return 0
+        val latest = store.latestTime(code, date)
+        if (isComplete(code, date, latest)) return 0
         if (honorFreshness) {
             val last = lastFetchedAt[code]
             if (last != null && Duration.between(last, at.toInstant()).seconds < freshSeconds) return 0
         }
         val ceiling = minOf(at.toLocalTime().minusMinutes(1), CLOSE_TIME)
         if (at.toLocalTime() < OPEN_TIME || ceiling < OPEN_TIME) return 0
-        val latest = store.latestTime(code, date)
         val gapStart = latest?.let { nextMinute(it) } ?: OPEN_BAR
         if (gapStart > ceiling.format(HHMM)) {
             lastFetchedAt[code] = at.toInstant()
@@ -98,15 +120,23 @@ class MinuteCandleRefreshService(
         val outcome = fetchGapForward(code, date, gapStart, ceiling, deadlineMillis)
         if (outcome.rows.isEmpty()) {
             lastFetchedAt[code] = at.toInstant()
-            if (outcome.reachedCeiling) fetchedThrough[code] = date to ceiling.format(HHMM)
+            if (outcome.reachedCeiling) watermarks.record(code, date, ceiling.format(HHMM))
             return 0
         }
-        val upserted = store.upsert(withMinuteValues(code, date, outcome.rows))
+        val upserted = upsertWithRetry(code, date, outcome.rows)
         lastFetchedAt[code] = at.toInstant()
-        if (outcome.reachedCeiling) fetchedThrough[code] = date to ceiling.format(HHMM)
+        if (outcome.reachedCeiling) watermarks.record(code, date, ceiling.format(HHMM))
         meters.counter("minute.candle.refresh").increment(upserted.toDouble())
         log.info("minute candle refresh: code={} date={} gapStart={} rows={}", code, date, gapStart, upserted)
         return upserted
+    }
+
+    private fun upsertWithRetry(code: String, date: String, rows: List<KisMinuteCandle>): Int = try {
+        store.upsert(withMinuteValues(code, date, rows))
+    } catch (e: Exception) {
+        log.warn("minute candle upsert conflict - 1회 재시도한다: code={} date={}", code, date, e)
+        meters.counter("minute.candle.upsert.retry").increment()
+        store.upsert(withMinuteValues(code, date, rows))
     }
 
     private data class FetchOutcome(val rows: List<KisMinuteCandle>, val reachedCeiling: Boolean)
@@ -127,7 +157,9 @@ class MinuteCandleRefreshService(
                 return FetchOutcome(byTime.values.toList(), reachedCeiling = false)
             }
             val to = minOf(from.plusMinutes(PAGE_SPAN_MINUTES), ceiling)
-            fetcher.fetch(code, to).filter { it.date == date }.forEach { byTime[it.time] = it }
+            fetcher.fetch(code, to)
+                .filter { it.date == date && it.time >= OPEN_BAR && it.time <= CLOSE_BAR }
+                .forEach { byTime[it.time] = it }
             if (to >= ceiling) return FetchOutcome(byTime.values.toList(), reachedCeiling = true)
             from = to.plusMinutes(1)
         }
@@ -168,5 +200,6 @@ class MinuteCandleRefreshService(
         private const val MAX_PAGES = 15
         private const val PAGE_SPAN_MINUTES = 29L
         private const val LOCK_MARGIN_MILLIS = 80_000L
+        private const val MAX_CLAIM_ATTEMPTS = 3
     }
 }

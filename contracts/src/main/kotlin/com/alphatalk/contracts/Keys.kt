@@ -25,5 +25,7 @@ object Keys {
 
     fun kisRestRate(keyId: String) = "rate:kis-rest:$keyId"
 
+    fun minuteRefreshWatermark(code: String, date: String) = "minute:through:$code:$date"
+
     fun badge(userId: Long) = "badge:$userId"
 }
