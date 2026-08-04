@@ -22,4 +22,7 @@ data class PriceProperties(
     val candleEnabled: Boolean = false,
     val candleBackfillDays: Long = 90,
     val candleSyncOnStartup: Boolean = false,
+    val minuteCandleEnabled: Boolean = false,
+    val minuteCandleFreshSec: Long = 60,
+    val minuteCandleRetentionDays: Long = 30,
 )

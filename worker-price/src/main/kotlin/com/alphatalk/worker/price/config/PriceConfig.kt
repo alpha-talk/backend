@@ -12,6 +12,11 @@ import com.alphatalk.worker.price.calendar.MarketCalendar
 import com.alphatalk.worker.price.candle.CandleSyncJob
 import com.alphatalk.worker.price.candle.DailyCandleFetcher
 import com.alphatalk.worker.price.candle.DailyCandleStore
+import com.alphatalk.worker.price.candle.MinuteCandleDailySyncJob
+import com.alphatalk.worker.price.candle.MinuteCandleFetcher
+import com.alphatalk.worker.price.candle.MinuteCandlePurgeJob
+import com.alphatalk.worker.price.candle.MinuteCandleRefreshService
+import com.alphatalk.worker.price.candle.MinuteCandleStore
 import com.alphatalk.worker.price.conflation.ConflationBuffer
 import com.alphatalk.worker.price.demand.DemandSource
 import com.alphatalk.worker.price.demand.FixedDemandSource
@@ -209,6 +214,79 @@ class PriceConfig {
         havingValue = "true",
     )
     fun candleStartupSync(job: CandleSyncJob): ApplicationRunner = ApplicationRunner { job.syncOnce() }
+
+    @Bean
+    @ConditionalOnProperty(
+        name = ["alphatalk.price.enabled", "alphatalk.price.minute-candle-enabled"],
+        havingValue = "true",
+    )
+    fun minuteCandleFetcher(props: PriceProperties, tokens: KisTokenManager): MinuteCandleFetcher {
+        val env = kisEnv(props)
+        val accounts = parseAccounts(props.accountsJson)
+        check(accounts.isNotEmpty()) {
+            "alphatalk.price.minute-candle-enabled=true에는 KIS_ACCOUNTS 계정이 최소 1개 필요하다"
+        }
+        val account = accounts.first()
+        val rest = KisRestClient(
+            env.restBaseUrl,
+            tokens,
+            KisRateLimiters(env.restCallsPerSecond, props.rateFactor),
+        )
+        return MinuteCandleFetcher { code, to -> rest.minuteCandles(account, code, to) }
+    }
+
+    @Bean
+    @ConditionalOnProperty(
+        name = ["alphatalk.price.enabled", "alphatalk.price.minute-candle-enabled"],
+        havingValue = "true",
+    )
+    fun minuteCandleRefreshService(
+        fetcher: MinuteCandleFetcher,
+        store: MinuteCandleStore,
+        calendar: MarketCalendar,
+        props: PriceProperties,
+        meters: MeterRegistry,
+    ): MinuteCandleRefreshService = MinuteCandleRefreshService(
+        fetcher = fetcher,
+        store = store,
+        calendar = calendar,
+        freshSeconds = props.minuteCandleFreshSec,
+        meters = meters,
+    )
+
+    @Bean
+    @ConditionalOnProperty(
+        name = ["alphatalk.price.enabled", "alphatalk.price.minute-candle-enabled"],
+        havingValue = "true",
+    )
+    fun minuteCandleDailySyncJob(
+        demand: DemandSource,
+        store: MinuteCandleStore,
+        service: MinuteCandleRefreshService,
+        calendar: MarketCalendar,
+        leader: LeaderLock,
+    ): MinuteCandleDailySyncJob = MinuteCandleDailySyncJob(
+        symbols = { demand.targetSymbols() },
+        store = store,
+        service = service,
+        calendar = calendar,
+        leader = leader,
+    )
+
+    @Bean
+    @ConditionalOnProperty(
+        name = ["alphatalk.price.enabled", "alphatalk.price.minute-candle-enabled"],
+        havingValue = "true",
+    )
+    fun minuteCandlePurgeJob(
+        store: MinuteCandleStore,
+        leader: LeaderLock,
+        props: PriceProperties,
+    ): MinuteCandlePurgeJob = MinuteCandlePurgeJob(
+        store = store,
+        leader = leader,
+        retentionDays = props.minuteCandleRetentionDays,
+    )
 
     internal fun kisEnv(props: PriceProperties): KisEnv = KisEnv.valueOf(props.env.trim().uppercase())
 
