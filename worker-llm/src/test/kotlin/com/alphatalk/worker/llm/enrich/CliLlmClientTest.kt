@@ -8,6 +8,7 @@ import java.nio.file.Path
 import java.time.Duration
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
@@ -154,6 +155,32 @@ class CliLlmClientTest {
         assertEquals(request.workingDirectory.toString(), request.command[request.command.indexOf("--cd") + 1])
         assertFalse(Files.exists(schemaPath))
         assertFalse(Files.exists(outputPath))
+    }
+
+    @Test
+    fun `CLI 실패 메시지는 진단을 위해 stderr를 함께 싣는다`() {
+        val runner = CliProcessRunner {
+            CliProcessResult(exitCode = 1, stdout = "", stderr = "Usage limit reached. Resets at 6pm.")
+        }
+        val client = ClaudeCliLlmClient(LlmProperties(), runner)
+
+        val e = assertFailsWith<IllegalStateException> { client.summarize(summaryInput()) }
+
+        assertTrue("Usage limit reached" in e.message.orEmpty())
+        assertTrue("종료 코드 1" in e.message.orEmpty())
+    }
+
+    @Test
+    fun `긴 stderr는 끝부분만 남긴다`() {
+        val runner = CliProcessRunner {
+            CliProcessResult(exitCode = 1, stdout = "", stderr = "x".repeat(900) + "REAL-CAUSE")
+        }
+        val client = ClaudeCliLlmClient(LlmProperties(), runner)
+
+        val message = assertFailsWith<IllegalStateException> { client.summarize(summaryInput()) }.message.orEmpty()
+
+        assertTrue("REAL-CAUSE" in message)
+        assertTrue(message.length < 900)
     }
 
     private fun summaryInput() = ClusterSummaryInput(
