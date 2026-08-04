@@ -1,5 +1,6 @@
 package com.alphatalk.worker.price.candle
 
+import com.alphatalk.worker.price.session.BackoffPolicy
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -12,7 +13,7 @@ class MasterCandleUniverseTest {
     ) = MasterCandleUniverse(
         activeCodes = activeCodes,
         fallback = fallback,
-        retryDelayMillis = 0,
+        backoff = BackoffPolicy(initialMillis = 0, maxMillis = 0, jitterRatio = 0.0),
         sleep = {},
     )
 
