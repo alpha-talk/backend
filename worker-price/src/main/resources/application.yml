@@ -42,7 +42,7 @@ alphatalk:
     holidays: []                          # KRX 휴장일(yyyy-MM-dd) — 공지 기준 수동 관리, 주말은 자동 제외 (§2.7)
     poll-interval-ms: 30000               # WS 용량 초과 강등 심볼 REST 폴링 주기 — 하위 60s 확장은 후속 (§2.5)
     poll-budget-factor: 0.5               # 계정 REST 유량 중 폴링에 배정하는 예산 비율 (§2.5)
-    candle-enabled: false                 # 16:30 일봉 upsert — 수요 종목(demand:*:{gwId} 합산) 대상, 전 종목은 stock_master(worker-batch) 확보 후 (§2.6)
+    candle-enabled: false                 # 16:30 일봉 upsert — 실전은 stock_master 전 종목(비면 수요 종목 대체), 모의는 수요 종목 (§2.6)
     candle-backfill-days: 90              # 최초 백필 조회 구간 — 1콜 100봉 한도 안쪽 (§2.6)
 
 management:

@@ -10,8 +10,11 @@ import com.alphatalk.kis.rest.KisRestClient
 import com.alphatalk.kis.ws.KisFrameParser
 import com.alphatalk.worker.price.calendar.MarketCalendar
 import com.alphatalk.worker.price.candle.CandleSyncJob
+import com.alphatalk.worker.price.candle.CandleUniverse
 import com.alphatalk.worker.price.candle.DailyCandleFetcher
 import com.alphatalk.worker.price.candle.DailyCandleStore
+import com.alphatalk.worker.price.candle.MasterCandleUniverse
+import com.alphatalk.worker.price.candle.StockMasterCodeRepository
 import com.alphatalk.worker.price.conflation.ConflationBuffer
 import com.alphatalk.worker.price.demand.DemandSource
 import com.alphatalk.worker.price.demand.RedisDemandSource
@@ -170,8 +173,25 @@ class PriceConfig {
         name = ["alphatalk.price.enabled", "alphatalk.price.candle-enabled"],
         havingValue = "true",
     )
-    fun candleSyncJob(
+    fun candleUniverse(
+        props: PriceProperties,
         demand: DemandSource,
+        masterCodes: StockMasterCodeRepository,
+    ): CandleUniverse = when (kisEnv(props)) {
+        KisEnv.PROD -> MasterCandleUniverse(
+            activeCodes = { masterCodes.findActiveCodes() },
+            fallback = { demand.targetSymbols() },
+        )
+        KisEnv.VTS -> CandleUniverse { demand.targetSymbols() }
+    }
+
+    @Bean
+    @ConditionalOnProperty(
+        name = ["alphatalk.price.enabled", "alphatalk.price.candle-enabled"],
+        havingValue = "true",
+    )
+    fun candleSyncJob(
+        universe: CandleUniverse,
         fetcher: DailyCandleFetcher,
         store: DailyCandleStore,
         calendar: MarketCalendar,
@@ -179,7 +199,7 @@ class PriceConfig {
         meters: MeterRegistry,
         props: PriceProperties,
     ): CandleSyncJob = CandleSyncJob(
-        symbols = { demand.targetSymbols() },
+        symbols = { universe.symbols() },
         fetcher = fetcher,
         store = store,
         backfillDays = props.candleBackfillDays,
