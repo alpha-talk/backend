@@ -120,7 +120,17 @@ class MinuteCandleRefreshService(
         val outcome = fetchGapForward(code, date, gapStart, ceiling, deadlineMillis)
         if (outcome.rows.isEmpty()) {
             lastFetchedAt[code] = at.toInstant()
-            if (outcome.reachedCeiling) watermarks.record(code, date, ceiling.format(HHMM))
+            if (outcome.reachedCeiling) {
+                log.warn(
+                    "minute candle refresh: 조회 구간에 봉이 없어 빈 채로 완주 기록한다 - code={} date={} gapStart={} ceiling={}",
+                    code,
+                    date,
+                    gapStart,
+                    ceiling.format(HHMM),
+                )
+                meters.counter("minute.candle.empty.complete").increment()
+                watermarks.record(code, date, ceiling.format(HHMM))
+            }
             return 0
         }
         val upserted = upsertWithRetry(code, date, outcome.rows)
@@ -172,6 +182,17 @@ class MinuteCandleRefreshService(
         val asc = fetched.sortedBy { it.time }
         var prevAcc = store.sumValueBefore(code, date, asc.first().time)
         return asc.map { candle ->
+            if (candle.accValue < prevAcc) {
+                log.warn(
+                    "minute candle 누적 거래대금이 역행했다 - 시장 구분 전환·재적재 의심: code={} date={} time={} acc={} prevAcc={}",
+                    code,
+                    date,
+                    candle.time,
+                    candle.accValue,
+                    prevAcc,
+                )
+                meters.counter("minute.candle.value.regressed").increment()
+            }
             val value = (candle.accValue - prevAcc).coerceAtLeast(0)
             prevAcc = candle.accValue
             MinuteCandle(

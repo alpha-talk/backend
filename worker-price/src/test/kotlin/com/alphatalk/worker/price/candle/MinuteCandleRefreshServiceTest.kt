@@ -363,6 +363,56 @@ class MinuteCandleRefreshServiceTest {
     }
 
     @Test
+    fun `누적 거래대금이 역행하면 계측에 남기고 0으로 막는다`() {
+        val store = InMemoryMinuteStore()
+        store.upsert(
+            (0..29).map { offset ->
+                val time = LocalTime.of(8, 0).plusMinutes(offset.toLong())
+                MinuteCandle("005930", "20260804", time.format(hhmm), 1, 1, 1, 1, 1, 1_000_000)
+            },
+        )
+        val meters = SimpleMeterRegistry()
+        val fetcher = PagingFetcher(accPerMinute = 100)
+        val service = MinuteCandleRefreshService(
+            fetcher = fetcher,
+            store = store,
+            calendar = calendar(),
+            refreshLock = FakeRefreshLock(),
+            watermarks = InMemoryWatermarks(),
+            freshSeconds = 60,
+            meters = meters,
+            now = { tradingNow },
+        )
+
+        service.refresh("005930")
+
+        assertTrue(meters.counter("minute.candle.value.regressed").count() > 0)
+        assertEquals(0, store.rows.getValue(Triple("005930", "20260804", "0830")).value)
+    }
+
+    @Test
+    fun `봉이 하나도 없는 완주는 계측에 남는다`() {
+        val store = InMemoryMinuteStore()
+        val meters = SimpleMeterRegistry()
+        val emptyFetcher = MinuteCandleFetcher { _, _ -> emptyList() }
+        val service = MinuteCandleRefreshService(
+            fetcher = emptyFetcher,
+            store = store,
+            calendar = calendar(ZonedDateTime.of(2026, 8, 4, 20, 1, 0, 0, seoul)),
+            refreshLock = FakeRefreshLock(),
+            watermarks = InMemoryWatermarks(),
+            freshSeconds = 60,
+            meters = meters,
+            now = { ZonedDateTime.of(2026, 8, 4, 20, 1, 0, 0, seoul) },
+        )
+
+        assertEquals(0, service.syncDay("005930"))
+
+        assertEquals(1.0, meters.counter("minute.candle.empty.complete").count())
+        assertTrue(service.isDayComplete("005930", "20260804"))
+    }
+
+    @Test
     fun `장 마감 뒤 콜드 조회는 25콜 이내로 08시부터 20시까지 채우고 완주한다`() {
         val store = InMemoryMinuteStore()
         val fetcher = PagingFetcher()

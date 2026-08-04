@@ -103,7 +103,7 @@ class KisRestClient(
         account: KisAccount,
         code: String,
         toTime: LocalTime,
-        marketDiv: String = MARKET_DIV_KRX,
+        marketDiv: String,
     ): List<KisMinuteCandle> {
         val json = getJson(
             account,
