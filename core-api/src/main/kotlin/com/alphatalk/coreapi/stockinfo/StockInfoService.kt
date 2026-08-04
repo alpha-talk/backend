@@ -3,6 +3,7 @@ package com.alphatalk.coreapi.stockinfo
 import com.alphatalk.coreapi.support.ApiException
 import com.alphatalk.coreapi.support.ErrorCode
 import org.springframework.stereotype.Service
+import java.time.LocalDate
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 
@@ -65,7 +66,10 @@ class StockInfoService(
         val count = validCount(rawCount)
         val to = validMinuteTo(rawTo)
         requireActive(code)
-        runCatching { minuteRefresher.refresh(code) }
+        val today = LocalDate.now(SEOUL).format(DATE_FORMAT)
+        if (to == null || to.first >= today) {
+            runCatching { minuteRefresher.refresh(code) }
+        }
         val fetchLimit = MinuteCandleAggregator.fetchLimit(period, count)
         val rows = minuteCandles.findLatestUpTo(code, to?.first, to?.second, fetchLimit)
         val window = MinuteCandleAggregator.aggregate(rows, period, count, fetchLimit)
