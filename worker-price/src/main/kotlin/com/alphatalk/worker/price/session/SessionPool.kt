@@ -2,7 +2,6 @@ package com.alphatalk.worker.price.session
 
 import com.alphatalk.kis.model.KisAccount
 import com.alphatalk.kis.model.KisLimits
-import com.alphatalk.kis.ws.KisFrameParser
 import com.alphatalk.kis.ws.KisSessionListener
 import com.alphatalk.kis.ws.KisTick
 import com.alphatalk.kis.ws.KisWebSocketSession
@@ -20,7 +19,7 @@ class SessionPool(
     private val approvalKeys: (KisAccount) -> String,
     private val buffer: ConflationBuffer,
     private val meters: MeterRegistry,
-    private val tickTrIds: List<String> = listOf(KisFrameParser.TR_ID_TICK),
+    private val tickTrIds: List<String>,
     maxRegistrationsPerSession: Int = KisLimits.MAX_REGISTRATIONS_PER_SESSION,
     private val removalGraceMillis: Long = 30_000,
     private val backoff: BackoffPolicy = BackoffPolicy(),

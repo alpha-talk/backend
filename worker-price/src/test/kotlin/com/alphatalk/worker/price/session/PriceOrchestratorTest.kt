@@ -4,6 +4,7 @@ import com.alphatalk.kis.model.KisAccount
 import com.alphatalk.kis.test.FakeKisServer
 import com.alphatalk.worker.price.calendar.MarketCalendar
 import com.alphatalk.worker.price.conflation.ConflationBuffer
+import com.alphatalk.worker.price.config.PriceConfig
 import com.alphatalk.worker.price.demand.DemandSource
 import com.alphatalk.worker.price.leader.LeaderLock
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
@@ -38,6 +39,7 @@ class PriceOrchestratorTest {
         approvalKeys = { "AK" },
         buffer = ConflationBuffer(),
         meters = SimpleMeterRegistry(),
+        tickTrIds = PriceConfig.TICK_TR_IDS,
         backoff = BackoffPolicy(initialMillis = 50, jitterRatio = 0.0),
     )
 
