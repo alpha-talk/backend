@@ -25,13 +25,23 @@ class MinuteCandleRefreshService(
     private val meters: MeterRegistry,
     private val waitTimeoutMillis: Long = 2_000,
     private val fetchDeadlineMillis: Long = 10_000,
+    private val dailySyncDeadlineMillis: Long = 120_000,
     private val now: () -> ZonedDateTime = { ZonedDateTime.now(SEOUL) },
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
     private val inFlight = ConcurrentHashMap<String, CompletableFuture<Int>>()
     private val lastFetchedAt = ConcurrentHashMap<String, Instant>()
 
-    fun refresh(code: String): Int {
+    fun refresh(code: String): Int =
+        coalesced(code, fetchDeadlineMillis) { doRefresh(code, fetchDeadlineMillis, honorFreshness = true) }
+
+    fun syncDay(code: String): Int =
+        coalesced(code, dailySyncDeadlineMillis) { doRefresh(code, dailySyncDeadlineMillis, honorFreshness = false) }
+
+    fun isDayComplete(code: String, date: String): Boolean =
+        (store.latestTime(code, date) ?: "") >= CLOSE_BAR
+
+    private fun coalesced(code: String, deadlineMillis: Long, work: () -> Int): Int {
         val mine = CompletableFuture<Int>()
         val existing = inFlight.putIfAbsent(code, mine)
         if (existing != null) {
@@ -44,7 +54,7 @@ class MinuteCandleRefreshService(
             }
         }
         try {
-            val synced = withDistributedLock(code)
+            val synced = withDistributedLock(code, deadlineMillis, work)
             mine.complete(synced)
             return synced
         } catch (t: Throwable) {
@@ -55,23 +65,25 @@ class MinuteCandleRefreshService(
         }
     }
 
-    private fun withDistributedLock(code: String): Int {
-        if (!refreshLock.tryAcquire(code, Duration.ofMillis(fetchDeadlineMillis + LOCK_MARGIN_MILLIS))) return 0
+    private fun withDistributedLock(code: String, deadlineMillis: Long, work: () -> Int): Int {
+        if (!refreshLock.tryAcquire(code, Duration.ofMillis(deadlineMillis + LOCK_MARGIN_MILLIS))) return 0
         return try {
-            doRefresh(code)
+            work()
         } finally {
             refreshLock.release(code)
         }
     }
 
-    private fun doRefresh(code: String): Int {
+    private fun doRefresh(code: String, deadlineMillis: Long, honorFreshness: Boolean): Int {
         if (!calendar.isTradingDay()) return 0
         val at = now()
         val date = at.toLocalDate().format(DateTimeFormatter.BASIC_ISO_DATE)
         val latest = store.latestTime(code, date)
         if (latest != null && latest >= CLOSE_BAR) return 0
-        val last = lastFetchedAt[code]
-        if (last != null && Duration.between(last, at.toInstant()).seconds < freshSeconds) return 0
+        if (honorFreshness) {
+            val last = lastFetchedAt[code]
+            if (last != null && Duration.between(last, at.toInstant()).seconds < freshSeconds) return 0
+        }
         val ceiling = minOf(at.toLocalTime().minusMinutes(1), CLOSE_TIME)
         if (at.toLocalTime() < OPEN_TIME || ceiling < OPEN_TIME) return 0
         val gapStart = latest?.let { nextMinute(it) } ?: OPEN_BAR
@@ -79,7 +91,7 @@ class MinuteCandleRefreshService(
             lastFetchedAt[code] = at.toInstant()
             return 0
         }
-        val fetched = fetchGapForward(code, date, gapStart, ceiling)
+        val fetched = fetchGapForward(code, date, gapStart, ceiling, deadlineMillis)
         if (fetched.isEmpty()) {
             lastFetchedAt[code] = at.toInstant()
             return 0
@@ -91,12 +103,18 @@ class MinuteCandleRefreshService(
         return upserted
     }
 
-    private fun fetchGapForward(code: String, date: String, gapStart: String, ceiling: LocalTime): List<KisMinuteCandle> {
+    private fun fetchGapForward(
+        code: String,
+        date: String,
+        gapStart: String,
+        ceiling: LocalTime,
+        deadlineMillis: Long,
+    ): List<KisMinuteCandle> {
         val byTime = sortedMapOf<String, KisMinuteCandle>()
         val startedAt = System.nanoTime()
         var from = LocalTime.parse(gapStart, HHMM)
         repeat(MAX_PAGES) { page ->
-            if (page > 0 && elapsedMillis(startedAt) >= fetchDeadlineMillis) {
+            if (page > 0 && elapsedMillis(startedAt) >= deadlineMillis) {
                 log.warn("minute candle fetch deadline: code={} gapStart={} fetched={}", code, gapStart, byTime.size)
                 return byTime.values.toList()
             }

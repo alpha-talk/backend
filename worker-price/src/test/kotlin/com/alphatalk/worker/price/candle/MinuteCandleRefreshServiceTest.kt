@@ -294,6 +294,31 @@ class MinuteCandleRefreshServiceTest {
     }
 
     @Test
+    fun `syncDay는 신선 임계를 무시하고 조회 데드라인보다 긴 예산으로 완주한다`() {
+        val store = InMemoryMinuteStore()
+        val fetcher = PagingFetcher()
+        val service = MinuteCandleRefreshService(
+            fetcher = fetcher,
+            store = store,
+            calendar = calendar(),
+            refreshLock = FakeRefreshLock(),
+            freshSeconds = 60,
+            meters = SimpleMeterRegistry(),
+            fetchDeadlineMillis = 0,
+            dailySyncDeadlineMillis = 120_000,
+            now = { tradingNow },
+        )
+
+        assertEquals(30, service.refresh("005930"))
+        assertEquals("0929", store.latestTime("005930", "20260804"))
+
+        val synced = service.syncDay("005930")
+
+        assertEquals("1303", store.latestTime("005930", "20260804"))
+        assertEquals(214, synced)
+    }
+
+    @Test
     fun `실패한 요청 뒤의 재요청은 다시 조회한다`() {
         val store = InMemoryMinuteStore()
         val calls = AtomicInteger()

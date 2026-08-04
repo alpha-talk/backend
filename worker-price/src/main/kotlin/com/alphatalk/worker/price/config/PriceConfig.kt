@@ -160,7 +160,11 @@ class PriceConfig {
     @Bean
     @ConditionalOnProperty("alphatalk.price.enabled", havingValue = "true")
     fun candleRestLimiters(props: PriceProperties): KisRateLimiters =
-        KisRateLimiters(kisEnv(props).restCallsPerSecond, props.rateFactor, CANDLE_ACQUIRE_TIMEOUT)
+        KisRateLimiters(
+            kisEnv(props).restCallsPerSecond,
+            props.rateFactor * (1 - props.pollBudgetFactor),
+            CANDLE_ACQUIRE_TIMEOUT,
+        )
 
     @Bean
     @ConditionalOnProperty(

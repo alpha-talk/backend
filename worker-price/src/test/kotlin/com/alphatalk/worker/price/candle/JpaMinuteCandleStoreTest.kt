@@ -14,7 +14,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNull
 
-@DataJpaTest(properties = ["spring.liquibase.change-log=classpath:db/changelog/price/db.changelog-price.yaml"])
+@DataJpaTest(properties = ["spring.liquibase.change-log=classpath:db/changelog/db.changelog-worker-price-test.yaml"])
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
 @Import(JpaMinuteCandleStore::class)
 @Testcontainers(disabledWithoutDocker = true)
