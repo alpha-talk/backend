@@ -1,5 +1,7 @@
-# Alpha Talk — core-api REST API 명세 v0.1
+# Alpha Talk — core-api REST API 명세 v0.2
 **메인서버(core-api) · 동기 API 전용 · 담당: 민균**
+
+> **v0.2 (2026-08-04)**: 차트 분봉 조회 추가(§8) — `period`에 `1m|5m|15m|30m|60m` 확장, 원본은 1분봉(`minute_candle`, KIS 워커 명세 v0.3 §2.6)이고 상위 분 단위는 조회 시 파생.
 
 클라이언트가 메인서버(core-api)를 호출할 때 따르는 REST 계약이다. core-api를 구현하거나 클라이언트에서 이 API를 붙일 때 기준으로 삼는다. 실시간 푸시(STOMP) 프로토콜은 WS 명세(ws_api_spec.md), 서비스 간 Redis 계약은 redis_contract.md가 다룬다. 이 문서는 동기 REST만 정의한다.
 
@@ -305,7 +307,7 @@ ULID 사전순이 곧 시간순이라는 성질을 이용한 **양방향 커서*
 | 메서드 | 경로 | 원천 (워커) | 설명 |
 |---|---|---|---|
 | GET | `/stocks/{code}` | batch: `stock_master` | 종목 개요 |
-| GET | `/stocks/{code}/candles` | price/batch: `daily_candle` | OHLCV (FR-15) |
+| GET | `/stocks/{code}/candles` | price/batch: `daily_candle`·`minute_candle` | OHLCV (FR-15) |
 | GET | `/stocks/{code}/valuation` | batch: `valuation_daily` | PER·PBR 등 (FR-14) |
 | GET | `/stocks/{code}/financials` | batch(OpenDART): `financial_summary` | 재무 요약 |
 | GET | `/stocks/{code}/investors` | batch: `investor_flow_daily` | 수급 |
@@ -314,7 +316,7 @@ ULID 사전순이 곧 시간순이라는 성질을 이용한 **양방향 커서*
 
 - `sector`는 `sector` 테이블을 조인한 업종 **이름**(미분류면 null), `listedAt`은 `yyyyMMdd` 문자열(null 허용), `updatedAt`은 epoch ms. 상장폐지(`is_active=false`)·미존재 종목은 이 모듈 전 엔드포인트에서 404.
 
-**GET /stocks/{code}/candles?period=D|W|M&count=100&to=20260707** → 200
+**GET /stocks/{code}/candles?period=D|W|M|1m|5m|15m|30m|60m&count=100&to=20260707** → 200
 
 ```json
 { "period": "D", "items": [ { "date": "20260707", "open": 70600, "high": 71500, "low": 70400,
@@ -326,6 +328,12 @@ ULID 사전순이 곧 시간순이라는 성질을 이용한 **양방향 커서*
 - 미적재 과거 구간은 있는 만큼 반환하고 `hasMoreBefore:false`를 준다(백필은 batch 잡).
 - `W`/`M` 버킷의 `date`는 버킷 안 **마지막 거래일**이고 `value`도 합산한다. `count` 기본 100·최대 500. 집계용 일봉 조회는 `count × 버킷당 최대 일수(주 7·월 31)+1`로 상한을 고정하고, 상한에 걸려 잘렸을 수 있는 가장 오래된 버킷은 버린 뒤 `hasMoreBefore:true`로 알린다 — 부분 버킷을 완전한 봉처럼 주지 않기 위해서다.
 - **과거 페이지 커서는 `pageInfo.nextTo`다**: `hasMoreBefore=true`면 다음 페이지를 `to=nextTo`로 요청한다. `nextTo`는 가장 오래된 버킷의 **시작일 하루 전**(주=ISO주 월요일−1, 월=1일−1, 일=당일−1)이라 같은 버킷이 다음 페이지에서 부분 재집계되지 않는다. 클라가 `date`(마지막 거래일)−1로 직접 계산하면 W/M에서 같은 주·월이 중복되므로 반드시 `nextTo`를 쓴다. `hasMoreBefore=false`면 `nextTo`는 null.
+- **분봉**: `period=1m|5m|15m|30m|60m`. 저장은 **1분봉만**(`minute_candle` — 원시가, 보존 30 달력일, 하루 최대 721봉(08:00~20:00 양끝 포함), 조회·수요된 종목만 쌓임. 워커 명세 v0.3 §2.6) 하고 상위 분 단위는 조회 시 1분봉을 집계한다(D→W/M과 같은 사다리, open/close/high/low/volume/value 규칙 동일). 버킷은 **08:00 기준 고정 그리드**고 일 경계를 넘지 않는다. 수집 창이 **08:00–20:00**(NXT 프리 · KRX/NXT 메인 · NXT 애프터 · KRX 시간외 — 워커 명세 §2.6·§2.7)이라 그리드도 08:00에서 시작하며, 09:00 정규장 시작은 5/15/30/60분 모든 단위에서 버킷 경계에 정렬된다. 세션 사이 공백(08:50–09:00 등)은 봉이 없어 버킷도 생기지 않는다 — 차트는 거래가 있었던 구간만 이어 그린다. 20:00 마감 행은 5분 이상 단위에서 그날 마지막 그리드 버킷에 합산되고, `1m`에서는 독립 봉이다. items에 `"time": "HHmm"`(버킷 시작 시각)이 추가되고 `date`는 해당 거래일이다. D/W/M 응답에는 `time`이 없다.
+- **오늘 구간의 신선화**: 분봉 조회는 테이블을 읽기 전에 worker-price의 내부 신선화 API를 호출한다(워커 명세 §2.6 — 멱등 트리거, 응답에 데이터 없음). 완료 또는 **타임아웃**(연결 0.5s + 응답 1.0s) 후 `minute_candle`을 읽는다. 같은 종목의 동시 조회는 트리거를 하나로 합치고, 최근 1초 안에 이미 트리거했으면 건너뛴다 — 워커의 60s 신선 임계 안에서 무의미한 왕복으로 요청 스레드를 점유하지 않는다 — 타임아웃·워커 다운이면 저장분만 반환한다(stale-while-revalidate, 클라 재조회로 수렴). 이 엔드포인트의 분봉 조회는 신선화 대기 때문에 p95 300ms(NFR-02)의 **명시 예외**다(상한은 트리거 타임아웃 1.5s + 조회). 데이터는 언제나 테이블에서만 읽는다 — core-api가 KIS를 직접 호출하지 않는다.
+- 분봉의 `to`·`pageInfo.nextTo`는 `yyyyMMddHHmm`이다. `nextTo`는 가장 오래된 버킷 **시작 1분 전**. 집계용 1분봉 조회 상한과 잘렸을 수 있는 가장 오래된 버킷 폐기 규칙은 W/M과 동일하다(버킷당 최대 1분봉 수 = 단위 분수). `count` 기본 100·최대 500도 동일.
+- 분봉 데이터가 없는 구간(수집 시작 전·보존 30일 초과·모의 환경의 과거 일자)은 있는 만큼 반환하고 `hasMoreBefore:false`를 준다. 과거 구간은 일 배치가 확정한 날부터 쌓이고, 콜드 종목 7영업일 백필은 후속 구현이다(워커 명세 §2.6·§9.9) — 첫 조회 직후 과거 구간이 비어 있는 것은 오류가 아니며, 당일 구간은 재조회에서 채워진다.
+- 분봉은 **원시가**라 액면분할 등의 직후 일봉(수정주가)과 어긋날 수 있다. 워커가 감지 시 해당 종목 분봉을 삭제·재백필한다(워커 명세 §2.6) — API는 그 사이의 불일치를 보정하지 않는다.
+- 진행 중인 현재 분봉은 서버가 만들지 않는다 — 클라가 `/rooms/{code}/quote` 스냅샷과 WS `quote` 라이브를 마지막 봉 위에 얹는다(§5 quote와 동일 모델). 확정 분봉의 지연 상한은 신선화 임계 60s다. 장외 세션(08:00–08:50 · 15:30–20:00)에도 봉이 쌓이므로 시세 핀과 차트가 같은 구간을 가리킨다.
 
 **GET /stocks/{code}/valuation** → `{ "per": 12.3, "pbr": 1.1, "eps": 5800, "bps": 65000, "marketCap": 4250000, "asOf": "20260706" }` (marketCap 단위 억원 — 프론트 합의)
 
@@ -401,4 +409,4 @@ idempotency_record(user_id, idem_key CHAR(26), action, response JSONB NULL, crea
 
 ---
 
-*core-api REST API 명세 v0.1 — WS 명세 v0.3·Redis 계약 v0.1과 정합. 봉투/채널 문자열은 `:contracts`가 원천.*
+*core-api REST API 명세 v0.2 — WS 명세 v0.3·Redis 계약 v0.1·KIS 워커 명세 v0.3과 정합. 봉투/채널 문자열은 `:contracts`가 원천.*
