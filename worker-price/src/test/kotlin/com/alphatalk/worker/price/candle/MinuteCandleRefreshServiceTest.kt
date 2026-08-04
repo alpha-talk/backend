@@ -15,6 +15,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class MinuteCandleRefreshServiceTest {
@@ -49,18 +50,18 @@ class MinuteCandleRefreshServiceTest {
     private inner class PagingFetcher(
         private val date: String = "20260804",
         private val accPerMinute: Long = 100,
+        private val firstBar: LocalTime = LocalTime.of(9, 0),
     ) : MinuteCandleFetcher {
         val calls = AtomicInteger()
 
         override fun fetch(code: String, to: LocalTime): List<KisMinuteCandle> {
             calls.incrementAndGet()
-            val open = LocalTime.of(9, 0)
             val end = to.withSecond(0).withNano(0)
             return generateSequence(end) { it.minusMinutes(1) }
-                .takeWhile { it >= open }
+                .takeWhile { it >= firstBar }
                 .take(30)
                 .map { time ->
-                    val minutesFromOpen = (time.toSecondOfDay() - open.toSecondOfDay()) / 60 + 1
+                    val barIndex = (time.toSecondOfDay() - firstBar.toSecondOfDay()) / 60 + 1
                     KisMinuteCandle(
                         code = code,
                         date = date,
@@ -70,7 +71,7 @@ class MinuteCandleRefreshServiceTest {
                         low = 229500,
                         close = 230200,
                         volume = 1000,
-                        accValue = minutesFromOpen * accPerMinute,
+                        accValue = barIndex * accPerMinute,
                     )
                 }
                 .toList()
@@ -160,7 +161,7 @@ class MinuteCandleRefreshServiceTest {
     }
 
     @Test
-    fun `저장된 마지막 분 이후 공백만큼만 역방향 페이징한다`() {
+    fun `저장된 마지막 분 다음부터 완결 분까지 전방 페이징한다`() {
         val store = InMemoryMinuteStore()
         store.upsert(
             (0..180).map { offset ->
@@ -174,7 +175,7 @@ class MinuteCandleRefreshServiceTest {
         service.refresh("005930")
 
         assertEquals(3, fetcher.calls.get())
-        assertEquals("1304", store.latestTime("005930", "20260804"))
+        assertEquals("1303", store.latestTime("005930", "20260804"))
     }
 
     @Test
@@ -185,10 +186,24 @@ class MinuteCandleRefreshServiceTest {
 
         service.refresh("005930")
 
-        val bar0930 = store.rows.getValue(Triple("005930", "20260804", "0930"))
-        assertEquals(100, bar0930.value)
+        val bar0929 = store.rows.getValue(Triple("005930", "20260804", "0929"))
+        assertEquals(100, bar0929.value)
         val bar0900 = store.rows.getValue(Triple("005930", "20260804", "0900"))
         assertEquals(100, bar0900.value)
+        assertNull(store.rows[Triple("005930", "20260804", "0930")])
+    }
+
+    @Test
+    fun `거래 재개가 늦은 종목은 빈 창을 건너뛰며 앞으로 나아간다`() {
+        val store = InMemoryMinuteStore()
+        val fetcher = PagingFetcher(firstBar = LocalTime.of(11, 0))
+        val service = service(fetcher, store, at = ZonedDateTime.of(2026, 8, 4, 11, 35, 30, 0, seoul))
+
+        val synced = service.refresh("005930")
+
+        assertEquals(35, synced)
+        assertEquals("1134", store.latestTime("005930", "20260804"))
+        assertEquals(100, store.rows.getValue(Triple("005930", "20260804", "1100")).value)
     }
 
     @Test
@@ -258,7 +273,7 @@ class MinuteCandleRefreshServiceTest {
     }
 
     @Test
-    fun `페치 데드라인이 지나면 페이징을 멈추고 채운 만큼만 적재한다`() {
+    fun `페치 데드라인이 지나도 저장분과 연속된 구간만 적재해 중간 공백이 생기지 않는다`() {
         val store = InMemoryMinuteStore()
         store.upsert(
             (0..180).map { offset ->
@@ -267,13 +282,15 @@ class MinuteCandleRefreshServiceTest {
             },
         )
         val fetcher = PagingFetcher()
-        val service = service(fetcher, store, fetchDeadlineMillis = 0)
+        val service = service(fetcher, store, fetchDeadlineMillis = 0, freshSeconds = 0)
 
-        val synced = service.refresh("005930")
-
+        assertEquals(30, service.refresh("005930"))
         assertEquals(1, fetcher.calls.get())
-        assertEquals(30, synced)
-        assertEquals("1304", store.latestTime("005930", "20260804"))
+        assertEquals("1230", store.latestTime("005930", "20260804"))
+
+        assertEquals(30, service.refresh("005930"))
+        assertEquals("1300", store.latestTime("005930", "20260804"))
+        assertEquals(181 + 60, store.rows.size)
     }
 
     @Test
