@@ -40,8 +40,8 @@ class MinuteCandleRefreshServiceTest {
         override fun codesOn(date: String): Set<String> =
             rows.keys.filter { it.second == date }.map { it.first }.toSet()
 
-        override fun purgeBefore(dateExclusive: String): Int {
-            val victims = rows.keys.filter { it.second < dateExclusive }
+        override fun purgeBatchBefore(dateExclusive: String, batchSize: Int): Int {
+            val victims = rows.keys.filter { it.second < dateExclusive }.take(batchSize)
             victims.forEach(rows::remove)
             return victims.size
         }
@@ -79,6 +79,16 @@ class MinuteCandleRefreshServiceTest {
         }
     }
 
+    private class InMemoryWatermarks : MinuteRefreshWatermarkStore {
+        private val marks = ConcurrentHashMap<String, String>()
+
+        override fun fetchedThrough(code: String, date: String): String? = marks["$code:$date"]
+
+        override fun record(code: String, date: String, time: String) {
+            marks.merge("$code:$date", time) { old, new -> maxOf(old, new) }
+        }
+    }
+
     private class FakeRefreshLock(private val acquirable: Boolean = true) : MinuteRefreshLock {
         val acquired = AtomicInteger()
         val released = AtomicInteger()
@@ -104,11 +114,13 @@ class MinuteCandleRefreshServiceTest {
         waitTimeoutMillis: Long = 2_000,
         fetchDeadlineMillis: Long = 10_000,
         lock: MinuteRefreshLock = FakeRefreshLock(),
+        watermarks: MinuteRefreshWatermarkStore = InMemoryWatermarks(),
     ) = MinuteCandleRefreshService(
         fetcher = fetcher,
         store = store,
         calendar = calendar(at),
         refreshLock = lock,
+        watermarks = watermarks,
         freshSeconds = freshSeconds,
         meters = SimpleMeterRegistry(),
         waitTimeoutMillis = waitTimeoutMillis,
@@ -303,6 +315,7 @@ class MinuteCandleRefreshServiceTest {
             store = store,
             calendar = calendar(),
             refreshLock = FakeRefreshLock(),
+            watermarks = InMemoryWatermarks(),
             freshSeconds = 60,
             meters = SimpleMeterRegistry(),
             fetchDeadlineMillis = 0,
@@ -347,6 +360,63 @@ class MinuteCandleRefreshServiceTest {
 
         assertEquals("0929", store.latestTime("005930", "20260804"))
         assertEquals(false, service.isDayComplete("005930", "20260804"))
+    }
+
+    @Test
+    fun `워터마크는 인스턴스 간에 공유되어 다른 인스턴스도 완주로 본다`() {
+        val store = InMemoryMinuteStore()
+        val shared = InMemoryWatermarks()
+        val afterClose = ZonedDateTime.of(2026, 8, 4, 16, 10, 0, 0, seoul)
+        val instanceA = service(PagingFetcher(lastBar = LocalTime.of(14, 0)), store, at = afterClose, watermarks = shared)
+        val fetcherB = PagingFetcher(lastBar = LocalTime.of(14, 0))
+        val instanceB = service(fetcherB, store, at = afterClose, watermarks = shared)
+
+        instanceA.syncDay("005930")
+
+        assertTrue(instanceB.isDayComplete("005930", "20260804"))
+        assertEquals(0, instanceB.syncDay("005930"))
+        assertEquals(0, fetcherB.calls.get())
+    }
+
+    @Test
+    fun `syncDay는 진행 중인 refresh 결과를 자기 결과로 가로채지 않는다`() {
+        val store = InMemoryMinuteStore()
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val fetcher = MinuteCandleFetcher { code, to ->
+            entered.countDown()
+            release.await(5, TimeUnit.SECONDS)
+            PagingFetcher().fetch(code, to)
+        }
+        val service = service(fetcher, store, waitTimeoutMillis = 200)
+        val pool = Executors.newFixedThreadPool(2)
+        try {
+            val refreshing = pool.submit<Int> { service.refresh("005930") }
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            val syncing = pool.submit<Int> { service.syncDay("005930") }
+            Thread.sleep(100)
+            release.countDown()
+
+            val refreshed = refreshing.get(5, TimeUnit.SECONDS)
+            val synced = syncing.get(5, TimeUnit.SECONDS)
+
+            assertTrue(refreshed > 0)
+            assertEquals(0, synced)
+        } finally {
+            pool.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `개장 전 시간외 봉이 섞여 와도 저장하지 않는다`() {
+        val store = InMemoryMinuteStore()
+        val fetcher = PagingFetcher(firstBar = LocalTime.of(8, 30))
+        val service = service(fetcher, store, at = ZonedDateTime.of(2026, 8, 4, 9, 20, 30, 0, seoul))
+
+        service.refresh("005930")
+
+        assertTrue(store.rows.keys.all { it.third >= "0900" })
+        assertEquals("0900", store.rows.keys.minOf { it.third })
     }
 
     @Test
