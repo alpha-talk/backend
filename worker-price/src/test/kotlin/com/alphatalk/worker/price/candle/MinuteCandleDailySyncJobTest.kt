@@ -11,10 +11,9 @@ import kotlin.test.assertTrue
 class MinuteCandleDailySyncJobTest {
     private val date = "20260804"
 
-    private class StubMinuteStore(
-        private val latestByCode: MutableMap<String, String> = ConcurrentHashMap(),
-        private val codes: Set<String> = emptySet(),
-    ) : MinuteCandleStore {
+    private class StubMinuteStore : MinuteCandleStore {
+        private val latestByCode: MutableMap<String, String> = ConcurrentHashMap()
+
         fun setLatest(code: String, time: String) {
             latestByCode[code] = time
         }
@@ -22,8 +21,8 @@ class MinuteCandleDailySyncJobTest {
         override fun upsert(candles: List<MinuteCandle>): Int = candles.size
         override fun latestTime(code: String, date: String): String? = latestByCode[code]
         override fun sumValueBefore(code: String, date: String, timeExclusive: String): Long = 0
-        override fun codesOn(date: String): Set<String> = codes
-        override fun purgeBefore(dateExclusive: String): Int = 0
+        override fun codesOn(date: String): Set<String> = latestByCode.keys.toSet()
+        override fun purgeBatchBefore(dateExclusive: String, batchSize: Int): Int = 0
     }
 
     private class AlwaysLeader : LeaderLock {
@@ -142,5 +141,26 @@ class MinuteCandleDailySyncJobTest {
         assertEquals(3, calls.size)
         job.retryUnfinished()
         assertEquals(4, calls.size)
+    }
+
+    @Test
+    fun `정기 회차 뒤 새로 조회된 미완주 종목도 재시도 회차가 잡는다`() {
+        val store = StubMinuteStore()
+        val calls = mutableListOf<String>()
+        val job = job(store, emptySet()) { code ->
+            calls += code
+            store.setLatest(code, "1530")
+            120
+        }
+
+        job.syncDaily()
+        assertEquals(0, calls.size)
+
+        store.setLatest("000660", "1230")
+
+        job.retryUnfinished()
+
+        assertEquals(listOf("000660"), calls)
+        assertEquals("1530", store.latestTime("000660", date))
     }
 }
