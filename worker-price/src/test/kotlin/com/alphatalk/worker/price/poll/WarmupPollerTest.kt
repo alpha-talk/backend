@@ -3,7 +3,7 @@ package com.alphatalk.worker.price.poll
 import com.alphatalk.contracts.envelope.QuoteData
 import com.alphatalk.kis.rest.KisQuoteSnapshot
 import com.alphatalk.worker.price.calendar.MarketCalendar
-import com.alphatalk.worker.price.demand.FixedDemandSource
+import com.alphatalk.worker.price.demand.DemandSource
 import com.alphatalk.worker.price.leader.LeaderLock
 import com.alphatalk.worker.price.publish.QuotePublisher
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
@@ -30,7 +30,7 @@ class WarmupPollerTest {
             leader = leader,
             meters = SimpleMeterRegistry(),
         )
-        return WarmupPoller(FixedDemandSource(listOf("005930", "000660")), scheduler, calendar, leader)
+        return WarmupPoller(DemandSource { setOf("005930", "000660") }, scheduler, calendar, leader)
     }
 
     @Test

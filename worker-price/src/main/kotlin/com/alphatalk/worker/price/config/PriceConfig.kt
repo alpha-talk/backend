@@ -14,7 +14,6 @@ import com.alphatalk.worker.price.candle.DailyCandleFetcher
 import com.alphatalk.worker.price.candle.DailyCandleStore
 import com.alphatalk.worker.price.conflation.ConflationBuffer
 import com.alphatalk.worker.price.demand.DemandSource
-import com.alphatalk.worker.price.demand.FixedDemandSource
 import com.alphatalk.worker.price.demand.RedisDemandSource
 import com.alphatalk.worker.price.leader.LeaderLock
 import com.alphatalk.worker.price.leader.RedisLeaderLock
@@ -47,15 +46,7 @@ class PriceConfig {
         props: PriceProperties,
         redis: StringRedisTemplate,
         connectionFactory: RedisConnectionFactory,
-    ): DemandSource = when (props.demandMode) {
-        DemandMode.FIXED -> {
-            check(props.symbols.isNotEmpty()) {
-                "alphatalk.price.enabled=true에는 demand-mode=fixed일 때 symbols가 최소 1개 필요하다"
-            }
-            FixedDemandSource(props.symbols)
-        }
-        DemandMode.REDIS -> RedisDemandSource(redis, connectionFactory, props.symbols.toSet())
-    }
+    ): DemandSource = RedisDemandSource(redis, connectionFactory, props.symbols.toSet())
 
     @Bean
     @ConditionalOnProperty("alphatalk.price.enabled", havingValue = "true")

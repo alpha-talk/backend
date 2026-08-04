@@ -31,11 +31,10 @@ server:
 
 alphatalk:
   price:
-    enabled: false                        # KIS 계정·종목 설정 후 활성화 — 활성 시 accounts·symbols 필수 (fail-closed)
+    enabled: false                        # KIS 계정 설정 후 활성화 — 활성 시 accounts 필수 (fail-closed)
     env: ${KIS_ENV:vts}                   # vts=모의투자 | prod=실전 (KIS 워커 명세 §1.1)
     accounts-json: ${KIS_ACCOUNTS:[]}     # [{"keyId":"...","appkey":"...","appsecret":"..."}] — 시크릿 매니저 주입 (§5)
-    symbols: []                           # 상시 구독 종목 — fixed 모드의 전체 목록이자 redis 모드의 최소 유지분(수요와 합집합)
-    demand-mode: fixed                    # fixed=symbols 고정 | redis=게이트웨이 수요 합산(demand:*:{gwId}, Redis 계약 §1.3) + 60s 리컨실
+    symbols: []                           # 상시 구독 유지분 — 게이트웨이 수요(demand:*:{gwId}, Redis 계약 §1.3)와 합집합, 비워도 된다
     conflation-ms: 200                    # 틱 conflation 플러시 주기 100~250ms (§2.4)
     rate-factor: ${KIS_RATE_FACTOR:0.75}  # 공식 유량 대비 내부 한도 비율 (§1.3)
     maintain-interval-ms: 1000            # 오케스트레이터 리컨실 주기 — 리더 갱신·세션 유지보수
