@@ -41,18 +41,28 @@ class CandleSyncJob(
     }
 
     private fun attemptSync() {
-        try {
+        val result = try {
             syncOnce()
-            completedDate = today()
         } catch (e: Exception) {
             meters.counter("candle.sync.aborted").increment()
             log.error("candle sync aborted - 다음 회차에 재시도한다", e)
+            return
         }
+        if (result.complete) {
+            completedDate = today()
+            return
+        }
+        log.error(
+            "candle sync incomplete - 다음 회차에 재시도한다. synced={} failed={}",
+            result.synced,
+            result.failed,
+        )
     }
 
-    fun syncOnce(): Int {
+    fun syncOnce(): CandleSyncResult {
         val to = today()
         var synced = 0
+        var failed = 0
         symbols().forEach { code ->
             runCatching {
                 val from = store.latestDate(code)
@@ -64,12 +74,20 @@ class CandleSyncJob(
                     synced += 1
                 }
             }.onFailure {
+                failed += 1
                 log.warn("candle sync failed: code={}", code, it)
             }
         }
         if (synced > 0) {
             meters.counter("candle.sync").increment(synced.toDouble())
         }
-        return synced
+        if (failed > 0) {
+            meters.counter("candle.sync.failed").increment(failed.toDouble())
+        }
+        return CandleSyncResult(synced = synced, failed = failed)
     }
+}
+
+data class CandleSyncResult(val synced: Int, val failed: Int) {
+    val complete: Boolean get() = failed == 0
 }

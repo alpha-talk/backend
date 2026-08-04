@@ -157,8 +157,9 @@ KIS 프레임 → 파싱 → 종목별 최신값 버퍼(덮어쓰기)
 - 정기: 매 영업일 16:30 전 상장 종목 최신 일봉 upsert. ~2,600콜 → 실전 15/s 페이싱으로 약 3분, 모의 1.5/s로 약 29분 — 모의에선 수요 종목(§2.1)만.
 - **유니버스 원천**: 실전은 `stock_master`의 활성 종목(worker-batch 적재)이다. 수요(§2.1)는 접속자에 따라 휘발하므로 일봉 대상이 될 수 없다 — 둘은 분리한다.
     - `stock_master`가 **비어 있으면**(초기 구축 전) 수요 종목으로 대체하고 경고를 남긴다 — 정상 축소 경로다.
-    - `stock_master` **조회가 실패하면**(DB 장애) 축소하지 않는다. 3회 재시도 후에도 실패하면 회차를 중단하고 `candle_sync_aborted`를 올린다 — 축소된 채 "성공"으로 끝나 다음 영업일까지 종목이 누락되는 것을 막는다.
-- **미완주 재시도**: 정기 회차가 완주하지 못한 영업일에는 17·18·19시에 리더가 재시도한다(완주한 날은 no-op). 장 마감 후라 재조회는 같은 확정 일봉을 upsert하므로 멱등이다.
+    - `stock_master` **조회가 실패하면**(DB 장애) 축소하지 않는다. exponential backoff+jitter로 3회 재시도 후에도 실패하면 회차를 중단하고 `candle_sync_aborted`를 올린다 — 축소된 채 "성공"으로 끝나 다음 영업일까지 종목이 누락되는 것을 막는다.
+- **부분 실패 = 미완주**: 개별 종목 실패는 나머지 종목의 처리를 막지 않지만(계속 진행) 실패 수를 `candle_sync_failed`로 기록하고 **회차는 미완료로 남긴다**. 한 종목이라도 실패하면 완주로 치지 않는다.
+- **미완주 재시도**: 완주하지 못한 영업일에는 17·18·19시에 리더가 재시도한다(완주한 날은 no-op). 이미 적재된 종목은 `latestDate()` 비교로 건너뛰므로 재조회 대상은 실패분뿐이고, 장 마감 후라 재조회는 같은 확정 일봉을 upsert하므로 멱등이다.
 - 백필: 신규 종목/초기 구축 시 종목당 `(영업일수/100)`콜을 야간 슬롯에서 수행한다. 액면분할 등으로 마스터의 상장주식수 급변을 감지하면 해당 종목을 **전 구간 재적재**한다(수정주가 재계산 반영).
 
 ### 2.7 장 운영 캘린더
@@ -301,7 +302,7 @@ batch_job_run(id, job, run_date, status, ok_count, fail_count, started_at, finis
 
 ## 6. 관측성
 
-메트릭: `kis_ws_sessions{state}` · `kis_subscribed_symbols` · `demand_symbols` · `degraded_symbols` · `tick_in_rate`/`quote_publish_rate` · `conflation_lag_ms` · `pingpong_miss` · `rest_call_rate{keyId}` · `rest_throttled` · `token_refresh_total` · `batch_job_duration/fail{job}`. 로그는 구조화 JSON으로 남기고 appkey/token은 마스킹한다. 프레임 원문은 DEBUG+샘플링으로만 남긴다. 알람: WS 세션 전멸 5분, 장중 tick_in=0, 배치 실패, throttled 급증, `candle_sync_aborted`(유니버스 조회 실패로 일봉 회차 중단 — §2.6).
+메트릭: `kis_ws_sessions{state}` · `kis_subscribed_symbols` · `demand_symbols` · `degraded_symbols` · `tick_in_rate`/`quote_publish_rate` · `conflation_lag_ms` · `pingpong_miss` · `rest_call_rate{keyId}` · `rest_throttled` · `token_refresh_total` · `batch_job_duration/fail{job}`. 로그는 구조화 JSON으로 남기고 appkey/token은 마스킹한다. 프레임 원문은 DEBUG+샘플링으로만 남긴다. 알람: WS 세션 전멸 5분, 장중 tick_in=0, 배치 실패, throttled 급증, `candle_sync_aborted`(유니버스 조회 실패로 일봉 회차 중단), `candle_sync_failed` 지속(재시도 회차까지 남는 종목 실패 — 둘 다 §2.6).
 
 ## 7. 장애 시나리오 & 대응
 
