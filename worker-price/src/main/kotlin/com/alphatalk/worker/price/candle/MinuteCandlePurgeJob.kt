@@ -12,6 +12,7 @@ class MinuteCandlePurgeJob(
     private val leader: LeaderLock,
     private val retentionDays: Long,
     private val today: () -> LocalDate = { LocalDate.now(ZoneId.of("Asia/Seoul")) },
+    private val batchSize: Int = DEFAULT_BATCH_SIZE,
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
 
@@ -23,10 +24,21 @@ class MinuteCandlePurgeJob(
 
     fun purgeOnce(): Int {
         val cutoff = today().minusDays(retentionDays).format(DateTimeFormatter.BASIC_ISO_DATE)
-        val purged = store.purgeBefore(cutoff)
-        if (purged > 0) {
-            log.info("minute candle purge: cutoff={} rows={}", cutoff, purged)
+        var purged = 0
+        repeat(MAX_BATCHES) {
+            val deleted = store.purgeBatchBefore(cutoff, batchSize)
+            if (deleted == 0) {
+                if (purged > 0) log.info("minute candle purge: cutoff={} rows={}", cutoff, purged)
+                return purged
+            }
+            purged += deleted
         }
+        log.warn("minute candle purge: 배치 상한 도달 — 다음 회차에 이어 지운다. cutoff={} rows={}", cutoff, purged)
         return purged
+    }
+
+    companion object {
+        private const val DEFAULT_BATCH_SIZE = 5_000
+        private const val MAX_BATCHES = 400
     }
 }

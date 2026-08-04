@@ -24,6 +24,10 @@ spring:
         order_updates: true
   lifecycle:
     timeout-per-shutdown-phase: 10s
+  task:
+    scheduling:
+      pool:
+        size: 4                                 # 200ms 틱 flush가 장시간 봉 잡(16:00·16:30·재시도)에 굶지 않도록 분리 — 기본값 1이면 같은 스레드를 공유한다
 
 server:
   port: 8082          # 모노레포 포트 배치 (기획안 §3.1)
