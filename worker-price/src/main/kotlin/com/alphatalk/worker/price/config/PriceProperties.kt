@@ -7,7 +7,6 @@ data class PriceProperties(
     val enabled: Boolean = false,
     val env: String = "vts",
     val accountsJson: String = "[]",
-    val symbols: List<String> = emptyList(),
     val conflationMs: Long = 200,
     val rateFactor: Double = 0.75,
     val maintainIntervalMs: Long = 1_000,
