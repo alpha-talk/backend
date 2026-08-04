@@ -25,7 +25,6 @@ class RedisKisRateGate(
                 listOf(Keys.kisRestRate(keyId)),
                 capacity.toString(),
                 refillPerSecond.toString(),
-                clock().toString(),
             )
             if (granted == 1L) return
             if (clock() >= deadline) {
@@ -40,7 +39,8 @@ class RedisKisRateGate(
             """
             local capacity = tonumber(ARGV[1])
             local refill = tonumber(ARGV[2])
-            local now = tonumber(ARGV[3])
+            local clock = redis.call('TIME')
+            local now = tonumber(clock[1]) * 1000 + math.floor(tonumber(clock[2]) / 1000)
             local state = redis.call('HMGET', KEYS[1], 'tokens', 'updatedAt')
             local tokens = tonumber(state[1])
             local updated = tonumber(state[2])
@@ -48,7 +48,9 @@ class RedisKisRateGate(
               tokens = capacity
               updated = now
             end
-            tokens = math.min(capacity, tokens + (now - updated) / 1000 * refill)
+            local elapsed = now - updated
+            if elapsed < 0 then elapsed = 0 end
+            tokens = math.min(capacity, tokens + elapsed / 1000 * refill)
             local granted = 0
             if tokens >= 1 then
               tokens = tokens - 1
