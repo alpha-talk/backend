@@ -11,7 +11,8 @@ import java.time.format.DateTimeFormatter
 class MinuteCandleDailySyncJob(
     private val symbols: () -> Set<String>,
     private val store: MinuteCandleStore,
-    private val service: MinuteCandleRefreshService,
+    private val syncDay: (String) -> Int,
+    private val isDayComplete: (String, String) -> Boolean,
     private val calendar: MarketCalendar,
     private val leader: LeaderLock,
     private val today: () -> LocalDate = { LocalDate.now(ZoneId.of("Asia/Seoul")) },
@@ -27,12 +28,25 @@ class MinuteCandleDailySyncJob(
 
     fun syncOnce(): Int {
         val date = today().format(DateTimeFormatter.BASIC_ISO_DATE)
-        var synced = 0
+        var completed = 0
         (symbols() + store.codesOn(date)).forEach { code ->
-            runCatching { service.refresh(code) }
-                .onSuccess { synced += 1 }
-                .onFailure { log.warn("minute candle daily sync failed: code={}", code, it) }
+            runCatching {
+                if (!isDayComplete(code, date)) syncDay(code)
+                if (!isDayComplete(code, date)) syncDay(code)
+                if (isDayComplete(code, date)) {
+                    completed += 1
+                } else {
+                    log.warn(
+                        "minute candle daily sync incomplete: code={} date={} latest={}",
+                        code,
+                        date,
+                        store.latestTime(code, date),
+                    )
+                }
+            }.onFailure {
+                log.warn("minute candle daily sync failed: code={}", code, it)
+            }
         }
-        return synced
+        return completed
     }
 }

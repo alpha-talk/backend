@@ -4,7 +4,7 @@ import com.alphatalk.kis.model.KisAccount
 import com.alphatalk.kis.test.FakeKisServer
 import com.alphatalk.worker.price.calendar.MarketCalendar
 import com.alphatalk.worker.price.conflation.ConflationBuffer
-import com.alphatalk.worker.price.demand.FixedDemandSource
+import com.alphatalk.worker.price.demand.DemandSource
 import com.alphatalk.worker.price.leader.LeaderLock
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import org.awaitility.Awaitility.await
@@ -42,7 +42,7 @@ class PriceOrchestratorTest {
     )
 
     private fun orchestrator(leader: LeaderLock, calendar: MarketCalendar, pool: SessionPool) =
-        PriceOrchestrator(FixedDemandSource(listOf("005930")), pool, calendar, leader, SimpleMeterRegistry())
+        PriceOrchestrator(DemandSource { setOf("005930") }, pool, calendar, leader, SimpleMeterRegistry())
 
     private fun sundayClock(): () -> Instant =
         { ZonedDateTime.of(2026, 7, 26, 10, 0, 0, 0, ZoneId.of("Asia/Seoul")).toInstant() }

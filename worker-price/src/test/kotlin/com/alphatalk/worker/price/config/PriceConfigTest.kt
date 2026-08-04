@@ -20,13 +20,12 @@ class PriceConfigTest {
     private fun sessionPool(props: PriceProperties) =
         config.sessionPool(props, ConflationBuffer(), SimpleMeterRegistry())
 
-    private fun demandSource(props: PriceProperties) =
-        config.demandSource(props, redisTemplate, connectionFactory)
+    private fun demandSource() = config.demandSource(redisTemplate, connectionFactory)
 
     @Test
     fun `계정이 비어 있으면 기동에 실패한다`() {
         val e = assertFailsWith<IllegalStateException> {
-            sessionPool(PriceProperties(enabled = true, accountsJson = "[]", symbols = listOf("005930")))
+            sessionPool(PriceProperties(enabled = true, accountsJson = "[]"))
         }
         assertTrue("KIS_ACCOUNTS" in e.message.orEmpty())
     }
@@ -34,26 +33,15 @@ class PriceConfigTest {
     @Test
     fun `계정 JSON이 깨져 있으면 원문 노출 없이 실패한다`() {
         val e = assertFailsWith<IllegalStateException> {
-            sessionPool(PriceProperties(enabled = true, accountsJson = "{secret-blob", symbols = listOf("005930")))
+            sessionPool(PriceProperties(enabled = true, accountsJson = "{secret-blob"))
         }
         assertTrue("파싱 실패" in e.message.orEmpty())
         assertTrue("secret-blob" !in e.message.orEmpty())
     }
 
     @Test
-    fun `fixed 모드에서 종목이 비어 있으면 demandSource가 실패한다`() {
-        assertFailsWith<IllegalStateException> {
-            demandSource(PriceProperties(enabled = true, accountsJson = validAccounts, symbols = emptyList()))
-        }
-    }
-
-    @Test
-    fun `redis 모드는 종목 없이도 조립되고 fixed 모드 종목은 상시 유지분으로 남는다`() {
-        val empty = PriceProperties(enabled = true, accountsJson = validAccounts, demandMode = DemandMode.REDIS)
-        assertNotNull(demandSource(empty))
-
-        val withBase = empty.copy(symbols = listOf("005930"))
-        assertEquals(setOf("005930"), demandSource(withBase).targetSymbols())
+    fun `수요 소스는 게이트웨이 수요만 사용한다 - 초기 목표 집합은 공집합`() {
+        assertEquals(emptySet(), demandSource().targetSymbols())
     }
 
     @Test
@@ -64,7 +52,6 @@ class PriceConfigTest {
                     enabled = true,
                     env = "staging",
                     accountsJson = validAccounts,
-                    symbols = listOf("005930"),
                 ),
             )
         }
@@ -72,10 +59,10 @@ class PriceConfigTest {
 
     @Test
     fun `유효한 설정이면 풀과 수요 소스가 조립된다`() {
-        val props = PriceProperties(enabled = true, accountsJson = validAccounts, symbols = listOf("005930"))
+        val props = PriceProperties(enabled = true, accountsJson = validAccounts)
 
         assertNotNull(sessionPool(props))
-        assertNotNull(demandSource(props))
+        assertNotNull(demandSource())
     }
 
     @Test

@@ -43,26 +43,26 @@ class RedisDemandSourceTest {
     }
 
     @Test
-    fun `alive 게이트웨이의 quote·room 수요를 합산하고 base와 합집합한다`() {
+    fun `alive 게이트웨이의 quote·room 수요를 합산한다 - 0 카운트는 제외`() {
         markAlive("gw1")
         template.opsForHash<String, String>().put(Keys.demandQuote("gw1"), "000660", "2")
         template.opsForHash<String, String>().put(Keys.demandQuote("gw1"), "999999", "0")
         template.opsForHash<String, String>().put(Keys.demandRoom("gw1"), "035420", "1")
 
-        val source = RedisDemandSource(template, factory, baseSymbols = setOf("005930"))
+        val source = RedisDemandSource(template, factory)
         source.refresh()
 
-        assertEquals(setOf("005930", "000660", "035420"), source.targetSymbols())
+        assertEquals(setOf("000660", "035420"), source.targetSymbols())
     }
 
     @Test
     fun `gw alive가 없는 게이트웨이의 수요는 스테일로 보고 제외한다`() {
         template.opsForHash<String, String>().put(Keys.demandQuote("gw-dead"), "000660", "3")
 
-        val source = RedisDemandSource(template, factory, baseSymbols = setOf("005930"))
+        val source = RedisDemandSource(template, factory)
         source.refresh()
 
-        assertEquals(setOf("005930"), source.targetSymbols())
+        assertEquals(emptySet(), source.targetSymbols())
     }
 
     @Test
@@ -72,7 +72,7 @@ class RedisDemandSourceTest {
         template.opsForHash<String, String>().put(Keys.demandQuote("gw1"), "000660", "1")
         template.opsForHash<String, String>().put(Keys.demandQuote("gw2"), "035420", "1")
 
-        val source = RedisDemandSource(template, factory, baseSymbols = emptySet())
+        val source = RedisDemandSource(template, factory)
         source.refresh()
 
         assertEquals(setOf("000660", "035420"), source.targetSymbols())
@@ -80,7 +80,7 @@ class RedisDemandSourceTest {
 
     @Test
     fun `demand updated 수신 - 즉시 리컨실해 수요 등장과 소멸을 반영한다`() {
-        val source = RedisDemandSource(template, factory, baseSymbols = emptySet(), reconcileIntervalMs = 600_000)
+        val source = RedisDemandSource(template, factory, reconcileIntervalMs = 600_000)
         source.start()
         try {
             markAlive("gw1")

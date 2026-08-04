@@ -1,0 +1,5 @@
+databaseChangeLog:
+  - include:
+      file: db/changelog/batch/db.changelog-batch.yaml
+  - include:
+      file: db/changelog/price/db.changelog-price.yaml
