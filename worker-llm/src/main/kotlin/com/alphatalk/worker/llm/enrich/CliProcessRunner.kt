@@ -70,6 +70,19 @@ internal class JvmCliProcessRunner : CliProcessRunner {
 internal fun CliProcessResult.stdoutOrThrow(provider: String): String {
     if (exitCode == 0) return stdout
     throw IllegalStateException(
-        "$provider CLI가 종료 코드 $exitCode 로 실패했다. CLI 로그인 상태와 provider 설정을 확인하라",
+        "$provider CLI가 종료 코드 $exitCode 로 실패했다. CLI 로그인 상태와 provider 설정을 확인하라. " +
+            "stderr=${diagnosticTail(stderr)} stdout=${diagnosticTail(stdout)}",
     )
+}
+
+private const val DIAGNOSTIC_TAIL_CHARS = 500
+
+private fun diagnosticTail(text: String): String {
+    val trimmed = text.trim()
+    if (trimmed.isEmpty()) return "(비어 있음)"
+    return if (trimmed.length <= DIAGNOSTIC_TAIL_CHARS) {
+        trimmed
+    } else {
+        "…" + trimmed.takeLast(DIAGNOSTIC_TAIL_CHARS)
+    }
 }
