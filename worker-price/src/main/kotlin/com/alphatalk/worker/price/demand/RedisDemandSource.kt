@@ -9,6 +9,9 @@ import org.springframework.data.redis.core.ScanOptions
 import org.springframework.data.redis.core.StringRedisTemplate
 import org.springframework.data.redis.listener.ChannelTopic
 import org.springframework.data.redis.listener.RedisMessageListenerContainer
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor
+import java.util.concurrent.Semaphore
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
 
@@ -20,11 +23,13 @@ class RedisDemandSource(
 ) : DemandSource, SmartLifecycle {
     private val log = LoggerFactory.getLogger(javaClass)
     private val running = AtomicBoolean(false)
+    private val refreshSignal = Semaphore(0)
 
     @Volatile
     private var demanded: Set<String> = emptySet()
 
     private var container: RedisMessageListenerContainer? = null
+    private var listenerExecutor: ThreadPoolTaskExecutor? = null
     private var reconciler: Thread? = null
 
     override fun targetSymbols(): Set<String> = baseSymbols + demanded
@@ -57,20 +62,29 @@ class RedisDemandSource(
     override fun start() {
         if (!running.compareAndSet(false, true)) return
         refresh()
+        listenerExecutor = ThreadPoolTaskExecutor().apply {
+            corePoolSize = 2
+            setThreadNamePrefix("demand-listener-")
+            initialize()
+        }
         container = RedisMessageListenerContainer().apply {
             setConnectionFactory(this@RedisDemandSource.connectionFactory)
-            addMessageListener({ _, _ -> refresh() }, ChannelTopic(Channels.DEMAND_UPDATED))
+            setTaskExecutor(listenerExecutor!!)
+            addMessageListener({ _, _ -> refreshSignal.release() }, ChannelTopic(Channels.DEMAND_UPDATED))
             afterPropertiesSet()
             start()
         }
         reconciler = thread(name = "demand-reconcile", isDaemon = true) {
             while (running.get()) {
                 try {
-                    Thread.sleep(reconcileIntervalMs)
+                    if (refreshSignal.tryAcquire(reconcileIntervalMs, TimeUnit.MILLISECONDS)) {
+                        refreshSignal.drainPermits()
+                    }
                 } catch (e: InterruptedException) {
                     Thread.currentThread().interrupt()
                     return@thread
                 }
+                if (!running.get()) return@thread
                 refresh()
             }
         }
@@ -83,6 +97,7 @@ class RedisDemandSource(
             runCatching { it.destroy() }
                 .onFailure { e -> log.warn("demand listener container shutdown failed", e) }
         }
+        listenerExecutor?.shutdown()
     }
 
     override fun isRunning(): Boolean = running.get()
