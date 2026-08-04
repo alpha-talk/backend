@@ -9,3 +9,5 @@ alphatalk:
     symbols: ["005930"]
     demand-mode: redis             # 게이트웨이 수요 연동 — 검색·방 입장한 종목이 자동 구독된다 (Redis 계약 §1.3)
     market-hours-enforced: true    # 장 운영 창(07:50~20:00, §2.7) 준수 — 창 밖 심야 스모크만 false로 완화
+    candle-enabled: true           # 일봉 수집 활성 — 기본 프로파일은 fail-closed(off)
+    candle-sync-on-startup: true   # 로컬 기동 시 일봉 백필 1회 — 대상이 symbols뿐이라 KIS 호출은 종목당 1콜

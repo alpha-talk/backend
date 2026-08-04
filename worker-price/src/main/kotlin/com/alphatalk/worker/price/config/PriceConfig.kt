@@ -28,6 +28,7 @@ import com.alphatalk.worker.price.session.SessionPool
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.fasterxml.jackson.module.kotlin.readValue
 import io.micrometer.core.instrument.MeterRegistry
+import org.springframework.boot.ApplicationRunner
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
@@ -197,6 +198,17 @@ class PriceConfig {
         leader = leader,
         meters = meters,
     )
+
+    @Bean
+    @ConditionalOnProperty(
+        name = [
+            "alphatalk.price.enabled",
+            "alphatalk.price.candle-enabled",
+            "alphatalk.price.candle-sync-on-startup",
+        ],
+        havingValue = "true",
+    )
+    fun candleStartupSync(job: CandleSyncJob): ApplicationRunner = ApplicationRunner { job.syncOnce() }
 
     internal fun kisEnv(props: PriceProperties): KisEnv = KisEnv.valueOf(props.env.trim().uppercase())
 
