@@ -51,12 +51,13 @@ class MinuteCandleRefreshServiceTest {
         private val date: String = "20260804",
         private val accPerMinute: Long = 100,
         private val firstBar: LocalTime = LocalTime.of(9, 0),
+        private val lastBar: LocalTime = LocalTime.of(15, 30),
     ) : MinuteCandleFetcher {
         val calls = AtomicInteger()
 
         override fun fetch(code: String, to: LocalTime): List<KisMinuteCandle> {
             calls.incrementAndGet()
-            val end = to.withSecond(0).withNano(0)
+            val end = minOf(to.withSecond(0).withNano(0), lastBar)
             return generateSequence(end) { it.minusMinutes(1) }
                 .takeWhile { it >= firstBar }
                 .take(30)
@@ -316,6 +317,36 @@ class MinuteCandleRefreshServiceTest {
 
         assertEquals("1303", store.latestTime("005930", "20260804"))
         assertEquals(214, synced)
+    }
+
+    @Test
+    fun `마지막 체결이 이른 종목도 마감까지 조회를 마치면 워터마크로 완주다`() {
+        val store = InMemoryMinuteStore()
+        val fetcher = PagingFetcher(lastBar = LocalTime.of(14, 0))
+        val afterClose = ZonedDateTime.of(2026, 8, 4, 16, 10, 0, 0, seoul)
+        val service = service(fetcher, store, at = afterClose)
+
+        service.syncDay("005930")
+
+        assertEquals("1400", store.latestTime("005930", "20260804"))
+        assertTrue(service.isDayComplete("005930", "20260804"))
+
+        val callsAfterFirst = fetcher.calls.get()
+        assertEquals(0, service.syncDay("005930"))
+        assertEquals(callsAfterFirst, fetcher.calls.get())
+    }
+
+    @Test
+    fun `데드라인에 잘린 조회는 워터마크를 남기지 않아 완주로 오판되지 않는다`() {
+        val store = InMemoryMinuteStore()
+        val fetcher = PagingFetcher()
+        val afterClose = ZonedDateTime.of(2026, 8, 4, 16, 10, 0, 0, seoul)
+        val service = service(fetcher, store, at = afterClose, fetchDeadlineMillis = 0, freshSeconds = 0)
+
+        service.refresh("005930")
+
+        assertEquals("0929", store.latestTime("005930", "20260804"))
+        assertEquals(false, service.isDayComplete("005930", "20260804"))
     }
 
     @Test

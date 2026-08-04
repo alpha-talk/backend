@@ -31,6 +31,7 @@ class MinuteCandleRefreshService(
     private val log = LoggerFactory.getLogger(javaClass)
     private val inFlight = ConcurrentHashMap<String, CompletableFuture<Int>>()
     private val lastFetchedAt = ConcurrentHashMap<String, Instant>()
+    private val fetchedThrough = ConcurrentHashMap<String, Pair<String, String>>()
 
     fun refresh(code: String): Int =
         coalesced(code, fetchDeadlineMillis) { doRefresh(code, fetchDeadlineMillis, honorFreshness = true) }
@@ -38,8 +39,11 @@ class MinuteCandleRefreshService(
     fun syncDay(code: String): Int =
         coalesced(code, dailySyncDeadlineMillis) { doRefresh(code, dailySyncDeadlineMillis, honorFreshness = false) }
 
-    fun isDayComplete(code: String, date: String): Boolean =
-        (store.latestTime(code, date) ?: "") >= CLOSE_BAR
+    fun isDayComplete(code: String, date: String): Boolean {
+        if ((store.latestTime(code, date) ?: "") >= CLOSE_BAR) return true
+        val through = fetchedThrough[code] ?: return false
+        return through.first == date && through.second >= CLOSE_BAR
+    }
 
     private fun coalesced(code: String, deadlineMillis: Long, work: () -> Int): Int {
         val mine = CompletableFuture<Int>()
@@ -78,30 +82,34 @@ class MinuteCandleRefreshService(
         if (!calendar.isTradingDay()) return 0
         val at = now()
         val date = at.toLocalDate().format(DateTimeFormatter.BASIC_ISO_DATE)
-        val latest = store.latestTime(code, date)
-        if (latest != null && latest >= CLOSE_BAR) return 0
+        if (isDayComplete(code, date)) return 0
         if (honorFreshness) {
             val last = lastFetchedAt[code]
             if (last != null && Duration.between(last, at.toInstant()).seconds < freshSeconds) return 0
         }
         val ceiling = minOf(at.toLocalTime().minusMinutes(1), CLOSE_TIME)
         if (at.toLocalTime() < OPEN_TIME || ceiling < OPEN_TIME) return 0
+        val latest = store.latestTime(code, date)
         val gapStart = latest?.let { nextMinute(it) } ?: OPEN_BAR
         if (gapStart > ceiling.format(HHMM)) {
             lastFetchedAt[code] = at.toInstant()
             return 0
         }
-        val fetched = fetchGapForward(code, date, gapStart, ceiling, deadlineMillis)
-        if (fetched.isEmpty()) {
+        val outcome = fetchGapForward(code, date, gapStart, ceiling, deadlineMillis)
+        if (outcome.rows.isEmpty()) {
             lastFetchedAt[code] = at.toInstant()
+            if (outcome.reachedCeiling) fetchedThrough[code] = date to ceiling.format(HHMM)
             return 0
         }
-        val upserted = store.upsert(withMinuteValues(code, date, fetched))
+        val upserted = store.upsert(withMinuteValues(code, date, outcome.rows))
         lastFetchedAt[code] = at.toInstant()
+        if (outcome.reachedCeiling) fetchedThrough[code] = date to ceiling.format(HHMM)
         meters.counter("minute.candle.refresh").increment(upserted.toDouble())
         log.info("minute candle refresh: code={} date={} gapStart={} rows={}", code, date, gapStart, upserted)
         return upserted
     }
+
+    private data class FetchOutcome(val rows: List<KisMinuteCandle>, val reachedCeiling: Boolean)
 
     private fun fetchGapForward(
         code: String,
@@ -109,21 +117,21 @@ class MinuteCandleRefreshService(
         gapStart: String,
         ceiling: LocalTime,
         deadlineMillis: Long,
-    ): List<KisMinuteCandle> {
+    ): FetchOutcome {
         val byTime = sortedMapOf<String, KisMinuteCandle>()
         val startedAt = System.nanoTime()
         var from = LocalTime.parse(gapStart, HHMM)
         repeat(MAX_PAGES) { page ->
             if (page > 0 && elapsedMillis(startedAt) >= deadlineMillis) {
                 log.warn("minute candle fetch deadline: code={} gapStart={} fetched={}", code, gapStart, byTime.size)
-                return byTime.values.toList()
+                return FetchOutcome(byTime.values.toList(), reachedCeiling = false)
             }
             val to = minOf(from.plusMinutes(PAGE_SPAN_MINUTES), ceiling)
             fetcher.fetch(code, to).filter { it.date == date }.forEach { byTime[it.time] = it }
-            if (to >= ceiling) return byTime.values.toList()
+            if (to >= ceiling) return FetchOutcome(byTime.values.toList(), reachedCeiling = true)
             from = to.plusMinutes(1)
         }
-        return byTime.values.toList()
+        return FetchOutcome(byTime.values.toList(), reachedCeiling = false)
     }
 
     private fun elapsedMillis(startedAtNanos: Long): Long = (System.nanoTime() - startedAtNanos) / 1_000_000
