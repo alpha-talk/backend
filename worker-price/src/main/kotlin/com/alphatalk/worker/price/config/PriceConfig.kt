@@ -278,7 +278,13 @@ class PriceConfig {
         }
         val account = accounts.first()
         val rest = KisRestClient(env.restBaseUrl, tokens, candleRestLimiters, gate)
-        return MinuteCandleFetcher { code, to -> rest.minuteCandles(account, code, to) }
+        val marketDiv = minuteMarketDiv(env)
+        return MinuteCandleFetcher { code, to -> rest.minuteCandles(account, code, to, marketDiv) }
+    }
+
+    internal fun minuteMarketDiv(env: KisEnv): String = when (env) {
+        KisEnv.PROD -> KisRestClient.MARKET_DIV_UNIFIED
+        KisEnv.VTS -> KisRestClient.MARKET_DIV_KRX
     }
 
     @Bean

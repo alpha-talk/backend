@@ -168,7 +168,12 @@ class KisRestClientTest {
             """.trimIndent(),
         )
 
-        val candles = client.minuteCandles(account, "005930", java.time.LocalTime.of(13, 4))
+        val candles = client.minuteCandles(
+            account,
+            "005930",
+            java.time.LocalTime.of(13, 4),
+            KisRestClient.MARKET_DIV_UNIFIED,
+        )
 
         assertEquals(2, candles.size)
         assertEquals("1304", candles[0].time)
@@ -180,6 +185,7 @@ class KisRestClientTest {
         assertEquals("FHKST03010200", call.headers["tr_id"])
         assertTrue("FID_INPUT_HOUR_1=130400" in call.query)
         assertTrue("FID_PW_DATA_INCU_YN=Y" in call.query)
+        assertTrue("FID_COND_MRKT_DIV_CODE=UN" in call.query)
     }
 
     @Test
@@ -198,6 +204,21 @@ class KisRestClientTest {
         gatedClient.getJson(account, "/uapi/test", "TR123", emptyMap())
 
         assertEquals(listOf("key1"), gated)
+    }
+
+    @Test
+    fun `분봉 시장 코드를 지정하지 않으면 KRX 전용으로 조회한다`() {
+        server.enqueue("/oauth2/tokenP", 200, tokenBody("T1"))
+        server.enqueue(
+            "/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice",
+            200,
+            """{"rt_cd":"0","output2":[]}""",
+        )
+
+        client.minuteCandles(account, "005930", java.time.LocalTime.of(13, 4))
+
+        val call = server.received.single { it.path.endsWith("inquire-time-itemchartprice") }
+        assertTrue("FID_COND_MRKT_DIV_CODE=J" in call.query)
     }
 
     @Test

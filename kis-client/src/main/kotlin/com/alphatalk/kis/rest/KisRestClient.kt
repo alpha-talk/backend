@@ -99,14 +99,19 @@ class KisRestClient(
         }
     }
 
-    fun minuteCandles(account: KisAccount, code: String, toTime: LocalTime): List<KisMinuteCandle> {
+    fun minuteCandles(
+        account: KisAccount,
+        code: String,
+        toTime: LocalTime,
+        marketDiv: String = MARKET_DIV_KRX,
+    ): List<KisMinuteCandle> {
         val json = getJson(
             account,
             MINUTE_CHART_PATH,
             TR_MINUTE_CHART,
             mapOf(
                 "FID_ETC_CLS_CODE" to "",
-                "FID_COND_MRKT_DIV_CODE" to "J",
+                "FID_COND_MRKT_DIV_CODE" to marketDiv,
                 "FID_INPUT_ISCD" to code,
                 "FID_INPUT_HOUR_1" to toTime.format(DateTimeFormatter.ofPattern("HHmmss")),
                 "FID_PW_DATA_INCU_YN" to "Y",
@@ -179,6 +184,8 @@ class KisRestClient(
     private fun encode(value: String): String = URLEncoder.encode(value, StandardCharsets.UTF_8)
 
     companion object {
+        const val MARKET_DIV_KRX = "J"
+        const val MARKET_DIV_UNIFIED = "UN"
         val CONNECT_TIMEOUT: Duration = Duration.ofSeconds(3)
         val REQUEST_TIMEOUT: Duration = Duration.ofSeconds(10)
         const val TR_INQUIRE_PRICE = "FHKST01010100"
