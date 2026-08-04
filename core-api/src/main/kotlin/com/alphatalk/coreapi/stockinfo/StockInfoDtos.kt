@@ -1,5 +1,7 @@
 package com.alphatalk.coreapi.stockinfo
 
+import com.fasterxml.jackson.annotation.JsonInclude
+
 data class StockOverviewResponse(
     val code: String,
     val name: String,
@@ -10,8 +12,10 @@ data class StockOverviewResponse(
     val updatedAt: Long,
 )
 
+@JsonInclude(JsonInclude.Include.NON_NULL)
 data class CandleView(
     val date: String,
+    val time: String? = null,
     val open: Long,
     val high: Long,
     val low: Long,

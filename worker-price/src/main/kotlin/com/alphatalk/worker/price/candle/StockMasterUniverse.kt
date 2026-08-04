@@ -25,6 +25,8 @@ class StockMasterEntity(
 interface StockMasterCodeRepository : JpaRepository<StockMasterEntity, String> {
     @Query("select s.code from StockMasterEntity s where s.active = true")
     fun findActiveCodes(): List<String>
+
+    fun existsByCodeAndActiveIsTrue(code: String): Boolean
 }
 
 class CandleUniverseUnavailableException(attempts: Int, cause: Throwable) :
