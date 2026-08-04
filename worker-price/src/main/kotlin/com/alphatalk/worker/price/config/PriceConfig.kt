@@ -17,6 +17,8 @@ import com.alphatalk.worker.price.candle.MinuteCandleFetcher
 import com.alphatalk.worker.price.candle.MinuteCandlePurgeJob
 import com.alphatalk.worker.price.candle.MinuteCandleRefreshService
 import com.alphatalk.worker.price.candle.MinuteCandleStore
+import com.alphatalk.worker.price.candle.MinuteRefreshLock
+import com.alphatalk.worker.price.candle.RedisMinuteRefreshLock
 import com.alphatalk.worker.price.conflation.ConflationBuffer
 import com.alphatalk.worker.price.demand.DemandSource
 import com.alphatalk.worker.price.demand.FixedDemandSource
@@ -40,6 +42,7 @@ import org.springframework.context.annotation.Configuration
 import org.springframework.data.redis.connection.RedisConnectionFactory
 import org.springframework.data.redis.core.StringRedisTemplate
 import java.lang.management.ManagementFactory
+import java.time.Duration
 import java.time.LocalDate
 
 @Configuration
@@ -162,22 +165,27 @@ class PriceConfig {
     ): WarmupPoller = WarmupPoller(demand, poller, calendar, leader)
 
     @Bean
+    @ConditionalOnProperty("alphatalk.price.enabled", havingValue = "true")
+    fun candleRestLimiters(props: PriceProperties): KisRateLimiters =
+        KisRateLimiters(kisEnv(props).restCallsPerSecond, props.rateFactor, CANDLE_ACQUIRE_TIMEOUT)
+
+    @Bean
     @ConditionalOnProperty(
         name = ["alphatalk.price.enabled", "alphatalk.price.candle-enabled"],
         havingValue = "true",
     )
-    fun dailyCandleFetcher(props: PriceProperties, tokens: KisTokenManager): DailyCandleFetcher {
+    fun dailyCandleFetcher(
+        props: PriceProperties,
+        tokens: KisTokenManager,
+        candleRestLimiters: KisRateLimiters,
+    ): DailyCandleFetcher {
         val env = kisEnv(props)
         val accounts = parseAccounts(props.accountsJson)
         check(accounts.isNotEmpty()) {
             "alphatalk.price.candle-enabled=true에는 KIS_ACCOUNTS 계정이 최소 1개 필요하다"
         }
         val account = accounts.first()
-        val rest = KisRestClient(
-            env.restBaseUrl,
-            tokens,
-            KisRateLimiters(env.restCallsPerSecond, props.rateFactor),
-        )
+        val rest = KisRestClient(env.restBaseUrl, tokens, candleRestLimiters)
         return DailyCandleFetcher { code, from, to -> rest.dailyCandles(account, code, from, to) }
     }
 
@@ -220,20 +228,28 @@ class PriceConfig {
         name = ["alphatalk.price.enabled", "alphatalk.price.minute-candle-enabled"],
         havingValue = "true",
     )
-    fun minuteCandleFetcher(props: PriceProperties, tokens: KisTokenManager): MinuteCandleFetcher {
+    fun minuteCandleFetcher(
+        props: PriceProperties,
+        tokens: KisTokenManager,
+        candleRestLimiters: KisRateLimiters,
+    ): MinuteCandleFetcher {
         val env = kisEnv(props)
         val accounts = parseAccounts(props.accountsJson)
         check(accounts.isNotEmpty()) {
             "alphatalk.price.minute-candle-enabled=true에는 KIS_ACCOUNTS 계정이 최소 1개 필요하다"
         }
         val account = accounts.first()
-        val rest = KisRestClient(
-            env.restBaseUrl,
-            tokens,
-            KisRateLimiters(env.restCallsPerSecond, props.rateFactor),
-        )
+        val rest = KisRestClient(env.restBaseUrl, tokens, candleRestLimiters)
         return MinuteCandleFetcher { code, to -> rest.minuteCandles(account, code, to) }
     }
+
+    @Bean
+    @ConditionalOnProperty(
+        name = ["alphatalk.price.enabled", "alphatalk.price.minute-candle-enabled"],
+        havingValue = "true",
+    )
+    fun minuteRefreshLock(redis: StringRedisTemplate): MinuteRefreshLock =
+        RedisMinuteRefreshLock(redis, instanceId = ManagementFactory.getRuntimeMXBean().name)
 
     @Bean
     @ConditionalOnProperty(
@@ -244,12 +260,14 @@ class PriceConfig {
         fetcher: MinuteCandleFetcher,
         store: MinuteCandleStore,
         calendar: MarketCalendar,
+        refreshLock: MinuteRefreshLock,
         props: PriceProperties,
         meters: MeterRegistry,
     ): MinuteCandleRefreshService = MinuteCandleRefreshService(
         fetcher = fetcher,
         store = store,
         calendar = calendar,
+        refreshLock = refreshLock,
         freshSeconds = props.minuteCandleFreshSec,
         meters = meters,
     )
@@ -289,6 +307,10 @@ class PriceConfig {
     )
 
     internal fun kisEnv(props: PriceProperties): KisEnv = KisEnv.valueOf(props.env.trim().uppercase())
+
+    private companion object {
+        val CANDLE_ACQUIRE_TIMEOUT: Duration = Duration.ofSeconds(10)
+    }
 
     internal fun parseAccounts(accountsJson: String): List<KisAccount> = try {
         jacksonObjectMapper().readValue(accountsJson)
