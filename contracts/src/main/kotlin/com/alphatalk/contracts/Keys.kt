@@ -13,6 +13,12 @@ object Keys {
     fun clusterLock(code: String) = "lock:cluster:$code"
     fun articleFetchRate(host: String) = "rate:article-fetch:$host"
 
+    const val GW_ALIVE_PREFIX = "gw:alive:"
+
+    fun demandQuote(gwId: String) = "demand:quote:$gwId"
+    fun demandRoom(gwId: String) = "demand:room:$gwId"
+    fun gwAlive(gwId: String) = "$GW_ALIVE_PREFIX$gwId"
+
     fun rateLimitWindow(action: String, key: String, windowIndex: Long) = "rl:$action:$key:$windowIndex"
 
     fun badge(userId: Long) = "badge:$userId"

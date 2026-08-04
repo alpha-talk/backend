@@ -3,6 +3,8 @@ package com.alphatalk.contracts
 object Channels {
     const val WATCHLIST_UPDATED = "watchlist:updated"
 
+    const val DEMAND_UPDATED = "demand:updated"
+
     fun quote(code: String) = "${ChannelKind.QUOTE.prefix}:$code"
     fun stream(code: String) = "${ChannelKind.STREAM.prefix}:$code"
     fun post(code: String) = "${ChannelKind.POST.prefix}:$code"
