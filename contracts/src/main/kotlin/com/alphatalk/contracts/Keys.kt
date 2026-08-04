@@ -21,5 +21,11 @@ object Keys {
 
     fun rateLimitWindow(action: String, key: String, windowIndex: Long) = "rl:$action:$key:$windowIndex"
 
+    fun minuteRefreshLock(code: String) = "lock:minute-refresh:$code"
+
+    fun kisRestRate(keyId: String) = "rate:kis-rest:$keyId"
+
+    fun minuteRefreshWatermark(code: String, date: String) = "minute:through:$code:$date"
+
     fun badge(userId: Long) = "badge:$userId"
 }

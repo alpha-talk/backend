@@ -4,6 +4,7 @@ import com.alphatalk.kis.KisClientException
 import com.alphatalk.kis.KisSigns
 import com.alphatalk.kis.auth.KisTokenManager
 import com.alphatalk.kis.model.KisAccount
+import com.alphatalk.kis.rate.KisRateGate
 import com.alphatalk.kis.rate.KisRateLimiters
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
@@ -14,14 +15,18 @@ import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import java.nio.charset.StandardCharsets
+import java.time.Duration
 import java.time.LocalDate
+import java.time.LocalTime
 import java.time.format.DateTimeFormatter
 
 class KisRestClient(
     private val restBaseUrl: String,
     private val tokens: KisTokenManager,
     private val limiters: KisRateLimiters,
-    private val http: HttpClient = HttpClient.newHttpClient(),
+    private val gate: KisRateGate = KisRateGate.NOOP,
+    private val http: HttpClient = HttpClient.newBuilder().connectTimeout(CONNECT_TIMEOUT).build(),
+    private val requestTimeout: Duration = REQUEST_TIMEOUT,
 ) {
     private val mapper: ObjectMapper = jacksonObjectMapper()
 
@@ -94,6 +99,51 @@ class KisRestClient(
         }
     }
 
+    fun minuteCandles(
+        account: KisAccount,
+        code: String,
+        toTime: LocalTime,
+        marketDiv: String,
+    ): List<KisMinuteCandle> {
+        val json = getJson(
+            account,
+            MINUTE_CHART_PATH,
+            TR_MINUTE_CHART,
+            mapOf(
+                "FID_ETC_CLS_CODE" to "",
+                "FID_COND_MRKT_DIV_CODE" to marketDiv,
+                "FID_INPUT_ISCD" to code,
+                "FID_INPUT_HOUR_1" to toTime.format(DateTimeFormatter.ofPattern("HHmmss")),
+                "FID_PW_DATA_INCU_YN" to "Y",
+            ),
+        )
+        val rtCd = json.path("rt_cd").asText("")
+        if (rtCd != "0") {
+            throw KisClientException(
+                "minute chart failed: keyId=${account.keyId} code=$code rt_cd=$rtCd msg_cd=${json.path("msg_cd").asText("")}",
+            )
+        }
+        return json.path("output2").mapNotNull { row ->
+            val date = row.path("stck_bsop_date").asText("")
+            val hour = row.path("stck_cntg_hour").asText("")
+            if (date.isBlank() || hour.length < 4) {
+                null
+            } else {
+                KisMinuteCandle(
+                    code = code,
+                    date = date,
+                    time = hour.take(4),
+                    open = row.path("stck_oprc").asText().trim().toLong(),
+                    high = row.path("stck_hgpr").asText().trim().toLong(),
+                    low = row.path("stck_lwpr").asText().trim().toLong(),
+                    close = row.path("stck_prpr").asText().trim().toLong(),
+                    volume = row.path("cntg_vol").asText().trim().toLong(),
+                    accValue = row.path("acml_tr_pbmn").asText().trim().toLong(),
+                )
+            }
+        }
+    }
+
     internal fun getJson(account: KisAccount, path: String, trId: String, params: Map<String, String>): JsonNode {
         val first = send(account, path, trId, params)
         if (first.statusCode() == 401) {
@@ -105,10 +155,12 @@ class KisRestClient(
 
     private fun send(account: KisAccount, path: String, trId: String, params: Map<String, String>): HttpResponse<String> {
         limiters.acquire(account.keyId)
+        gate.acquire(account.keyId)
         val query = params.entries.joinToString("&") { "${encode(it.key)}=${encode(it.value)}" }
         val uri = URI.create(restBaseUrl + path + if (query.isEmpty()) "" else "?$query")
         val request = HttpRequest.newBuilder()
             .uri(uri)
+            .timeout(requestTimeout)
             .header("content-type", "application/json; charset=utf-8")
             .header("authorization", "Bearer ${tokens.accessToken(account)}")
             .header("appkey", account.appkey)
@@ -132,9 +184,15 @@ class KisRestClient(
     private fun encode(value: String): String = URLEncoder.encode(value, StandardCharsets.UTF_8)
 
     companion object {
+        const val MARKET_DIV_KRX = "J"
+        const val MARKET_DIV_UNIFIED = "UN"
+        val CONNECT_TIMEOUT: Duration = Duration.ofSeconds(3)
+        val REQUEST_TIMEOUT: Duration = Duration.ofSeconds(10)
         const val TR_INQUIRE_PRICE = "FHKST01010100"
         const val TR_DAILY_CHART = "FHKST03010100"
+        const val TR_MINUTE_CHART = "FHKST03010200"
         private const val INQUIRE_PRICE_PATH = "/uapi/domestic-stock/v1/quotations/inquire-price"
         private const val DAILY_CHART_PATH = "/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice"
+        private const val MINUTE_CHART_PATH = "/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice"
     }
 }
