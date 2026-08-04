@@ -40,6 +40,27 @@ class StockInfoServiceTest {
         }
     }
 
+    private class FakeMinuteCandleStore(private val rows: List<MinuteCandleRow> = emptyList()) : MinuteCandleStore {
+        var lastLimit = 0
+
+        override fun findLatestUpTo(code: String, toDate: String?, toTime: String?, limit: Int): List<MinuteCandleRow> {
+            lastLimit = limit
+            return rows
+                .filter { toDate == null || it.date < toDate || (it.date == toDate && it.time <= toTime!!) }
+                .sortedWith(compareByDescending(MinuteCandleRow::date).thenByDescending(MinuteCandleRow::time))
+                .take(limit)
+        }
+    }
+
+    private class RecordingRefresher(private val failure: Throwable? = null) : MinuteCandleRefresher {
+        val refreshed = mutableListOf<String>()
+
+        override fun refresh(code: String) {
+            refreshed += code
+            failure?.let { throw it }
+        }
+    }
+
     private class FakeValuationStore(private val record: ValuationRecord? = null) : ValuationStore {
         override fun findLatest(code: String) = record
     }
@@ -60,10 +81,12 @@ class StockInfoServiceTest {
     private fun service(
         profiles: StockProfileStore = FakeProfileStore(),
         candles: CandleStore = FakeCandleStore(),
+        minuteCandles: MinuteCandleStore = FakeMinuteCandleStore(),
+        minuteRefresher: MinuteCandleRefresher = RecordingRefresher(),
         valuations: ValuationStore = FakeValuationStore(),
         financials: FinancialsStore = FakeFinancialsStore(),
         investors: InvestorFlowStore = FakeInvestorStore(),
-    ) = StockInfoService(profiles, candles, valuations, financials, investors)
+    ) = StockInfoService(profiles, candles, minuteCandles, minuteRefresher, valuations, financials, investors)
 
     @Test
     fun `개요는 섹터 이름과 상장일을 함께 준다`() {
@@ -208,6 +231,7 @@ class StockInfoServiceTest {
     fun `없는 종목의 지표는 전부 404다`() {
         listOf<(StockInfoService) -> Unit>(
             { it.candles("999999", null, null, null) },
+            { it.candles("999999", "5m", null, null) },
             { it.valuation("999999") },
             { it.financials("999999", null) },
             { it.investors("999999", null) },
@@ -215,5 +239,83 @@ class StockInfoServiceTest {
             val e = assertFailsWith<ApiException> { call(service()) }
             assertEquals(ErrorCode.NOT_FOUND, e.code)
         }
+    }
+
+    private fun minuteRows(date: String, from: String, count: Int): List<MinuteCandleRow> {
+        val start = from.take(2).toInt() * 60 + from.drop(2).toInt()
+        return (0 until count).map { offset ->
+            val minutes = start + offset
+            MinuteCandleRow(
+                date = date,
+                time = "%02d%02d".format(minutes / 60, minutes % 60),
+                open = 100,
+                high = 110,
+                low = 90,
+                close = 105,
+                volume = 10,
+                value = 1000,
+            )
+        }
+    }
+
+    @Test
+    fun `분봉 조회는 신선화를 트리거하고 5분 버킷을 오름차순으로 준다`() {
+        val refresher = RecordingRefresher()
+        val store = FakeMinuteCandleStore(minuteRows("20260804", "0900", 31))
+
+        val response = service(minuteCandles = store, minuteRefresher = refresher)
+            .candles("005930", "5m", 3, null)
+
+        assertEquals(listOf("005930"), refresher.refreshed)
+        assertEquals("5m", response.period)
+        assertEquals(listOf("0920", "0925", "0930"), response.items.map(CandleView::time))
+        assertEquals(listOf("20260804", "20260804", "20260804"), response.items.map(CandleView::date))
+        assertEquals(5_000, response.items.first().value)
+        assertEquals(50, response.items.first().volume)
+        assertTrue(response.pageInfo.hasMoreBefore)
+        assertEquals("202608040919", response.pageInfo.nextTo)
+    }
+
+    @Test
+    fun `분봉 버킷은 일 경계를 넘지 않는다`() {
+        val store = FakeMinuteCandleStore(
+            minuteRows("20260803", "1520", 11) + minuteRows("20260804", "0900", 10),
+        )
+
+        val response = service(minuteCandles = store).candles("005930", "30m", 500, null)
+
+        assertEquals(
+            listOf("20260803" to "1500", "20260804" to "0900"),
+            response.items.map { it.date to it.time },
+        )
+        assertEquals(false, response.pageInfo.hasMoreBefore)
+        assertNull(response.pageInfo.nextTo)
+    }
+
+    @Test
+    fun `신선화 실패는 분봉 조회를 막지 않는다`() {
+        val store = FakeMinuteCandleStore(minuteRows("20260804", "0900", 5))
+        val refresher = RecordingRefresher(failure = IllegalStateException("worker down"))
+
+        val response = service(minuteCandles = store, minuteRefresher = refresher)
+            .candles("005930", "1m", 5, null)
+
+        assertEquals(5, response.items.size)
+        assertEquals(listOf("005930"), refresher.refreshed)
+    }
+
+    @Test
+    fun `분봉의 to는 yyyyMMddHHmm 형식을 검증하고 커서 이전만 준다`() {
+        val store = FakeMinuteCandleStore(minuteRows("20260804", "0900", 60))
+
+        assertEquals(
+            ErrorCode.VALIDATION_FAILED,
+            assertFailsWith<ApiException> { service().candles("005930", "1m", null, "20260804") }.code,
+        )
+
+        val response = service(minuteCandles = store).candles("005930", "1m", 10, "202608040930")
+        assertEquals("0930", response.items.last().time)
+        assertEquals("0921", response.items.first().time)
+        assertEquals("202608040920", response.pageInfo.nextTo)
     }
 }
