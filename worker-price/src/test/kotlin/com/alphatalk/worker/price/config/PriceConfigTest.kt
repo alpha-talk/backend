@@ -1,6 +1,7 @@
 package com.alphatalk.worker.price.config
 
 import com.alphatalk.kis.model.KisEnv
+import com.alphatalk.kis.rest.KisRestClient
 import com.alphatalk.worker.price.conflation.ConflationBuffer
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory
@@ -21,6 +22,12 @@ class PriceConfigTest {
         config.sessionPool(props, ConflationBuffer(), SimpleMeterRegistry())
 
     private fun demandSource() = config.demandSource(redisTemplate, connectionFactory)
+
+    @Test
+    fun `분봉 시장 코드는 실전에서 통합 모의에서 KRX다`() {
+        assertEquals(KisRestClient.MARKET_DIV_UNIFIED, config.minuteMarketDiv(KisEnv.PROD))
+        assertEquals(KisRestClient.MARKET_DIV_KRX, config.minuteMarketDiv(KisEnv.VTS))
+    }
 
     @Test
     fun `계정이 비어 있으면 기동에 실패한다`() {

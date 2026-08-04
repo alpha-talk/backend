@@ -38,7 +38,7 @@ class MinuteCandleDailySyncJobTest {
         symbols = { symbols },
         store = store,
         syncDay = syncDay,
-        isDayComplete = { code, d -> (store.latestTime(code, d) ?: "") >= "1530" },
+        isDayComplete = { code, d -> (store.latestTime(code, d) ?: "") >= "2000" },
         calendar = MarketCalendar(enforced = false),
         leader = AlwaysLeader(),
         today = { LocalDate.of(2026, 8, 4) },
@@ -51,8 +51,8 @@ class MinuteCandleDailySyncJobTest {
         val calls = mutableListOf<String>()
         val job = job(store, setOf("005930")) { code ->
             calls += code
-            store.setLatest(code, "1530")
-            391
+            store.setLatest(code, "2000")
+            720
         }
 
         val result = job.syncOnce()
@@ -68,7 +68,7 @@ class MinuteCandleDailySyncJobTest {
         val calls = mutableListOf<String>()
         val job = job(store, setOf("005930")) { code ->
             calls += code
-            if (calls.size == 1) store.setLatest(code, "1230") else store.setLatest(code, "1530")
+            if (calls.size == 1) store.setLatest(code, "1830") else store.setLatest(code, "2000")
             1
         }
 
@@ -85,8 +85,8 @@ class MinuteCandleDailySyncJobTest {
         val job = job(store, setOf("005930")) { code ->
             calls += code
             if (calls.size == 1) throw IllegalStateException("kis timeout")
-            store.setLatest(code, "1530")
-            391
+            store.setLatest(code, "2000")
+            720
         }
 
         val result = job.syncOnce()
@@ -117,8 +117,8 @@ class MinuteCandleDailySyncJobTest {
         val calls = mutableListOf<String>()
         val job = job(store, setOf("005930")) { code ->
             calls += code
-            store.setLatest(code, "1530")
-            391
+            store.setLatest(code, "2000")
+            720
         }
 
         job.syncDaily()
@@ -133,7 +133,7 @@ class MinuteCandleDailySyncJobTest {
         val calls = mutableListOf<String>()
         val job = job(store, setOf("005930")) { code ->
             calls += code
-            if (calls.size >= 4) store.setLatest(code, "1530")
+            if (calls.size >= 4) store.setLatest(code, "2000")
             1
         }
 
@@ -149,18 +149,18 @@ class MinuteCandleDailySyncJobTest {
         val calls = mutableListOf<String>()
         val job = job(store, emptySet()) { code ->
             calls += code
-            store.setLatest(code, "1530")
+            store.setLatest(code, "2000")
             120
         }
 
         job.syncDaily()
         assertEquals(0, calls.size)
 
-        store.setLatest("000660", "1230")
+        store.setLatest("000660", "1830")
 
         job.retryUnfinished()
 
         assertEquals(listOf("000660"), calls)
-        assertEquals("1530", store.latestTime("000660", date))
+        assertEquals("2000", store.latestTime("000660", date))
     }
 }

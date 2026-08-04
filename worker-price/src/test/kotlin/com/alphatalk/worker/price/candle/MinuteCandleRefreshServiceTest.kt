@@ -363,6 +363,22 @@ class MinuteCandleRefreshServiceTest {
     }
 
     @Test
+    fun `장 마감 뒤 콜드 조회는 25콜 이내로 08시부터 20시까지 채우고 완주한다`() {
+        val store = InMemoryMinuteStore()
+        val fetcher = PagingFetcher()
+        val afterClose = ZonedDateTime.of(2026, 8, 4, 20, 1, 0, 0, seoul)
+        val service = service(fetcher, store, at = afterClose)
+
+        val synced = service.syncDay("005930")
+
+        assertEquals(721, synced)
+        assertEquals("0800", store.rows.keys.minOf { it.third })
+        assertEquals("2000", store.latestTime("005930", "20260804"))
+        assertTrue(fetcher.calls.get() <= 25, "콜 수=${fetcher.calls.get()}")
+        assertTrue(service.isDayComplete("005930", "20260804"))
+    }
+
+    @Test
     fun `워터마크는 인스턴스 간에 공유되어 다른 인스턴스도 완주로 본다`() {
         val store = InMemoryMinuteStore()
         val shared = InMemoryWatermarks()
