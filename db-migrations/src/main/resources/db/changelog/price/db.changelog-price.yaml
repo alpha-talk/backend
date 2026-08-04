@@ -6,3 +6,10 @@ databaseChangeLog:
         - sqlFile:
             path: sql/0001_daily_candle.sql
             relativeToChangelogFile: true
+  - changeSet:
+      id: 0002-minute-candle
+      author: worker-price
+      changes:
+        - sqlFile:
+            path: sql/0002_minute_candle.sql
+            relativeToChangelogFile: true
