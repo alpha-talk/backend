@@ -20,9 +20,11 @@ class MinuteCandleRefreshService(
     private val fetcher: MinuteCandleFetcher,
     private val store: MinuteCandleStore,
     private val calendar: MarketCalendar,
+    private val refreshLock: MinuteRefreshLock,
     private val freshSeconds: Long,
     private val meters: MeterRegistry,
     private val waitTimeoutMillis: Long = 2_000,
+    private val fetchDeadlineMillis: Long = 10_000,
     private val now: () -> ZonedDateTime = { ZonedDateTime.now(SEOUL) },
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
@@ -42,7 +44,7 @@ class MinuteCandleRefreshService(
             }
         }
         try {
-            val synced = doRefresh(code)
+            val synced = withDistributedLock(code)
             mine.complete(synced)
             return synced
         } catch (t: Throwable) {
@@ -50,6 +52,15 @@ class MinuteCandleRefreshService(
             throw t
         } finally {
             inFlight.remove(code, mine)
+        }
+    }
+
+    private fun withDistributedLock(code: String): Int {
+        if (!refreshLock.tryAcquire(code, Duration.ofMillis(fetchDeadlineMillis + LOCK_MARGIN_MILLIS))) return 0
+        return try {
+            doRefresh(code)
+        } finally {
+            refreshLock.release(code)
         }
     }
 
@@ -75,12 +86,17 @@ class MinuteCandleRefreshService(
 
     private fun fetchGap(code: String, date: String, gapStart: String, ceiling: LocalTime): List<KisMinuteCandle> {
         val byTime = sortedMapOf<String, KisMinuteCandle>()
+        val startedAt = System.nanoTime()
         var to = ceiling
-        repeat(MAX_PAGES) {
-            val page = fetcher.fetch(code, to).filter { it.date == date }
-            if (page.isEmpty()) return byTime.values.toList()
-            page.forEach { byTime[it.time] = it }
-            val earliest = page.minOf { it.time }
+        repeat(MAX_PAGES) { page ->
+            if (page > 0 && elapsedMillis(startedAt) >= fetchDeadlineMillis) {
+                log.warn("minute candle fetch deadline: code={} gapStart={} fetched={}", code, gapStart, byTime.size)
+                return byTime.values.toList()
+            }
+            val rows = fetcher.fetch(code, to).filter { it.date == date }
+            if (rows.isEmpty()) return byTime.values.toList()
+            rows.forEach { byTime[it.time] = it }
+            val earliest = rows.minOf { it.time }
             if (earliest <= gapStart) return byTime.values.toList()
             val nextTo = LocalTime.parse(earliest, HHMM).minusMinutes(1)
             if (nextTo < OPEN_TIME) return byTime.values.toList()
@@ -88,6 +104,8 @@ class MinuteCandleRefreshService(
         }
         return byTime.values.toList()
     }
+
+    private fun elapsedMillis(startedAtNanos: Long): Long = (System.nanoTime() - startedAtNanos) / 1_000_000
 
     private fun withMinuteValues(code: String, date: String, fetched: List<KisMinuteCandle>): List<MinuteCandle> {
         val asc = fetched.sortedBy { it.time }
@@ -119,5 +137,6 @@ class MinuteCandleRefreshService(
         private const val OPEN_BAR = "0900"
         private const val CLOSE_BAR = "1530"
         private const val MAX_PAGES = 15
+        private const val LOCK_MARGIN_MILLIS = 35_000L
     }
 }

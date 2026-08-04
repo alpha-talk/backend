@@ -48,8 +48,8 @@ alphatalk:
     candle-backfill-days: 90              # 최초 백필 조회 구간 — 1콜 100봉 한도 안쪽 (§2.6)
     candle-sync-on-startup: false         # 기동 직후 1회 수동 백필 — 16:30 크론을 기다리지 않는 로컬 검증용. 리더락을 거치지 않으므로 다중 인스턴스 운영에서 켜지 않는다
     minute-candle-enabled: false          # 분봉 read-through 신선화 내부 API + 16:00 확정·04:30 퍼지 (§2.6)
-    minute-candle-fresh-sec: 60           # 신선 임계 — 이 안에서는 KIS 재조회 없이 no-op (§2.6)
-    minute-candle-retention-days: 30      # 보존 일수 — 초과분은 새벽 퍼지 (§2.6)
+    minute-candle-fresh-sec: ${MINUTE_CANDLE_FRESH_SEC:60}              # 신선 임계 — 이 안에서는 KIS 재조회 없이 no-op (§2.6)
+    minute-candle-retention-days: ${MINUTE_CANDLE_RETENTION_DAYS:30}    # 보존 일수 — 초과분은 새벽 퍼지 (§2.6)
 
 management:
   endpoints:

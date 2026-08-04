@@ -77,6 +77,20 @@ class MinuteCandleRefreshServiceTest {
         }
     }
 
+    private class FakeRefreshLock(private val acquirable: Boolean = true) : MinuteRefreshLock {
+        val acquired = AtomicInteger()
+        val released = AtomicInteger()
+
+        override fun tryAcquire(code: String, ttl: java.time.Duration): Boolean {
+            if (acquirable) acquired.incrementAndGet()
+            return acquirable
+        }
+
+        override fun release(code: String) {
+            released.incrementAndGet()
+        }
+    }
+
     private fun calendar(at: ZonedDateTime = tradingNow) =
         MarketCalendar(enforced = true, clock = { at.toInstant() })
 
@@ -86,13 +100,17 @@ class MinuteCandleRefreshServiceTest {
         at: ZonedDateTime = tradingNow,
         freshSeconds: Long = 60,
         waitTimeoutMillis: Long = 2_000,
+        fetchDeadlineMillis: Long = 10_000,
+        lock: MinuteRefreshLock = FakeRefreshLock(),
     ) = MinuteCandleRefreshService(
         fetcher = fetcher,
         store = store,
         calendar = calendar(at),
+        refreshLock = lock,
         freshSeconds = freshSeconds,
         meters = SimpleMeterRegistry(),
         waitTimeoutMillis = waitTimeoutMillis,
+        fetchDeadlineMillis = fetchDeadlineMillis,
         now = { at },
     )
 
@@ -217,6 +235,45 @@ class MinuteCandleRefreshServiceTest {
         } finally {
             pool.shutdownNow()
         }
+    }
+
+    @Test
+    fun `분산 락을 얻지 못하면 다른 인스턴스가 신선화 중이므로 KIS를 건너뛴다`() {
+        val store = InMemoryMinuteStore()
+        val fetcher = PagingFetcher()
+        val service = service(fetcher, store, lock = FakeRefreshLock(acquirable = false))
+
+        assertEquals(0, service.refresh("005930"))
+        assertEquals(0, fetcher.calls.get())
+    }
+
+    @Test
+    fun `신선화가 끝나면 분산 락을 해제한다`() {
+        val store = InMemoryMinuteStore()
+        val lock = FakeRefreshLock()
+        service(PagingFetcher(), store, lock = lock).refresh("005930")
+
+        assertEquals(1, lock.acquired.get())
+        assertEquals(1, lock.released.get())
+    }
+
+    @Test
+    fun `페치 데드라인이 지나면 페이징을 멈추고 채운 만큼만 적재한다`() {
+        val store = InMemoryMinuteStore()
+        store.upsert(
+            (0..180).map { offset ->
+                val time = LocalTime.of(9, 0).plusMinutes(offset.toLong())
+                MinuteCandle("005930", "20260804", time.format(hhmm), 1, 1, 1, 1, 1, 100)
+            },
+        )
+        val fetcher = PagingFetcher()
+        val service = service(fetcher, store, fetchDeadlineMillis = 0)
+
+        val synced = service.refresh("005930")
+
+        assertEquals(1, fetcher.calls.get())
+        assertEquals(30, synced)
+        assertEquals("1304", store.latestTime("005930", "20260804"))
     }
 
     @Test
