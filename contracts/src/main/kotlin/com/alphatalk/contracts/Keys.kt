@@ -23,5 +23,7 @@ object Keys {
 
     fun minuteRefreshLock(code: String) = "lock:minute-refresh:$code"
 
+    fun kisRestRate(keyId: String) = "rate:kis-rest:$keyId"
+
     fun badge(userId: Long) = "badge:$userId"
 }

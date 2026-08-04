@@ -4,6 +4,7 @@ import com.alphatalk.kis.KisClientException
 import com.alphatalk.kis.KisSigns
 import com.alphatalk.kis.auth.KisTokenManager
 import com.alphatalk.kis.model.KisAccount
+import com.alphatalk.kis.rate.KisRateGate
 import com.alphatalk.kis.rate.KisRateLimiters
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
@@ -23,6 +24,7 @@ class KisRestClient(
     private val restBaseUrl: String,
     private val tokens: KisTokenManager,
     private val limiters: KisRateLimiters,
+    private val gate: KisRateGate = KisRateGate.NOOP,
     private val http: HttpClient = HttpClient.newBuilder().connectTimeout(CONNECT_TIMEOUT).build(),
     private val requestTimeout: Duration = REQUEST_TIMEOUT,
 ) {
@@ -148,6 +150,7 @@ class KisRestClient(
 
     private fun send(account: KisAccount, path: String, trId: String, params: Map<String, String>): HttpResponse<String> {
         limiters.acquire(account.keyId)
+        gate.acquire(account.keyId)
         val query = params.entries.joinToString("&") { "${encode(it.key)}=${encode(it.value)}" }
         val uri = URI.create(restBaseUrl + path + if (query.isEmpty()) "" else "?$query")
         val request = HttpRequest.newBuilder()

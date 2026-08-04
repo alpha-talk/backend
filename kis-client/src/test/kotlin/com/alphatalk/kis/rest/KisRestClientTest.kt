@@ -183,6 +183,24 @@ class KisRestClientTest {
     }
 
     @Test
+    fun `모든 REST 호출은 공용 gate를 계정 키로 통과한다`() {
+        val gated = mutableListOf<String>()
+        val tokens = KisTokenManager(server.baseUrl, InMemoryKisTokenStore())
+        val gatedClient = KisRestClient(
+            server.baseUrl,
+            tokens,
+            KisRateLimiters(100.0, 1.0),
+            gate = { keyId -> gated += keyId },
+        )
+        server.enqueue("/oauth2/tokenP", 200, tokenBody("T1"))
+        server.enqueue("/uapi/test", 200, """{"rt_cd":"0"}""")
+
+        gatedClient.getJson(account, "/uapi/test", "TR123", emptyMap())
+
+        assertEquals(listOf("key1"), gated)
+    }
+
+    @Test
     fun `분봉 rt_cd가 0이 아니면 예외를 던진다`() {
         server.enqueue("/oauth2/tokenP", 200, tokenBody("T1"))
         server.enqueue(

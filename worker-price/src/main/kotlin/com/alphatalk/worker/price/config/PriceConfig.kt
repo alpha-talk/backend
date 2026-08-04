@@ -5,6 +5,7 @@ import com.alphatalk.kis.auth.KisTokenManager
 import com.alphatalk.kis.auth.KisTokenStore
 import com.alphatalk.kis.model.KisAccount
 import com.alphatalk.kis.model.KisEnv
+import com.alphatalk.kis.rate.KisRateGate
 import com.alphatalk.kis.rate.KisRateLimiters
 import com.alphatalk.kis.rest.KisRestClient
 import com.alphatalk.kis.ws.KisFrameParser
@@ -31,6 +32,7 @@ import com.alphatalk.worker.price.poll.QuoteSnapshotFetcher
 import com.alphatalk.worker.price.poll.RestPollingScheduler
 import com.alphatalk.worker.price.poll.WarmupPoller
 import com.alphatalk.worker.price.publish.QuotePublisher
+import com.alphatalk.worker.price.rate.RedisKisRateGate
 import com.alphatalk.worker.price.session.PriceLifecycle
 import com.alphatalk.worker.price.session.PriceOrchestrator
 import com.alphatalk.worker.price.session.SessionPool
@@ -44,6 +46,7 @@ import org.springframework.context.annotation.Configuration
 import org.springframework.data.redis.connection.RedisConnectionFactory
 import org.springframework.data.redis.core.StringRedisTemplate
 import java.lang.management.ManagementFactory
+import kotlin.math.ceil
 import java.time.Duration
 import java.time.LocalDate
 
@@ -122,7 +125,22 @@ class PriceConfig {
 
     @Bean
     @ConditionalOnProperty("alphatalk.price.enabled", havingValue = "true")
-    fun quoteSnapshotFetcher(props: PriceProperties, tokens: KisTokenManager): QuoteSnapshotFetcher {
+    fun kisRateGate(props: PriceProperties, redis: StringRedisTemplate): KisRateGate {
+        val rate = kisEnv(props).restCallsPerSecond * props.rateFactor
+        return RedisKisRateGate(
+            redis = redis,
+            capacity = ceil(rate).toInt().coerceAtLeast(1),
+            refillPerSecond = rate,
+        )
+    }
+
+    @Bean
+    @ConditionalOnProperty("alphatalk.price.enabled", havingValue = "true")
+    fun quoteSnapshotFetcher(
+        props: PriceProperties,
+        tokens: KisTokenManager,
+        gate: KisRateGate,
+    ): QuoteSnapshotFetcher {
         val env = kisEnv(props)
         val accounts = parseAccounts(props.accountsJson)
         check(accounts.isNotEmpty()) {
@@ -133,6 +151,7 @@ class PriceConfig {
             env.restBaseUrl,
             tokens,
             KisRateLimiters(env.restCallsPerSecond, props.rateFactor * props.pollBudgetFactor),
+            gate,
         )
         return QuoteSnapshotFetcher { code -> rest.quoteSnapshot(account, code) }
     }
@@ -175,6 +194,7 @@ class PriceConfig {
         props: PriceProperties,
         tokens: KisTokenManager,
         candleRestLimiters: KisRateLimiters,
+        gate: KisRateGate,
     ): DailyCandleFetcher {
         val env = kisEnv(props)
         val accounts = parseAccounts(props.accountsJson)
@@ -182,7 +202,7 @@ class PriceConfig {
             "alphatalk.price.candle-enabled=true에는 KIS_ACCOUNTS 계정이 최소 1개 필요하다"
         }
         val account = accounts.first()
-        val rest = KisRestClient(env.restBaseUrl, tokens, candleRestLimiters)
+        val rest = KisRestClient(env.restBaseUrl, tokens, candleRestLimiters, gate)
         return DailyCandleFetcher { code, from, to -> rest.dailyCandles(account, code, from, to) }
     }
 
@@ -246,6 +266,7 @@ class PriceConfig {
         props: PriceProperties,
         tokens: KisTokenManager,
         candleRestLimiters: KisRateLimiters,
+        gate: KisRateGate,
     ): MinuteCandleFetcher {
         val env = kisEnv(props)
         val accounts = parseAccounts(props.accountsJson)
@@ -253,7 +274,7 @@ class PriceConfig {
             "alphatalk.price.minute-candle-enabled=true에는 KIS_ACCOUNTS 계정이 최소 1개 필요하다"
         }
         val account = accounts.first()
-        val rest = KisRestClient(env.restBaseUrl, tokens, candleRestLimiters)
+        val rest = KisRestClient(env.restBaseUrl, tokens, candleRestLimiters, gate)
         return MinuteCandleFetcher { code, to -> rest.minuteCandles(account, code, to) }
     }
 
