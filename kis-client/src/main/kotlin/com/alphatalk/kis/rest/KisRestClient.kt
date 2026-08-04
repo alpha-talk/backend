@@ -15,6 +15,7 @@ import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import java.nio.charset.StandardCharsets
 import java.time.LocalDate
+import java.time.LocalTime
 import java.time.format.DateTimeFormatter
 
 class KisRestClient(
@@ -94,6 +95,46 @@ class KisRestClient(
         }
     }
 
+    fun minuteCandles(account: KisAccount, code: String, toTime: LocalTime): List<KisMinuteCandle> {
+        val json = getJson(
+            account,
+            MINUTE_CHART_PATH,
+            TR_MINUTE_CHART,
+            mapOf(
+                "FID_ETC_CLS_CODE" to "",
+                "FID_COND_MRKT_DIV_CODE" to "J",
+                "FID_INPUT_ISCD" to code,
+                "FID_INPUT_HOUR_1" to toTime.format(DateTimeFormatter.ofPattern("HHmmss")),
+                "FID_PW_DATA_INCU_YN" to "Y",
+            ),
+        )
+        val rtCd = json.path("rt_cd").asText("")
+        if (rtCd != "0") {
+            throw KisClientException(
+                "minute chart failed: keyId=${account.keyId} code=$code rt_cd=$rtCd msg_cd=${json.path("msg_cd").asText("")}",
+            )
+        }
+        return json.path("output2").mapNotNull { row ->
+            val date = row.path("stck_bsop_date").asText("")
+            val hour = row.path("stck_cntg_hour").asText("")
+            if (date.isBlank() || hour.length < 4) {
+                null
+            } else {
+                KisMinuteCandle(
+                    code = code,
+                    date = date,
+                    time = hour.take(4),
+                    open = row.path("stck_oprc").asText().trim().toLong(),
+                    high = row.path("stck_hgpr").asText().trim().toLong(),
+                    low = row.path("stck_lwpr").asText().trim().toLong(),
+                    close = row.path("stck_prpr").asText().trim().toLong(),
+                    volume = row.path("cntg_vol").asText().trim().toLong(),
+                    accValue = row.path("acml_tr_pbmn").asText().trim().toLong(),
+                )
+            }
+        }
+    }
+
     internal fun getJson(account: KisAccount, path: String, trId: String, params: Map<String, String>): JsonNode {
         val first = send(account, path, trId, params)
         if (first.statusCode() == 401) {
@@ -134,7 +175,9 @@ class KisRestClient(
     companion object {
         const val TR_INQUIRE_PRICE = "FHKST01010100"
         const val TR_DAILY_CHART = "FHKST03010100"
+        const val TR_MINUTE_CHART = "FHKST03010200"
         private const val INQUIRE_PRICE_PATH = "/uapi/domestic-stock/v1/quotations/inquire-price"
         private const val DAILY_CHART_PATH = "/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice"
+        private const val MINUTE_CHART_PATH = "/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice"
     }
 }
