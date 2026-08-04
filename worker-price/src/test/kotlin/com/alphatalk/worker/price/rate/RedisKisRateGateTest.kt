@@ -10,8 +10,6 @@ import org.testcontainers.containers.GenericContainer
 import org.testcontainers.junit.jupiter.Container
 import org.testcontainers.junit.jupiter.Testcontainers
 import java.time.Duration
-import java.util.concurrent.atomic.AtomicLong
-import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 
 @Testcontainers(disabledWithoutDocker = true)
@@ -25,6 +23,9 @@ class RedisKisRateGateTest {
             LettuceConnectionFactory(redis.host, redis.getMappedPort(6379)).apply { afterPropertiesSet() }
         }
         private val template by lazy { StringRedisTemplate(factory) }
+
+        private const val HOUR_MILLIS = 3_600_000L
+        private const val NEVER_REFILLS = 0.001
 
         @AfterAll
         @JvmStatic
@@ -42,33 +43,27 @@ class RedisKisRateGateTest {
         capacity: Int,
         refill: Double,
         timeoutMillis: Long,
-        clock: AtomicLong,
+        clockOffsetMillis: Long = 0,
     ) = RedisKisRateGate(
         redis = template,
         capacity = capacity,
         refillPerSecond = refill,
         acquireTimeout = Duration.ofMillis(timeoutMillis),
-        clock = { clock.get() },
-        sleeper = { clock.addAndGet(it) },
+        clock = { System.currentTimeMillis() + clockOffsetMillis },
     )
 
     @Test
-    fun `용량만큼 즉시 통과하고 초과분은 충전을 기다린다`() {
-        val clock = AtomicLong(1_000_000)
-        val gate = gate(capacity = 2, refill = 10.0, timeoutMillis = 5_000, clock = clock)
+    fun `용량만큼 즉시 통과하고 초과분은 충전을 기다렸다 통과한다`() {
+        val gate = gate(capacity = 2, refill = 100.0, timeoutMillis = 5_000)
 
         gate.acquire("key1")
         gate.acquire("key1")
-        val before = clock.get()
         gate.acquire("key1")
-
-        assertEquals(true, clock.get() > before)
     }
 
     @Test
     fun `충전이 타임아웃 안에 오지 않으면 예외를 던진다`() {
-        val clock = AtomicLong(1_000_000)
-        val gate = gate(capacity = 1, refill = 0.001, timeoutMillis = 300, clock = clock)
+        val gate = gate(capacity = 1, refill = NEVER_REFILLS, timeoutMillis = 200)
 
         gate.acquire("key1")
 
@@ -77,9 +72,8 @@ class RedisKisRateGateTest {
 
     @Test
     fun `서로 다른 인스턴스가 같은 키의 버킷을 공유한다`() {
-        val clock = AtomicLong(1_000_000)
-        val first = gate(capacity = 2, refill = 0.001, timeoutMillis = 200, clock = clock)
-        val second = gate(capacity = 2, refill = 0.001, timeoutMillis = 200, clock = clock)
+        val first = gate(capacity = 2, refill = NEVER_REFILLS, timeoutMillis = 200)
+        val second = gate(capacity = 2, refill = NEVER_REFILLS, timeoutMillis = 200)
 
         first.acquire("key1")
         second.acquire("key1")
@@ -88,9 +82,30 @@ class RedisKisRateGateTest {
     }
 
     @Test
+    fun `인스턴스 시계가 어긋나도 Redis 시계 하나로 계산해 한도를 넘지 않는다`() {
+        val behind = gate(
+            capacity = 2,
+            refill = NEVER_REFILLS,
+            timeoutMillis = 200,
+            clockOffsetMillis = -HOUR_MILLIS,
+        )
+        val ahead = gate(
+            capacity = 2,
+            refill = NEVER_REFILLS,
+            timeoutMillis = 200,
+            clockOffsetMillis = HOUR_MILLIS,
+        )
+
+        behind.acquire("key1")
+        behind.acquire("key1")
+
+        assertFailsWith<KisClientException> { ahead.acquire("key1") }
+        assertFailsWith<KisClientException> { behind.acquire("key1") }
+    }
+
+    @Test
     fun `키가 다르면 버킷도 분리된다`() {
-        val clock = AtomicLong(1_000_000)
-        val gate = gate(capacity = 1, refill = 0.001, timeoutMillis = 200, clock = clock)
+        val gate = gate(capacity = 1, refill = NEVER_REFILLS, timeoutMillis = 200)
 
         gate.acquire("key1")
         gate.acquire("key2")
