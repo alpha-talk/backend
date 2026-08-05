@@ -39,7 +39,16 @@ alphatalk:
       fanout-cap: 100             # 초과 시 MARKET 강등 (명세 §3.6)
       coverage-stocks: []
     article:
-      allowed-host-suffixes: []
+      allowed-host-suffixes:     # 비우면 본문 fetch 전면 차단 — worker-ingest 피드 언론사와 짝을 맞춘다
+        - yna.co.kr
+        - hankyung.com
+        - mk.co.kr
+        - donga.com
+        - khan.co.kr
+        - hani.co.kr
+        - chosun.com
+        - newsis.com
+        - sedaily.com
       min-host-interval: 1s
     models:
       summary: claude-haiku-4-5
