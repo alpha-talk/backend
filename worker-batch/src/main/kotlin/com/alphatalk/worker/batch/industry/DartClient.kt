@@ -4,6 +4,7 @@ data class DartCorp(
     val corpCode: String,
     val stockCode: String?,
     val corpName: String,
+    val modifyDate: String?,
 )
 
 data class DartCompany(
@@ -15,6 +16,8 @@ data class DartCompany(
     val stockName: String?,
     val homepage: String?,
 )
+
+class DartApiException(val status: String, message: String) : RuntimeException(message)
 
 interface DartClient {
     fun corpCodes(): List<DartCorp>

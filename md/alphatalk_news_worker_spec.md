@@ -230,13 +230,14 @@ stream payload (ws_api_spec §4.3 확장 — ⚠️ §6 증보):
 | `SECTOR` | 기준금리 인상 → 은행·증권·건설 | 섹터를 구성 종목으로 해소해 종목별 stream_event INSERT + PUBLISH. payload에 `scope`·`sector` 표기 | 섹터 방이 없으므로("종목 하나=방 하나") 구성 종목 방이 유일한 노출면 — 방에서 "섹터 이슈" 배지로 구분 |
 | `MARKET` | 코스피 전체 급락, 거시 지표 | 방 fan-out **없음** — 일일 다이제스트 '시장 이슈'로만 반영(§4.2) | 전 방 동보(~2,600방)는 노이즈·비용만 크고 종목 방의 정보가치가 없다 |
 
-- **섹터 축은 KSIC 업종이다(v0.7 변경)**: `industry`·`stock_industry.group_code`(KIS 워커 명세 §4)를 쓴다. KIS 마스터의 업종 필드는 대분류 18종(`제조` 하나에 557종목)뿐이라 fan-out 대상이 되지 못했다 — 중분류 필드도 28종에 그쳐 한계가 같다. OpenDART 기업개황의 표준산업분류를 **소분류(3자리) 기준**으로 접어 쓰고, 구성 종목이 상한을 넘는 그룹만 **세분류(4자리)로 한 단계 분할**한다. 실측(2026-08, 활성 2,604종목): 177그룹 · 중앙값 6 · 최대 95 · 상한 초과 0.
-- **섹터 해소**: `stock_industry.group_code`로 구성 종목을 조회한다. `alphatalk.llm.sector.coverage-stocks`는 **비어 있으면 구성 종목 전체**에 배달하고, 설정하면 그 목록과의 교집합만 배달한다(수집 범위를 좁힐 때만 쓰는 선택 장치). 무차별 배달의 방어선은 커버리지가 아니라 **상한(기본 100종목)** 이며, 초과 시 MARKET으로 강등한다. 배치가 그룹 크기를 상한 아래로 유지하므로 정상 운영에서는 강등이 일어나지 않는다.
+- **섹터 축은 KSIC 업종이다(v0.7 변경)**: 기존 `sector`·`stock_master.sector_code`를 **그대로 쓰되 내용을 KSIC로 교체**했다(KIS 워커 명세 §4). 축을 둘로 늘리지 않는다 — 종목당 유효 업종이 하나인 현재 요구에서는 별도 membership 테이블이 필요 없고, core-api는 `sector.name`만 읽으므로 이름이 KSIC 세부 업종명으로 바뀌어도 API 형태가 깨지지 않는다. KIS 마스터의 업종 필드는 대분류 18종(`제조` 하나에 557종목)뿐이라 fan-out 대상이 되지 못했다 — 중분류 필드도 28종에 그쳐 한계가 같다. `sector`에는 KSIC 전 계층(2~5자리)을 `level`·`parent_code`·`version`과 함께 보유하고, 라우팅에 쓰는 유효 코드만 `stock_master.sector_code`에 배정한다. 배정은 **소분류(3자리)에서 시작해 상한을 넘는 그룹만 한 단계씩 세세분류(5자리)까지 내린다**. 실측(2026-08, 활성 2,604종목): 177그룹 · 중앙값 6 · 최대 95 · 상한 초과 0.
+- **섹터 해소**: `stock_master.sector_code`로 활성 구성 종목을 조회해 합집합·중복 제거 후 배달한다. **커버리지 화이트리스트는 제거했다** — 무차별 배달의 방어선은 배치가 유지하는 그룹 크기이고, worker-llm의 `fanout-cap`(기본 100)은 그 불변식이 깨졌을 때만 작동하는 이중 안전장치다. **상한 초과를 MARKET으로 바꾸지 않는다** — `MARKET`은 시장 전체 기사라는 뜻이고 fan-out 규모와 무관하다. 초과 시 scope는 `SECTOR`로 두고 실시간 발행만 억제해 일일 다이제스트에만 반영한다(`sector.fanout.suppressed` 카운터).
 - **직접 관련 종목**도 SECTOR scope 클러스터에서는 `scope=SECTOR` + 자기 섹터(`sectorOf`)를 payload에 표기한다(클라 배지 일관성).
-- **섹터 스키마는 N6 선행 조건**: `industry`·`stock_industry` 조회 예외는 삼키지 않고 전파해 PEL이 재시도하게 한다(빈 결과를 성공으로 오인해 영구 미발행되는 것 방지). 업종 목록이 **빈 결과인 것도 예외로 취급**한다 — worker-batch `industry_sync`가 적재하지 않았으면 뉴스 처리가 진행되지 않는 게 정상이다(fail-closed).
-- **DART 신고 업종이 뉴스 맥락과 어긋나는 종목은 수동 보정한다**: `alphatalk.batch.dart.group-overrides`. 예로 삼성전자의 신고 업종은 `264 통신 및 방송장비`라 반도체 그룹에 들어가지 않는다 — `261`로 덮되 `induty_code`는 원본을 보존해 추적 가능하게 둔다. 손으로 관리하는 예외라 **시총 상위·뉴스 빈출 종목으로 짧게 유지**하고, 늘어나면 축 자체를 재검토한다.
-- **종목당 업종은 하나다**: 겸업(반도체+통신장비 등)을 표현하지 못한다. 복수 업종이 필요해지면 `stock_industry` PK를 `(code, group_code)`로 확장하는 스키마 변경이 선행돼야 한다.
-- **우선주는 업종이 없다**: OpenDART는 보통주에만 회사코드를 부여해 우선주 113종목(2026-08 기준)은 `stock_industry`에 들어가지 않는다 — 섹터 뉴스를 받지 못한다. 보통주 업종 승계는 후속 과제다.
+- **섹터 스키마는 N6 선행 조건**: `sector`·`stock_master.sector_code` 조회 예외는 삼키지 않고 전파해 PEL이 재시도하게 한다(빈 결과를 성공으로 오인해 영구 미발행되는 것 방지). 업종 목록이 **빈 결과인 것도 예외로 취급**한다 — worker-batch `industry_sync`가 적재하지 않았으면 뉴스 처리가 진행되지 않는 게 정상이다(fail-closed).
+- **DART 신고 업종이 뉴스 맥락과 어긋나는 종목은 수동 보정한다**: `alphatalk.batch.dart.group-overrides`. 예로 삼성전자의 신고 업종은 `264 통신 및 방송장비`라 반도체 그룹에 들어가지 않는다 — `sector_code`만 `261`로 덮고 `stock_master.dart_induty_code`에 DART 원본을 보존해 추적 가능하게 둔다. 손으로 관리하는 예외라 **시총 상위·뉴스 빈출 종목으로 짧게 유지**하고, 늘어나면 축 자체를 재검토한다.
+- **종목당 업종은 하나다**: 겸업(반도체+통신장비 등)을 표현하지 못한다. 복수 업종이 실제 요구가 되면 `stock_master.sector_code` 대신 `(code, sector_code)` membership 테이블을 추가한다.
+- **우선주는 업종이 없다**: OpenDART는 보통주에만 회사코드를 부여해 우선주 113종목(2026-08 기준)은 `sector_code`가 비어 섹터 뉴스를 받지 못한다. 보통주 업종 승계는 후속 과제다.
+- **업종 후보 제시는 아직 전량 열거다**: 프롬프트에 실제 사용 중인 업종(2026-08 기준 177개)을 모두 싣는다. KSIC 세세분류(1,196개)까지 라우팅을 넓히려면 열거로는 감당되지 않으므로, 기사 임베딩으로 업종 Top-K를 뽑아 후보 10~20개만 제시하는 구조가 선행돼야 한다 — 후속 과제(§7).
 - **감성은 섹터별로 반대일 수 있다** — 금리 인상은 은행 POSITIVE·건설 NEGATIVE. `news_cluster_sector`에 섹터 단위로 저장하고, fan-out된 각 stream_event에는 **그 종목이 속한 섹터의 감성**을 싣는다.
 - **노이즈 가드 2중**: ① 매크로 기사는 물량이 많지만 클러스터링(§3.3)이 선행 방어선이다 — 금리 기사 수십 건도 1클러스터 1이벤트. ② `impact=LOW` 판정은 실시간 fan-out 없이 다이제스트에만 반영한다(방 스트림은 HIGH·MEDIUM만).
 - SECTOR 이벤트 payload 예:
@@ -330,8 +331,8 @@ news_cluster_sector(
   sentiment TEXT, confidence NUMERIC(3,2), impact TEXT,   -- HIGH | MEDIUM | LOW
   PK(cluster_id, sector_code)
 )
--- news_cluster_sector.sector_code는 industry.code(KSIC 소분류/세분류)를 참조한다
--- industry·stock_industry·dart_corp_map은 KIS 워커 명세 §4 소유(반영됨) — 여기서 재정의하지 않는다
+-- news_cluster_sector.sector_code는 sector.code(KSIC 코드)를 참조한다
+-- sector·stock_master·dart_corp_map은 KIS 워커 명세 §4 소유(반영됨) — 여기서 재정의하지 않는다
 
 -- INDEX news_article (embedding vector_cosine_ops) ivfflat · (title_hash) · (published_at)
 -- INDEX news_cluster (last_article_at) — 72h 창 후보 조회
@@ -365,7 +366,7 @@ Liquibase 마이그레이션(`db-migrations` 모듈, `news/` changelog — Flywa
 | redis_contract v0.4 §3·§4 | `lock:cluster:{code}` — 클러스터 판정 직렬화 락(TTL 3s) | ✅ 반영 |
 | redis_contract v0.4 §3·§4 | `rate:article-fetch:{host}` — llm-worker 인스턴스 간 원문 요청 간격 | ✅ 반영 |
 | ws_api_spec **v0.5** §4.3 | `sentiment`·`scope`·`sector{}`·`sources[]`(news) · `digest{}`(ai) — 전부 optional, 비파괴 | ✅ 반영 |
-| KIS 워커 명세 §4 | `industry`·`stock_industry`·`dart_corp_map`(OpenDART 기업개황 → KSIC 업종축, `industry_sync` 적재) | ✅ 반영 (v0.7) |
+| KIS 워커 명세 §4 | `sector`(KSIC 계층)·`stock_master.sector_code`·`dart_induty_code`·`dart_corp_map`(OpenDART 기업개황 → KSIC 업종축, `industry_sync` 적재) | ✅ 반영 (v0.7) |
 | :contracts | `Queues`·`Keys.seenIngest/clusterLock`·`IngestQueueEntry`·`StreamData` v0.5 확장 | ✅ 반영 (N0) |
 | :contracts | `StreamCategory` + `IngestType.streamCategory()` — 수집 type→발행 category·이벤트 type 관통 매핑 | ✅ 반영 |
 | redis_contract **v0.7** §1.1 | `stream:{code}` 공동 발행자 batch-worker(투자의견 직접 발행 — KIS 명세 §3.3, llm-worker 비관여) | ✅ 반영 |
@@ -439,7 +440,7 @@ SPRING_PROFILES_ACTIVE=local LLM_PROVIDER=fake ./gradlew :worker-llm:bootRun
 | **N3** | 클러스터링(pgvector·락·편입 병합) + 네이버 검색 API 소스 | 동일 사건 3개 언론사 기사 → stream_event 1건 · `sources` 3건 · 편입 재발행 0건 |
 | **N4** | 일일 다이제스트 | `digest:{code}:{date}` 멱등 — 잡 2회 적재에도 브리핑 1건 · 호재/악재 리스트 노출 |
 | **N5** | 운영: DLQ·XPENDING/XCLAIM·메트릭·알람 | poison 5회 초과 → DLQ 격리 · PEL 알람 동작 |
-| **N6** | 섹터·매크로(§3.6): scope 판정 · 섹터 fan-out · 다이제스트 sectorIssues/marketIssues — **선행: `industry`·`stock_industry` 적재(worker-batch `industry_sync`)** | 금리 인상 기사 1건 → 은행 섹터 커버 종목 각 방에 `scope=SECTOR` 이벤트 1건씩 · MARKET 기사는 방 이벤트 0건 + 다이제스트 반영 |
+| **N6** | 섹터·매크로(§3.6): scope 판정 · 섹터 fan-out · 다이제스트 sectorIssues/marketIssues — **선행: `sector`·`stock_master.sector_code` 적재(worker-batch `industry_sync`)** | 금리 인상 기사 1건 → 은행 섹터 커버 종목 각 방에 `scope=SECTOR` 이벤트 1건씩 · MARKET 기사는 방 이벤트 0건 + 다이제스트 반영 |
 
 각 단계 = PR 1개(git_convention: scope=worker-ingest/worker-llm). `ClusterAssigner` 판정 로직은 refcount 규칙과 동급이다 — 단위 테스트 없는 변경 금지.
 

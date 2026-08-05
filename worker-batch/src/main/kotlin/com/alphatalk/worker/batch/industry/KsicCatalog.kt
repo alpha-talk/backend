@@ -5,27 +5,30 @@ import org.springframework.stereotype.Component
 
 data class KsicEntry(val code: String, val name: String) {
     val level: Int get() = code.length
+    val parentCode: String? get() = if (code.length > MIN_LEVEL) code.dropLast(1) else null
+
+    private companion object {
+        const val MIN_LEVEL = 2
+    }
 }
 
 @Component
 class KsicCatalog(private val resourcePath: String = DEFAULT_RESOURCE) {
 
     private val entries: List<KsicEntry> by lazy { load() }
+    private val byCode: Map<String, KsicEntry> by lazy { entries.associateBy(KsicEntry::code) }
 
     fun entries(): List<KsicEntry> = entries
 
-    fun ancestorNameOf(code: String): String? =
-        (code.length - 1 downTo 2).asSequence()
-            .map { code.take(it) }
-            .mapNotNull { prefix -> entries.firstOrNull { it.code == prefix }?.name }
-            .firstOrNull()
+    fun contains(code: String): Boolean = code in byCode
 
-    fun groupCodeOf(indutyCode: String): String = truncate(indutyCode, GROUP_LEVEL)
-
-    fun subGroupCodeOf(indutyCode: String): String = truncate(indutyCode, SUB_GROUP_LEVEL)
-
-    private fun truncate(indutyCode: String, level: Int): String =
+    fun sectorCodeOf(indutyCode: String, level: Int): String =
         indutyCode.trim().let { if (it.length >= level) it.take(level) else it }
+
+    fun ancestorNameOf(code: String): String? =
+        (code.length - 1 downTo MIN_LEVEL).asSequence()
+            .mapNotNull { byCode[code.take(it)]?.name }
+            .firstOrNull()
 
     private fun load(): List<KsicEntry> {
         val resource = ClassPathResource(resourcePath)
@@ -65,9 +68,11 @@ class KsicCatalog(private val resourcePath: String = DEFAULT_RESOURCE) {
         return fields
     }
 
-    private companion object {
-        const val DEFAULT_RESOURCE = "ksic10.csv"
-        const val GROUP_LEVEL = 3
-        const val SUB_GROUP_LEVEL = 4
+    companion object {
+        const val VERSION = "KSIC_10"
+        const val BASE_LEVEL = 3
+        const val MAX_LEVEL = 5
+        private const val MIN_LEVEL = 2
+        private const val DEFAULT_RESOURCE = "ksic10.csv"
     }
 }

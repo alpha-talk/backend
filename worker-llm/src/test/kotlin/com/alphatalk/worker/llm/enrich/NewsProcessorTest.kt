@@ -61,7 +61,6 @@ class NewsProcessorTest {
 
     private fun processor(
         fanoutCap: Int = 100,
-        coverage: List<String> = emptyList(),
         llm: LlmClient = defaultLlm(),
     ) = NewsProcessor(
         store = store,
@@ -80,7 +79,7 @@ class NewsProcessorTest {
         meters = SimpleMeterRegistry(),
         transactions = TransactionRunner { it() },
         props = LlmProperties(
-            sector = LlmProperties.Sector(fanoutCap = fanoutCap, coverageStocks = coverage),
+            sector = LlmProperties.Sector(fanoutCap = fanoutCap),
         ),
         clock = clock,
     )
@@ -213,8 +212,6 @@ class NewsProcessorTest {
         assertEquals(true, store.stockLinks(store.clusters.keys.single()).single { it.code == "000660" }.rejected)
     }
 
-    private val bankCoverage = listOf("105560", "055550", "086790")
-
     @Test
     fun `SECTOR - 구성 종목 fan-out에 섹터·감성 표기`() {
         verdict = ClusterSummaryOutput(
@@ -224,7 +221,7 @@ class NewsProcessorTest {
             stocks = emptyList(),
             sectors = listOf(SectorVerdict("27", Sentiment.POSITIVE, Impact.HIGH, 0.9, "이자이익")),
         )
-        processor(coverage = bankCoverage).process(entry("a1", "기준금리 인상", codes = emptyList(), macroHint = "금리"))
+        processor().process(entry("a1", "기준금리 인상", codes = emptyList(), macroHint = "금리"))
         assertEquals(3, events.inserted.size)
         events.inserted.forEach {
             assertEquals("SECTOR", it.data.scope)
@@ -243,14 +240,14 @@ class NewsProcessorTest {
             stocks = listOf(StockVerdict("005930", true, Sentiment.POSITIVE, 0.9, "직접")),
             sectors = listOf(SectorVerdict("33", Sentiment.POSITIVE, Impact.HIGH, 0.9, "")),
         )
-        processor(coverage = listOf("005930", "000660")).process(entry("a1", "반도체 업황"))
+        processor().process(entry("a1", "반도체 업황"))
         val direct = events.inserted.single { it.code == "005930" }
         assertEquals("SECTOR", direct.data.scope)
         assertEquals("반도체", direct.data.sector?.name)
     }
 
     @Test
-    fun `SECTOR - 커버리지 교집합만 배달`() {
+    fun `SECTOR - fan-out 상한 초과면 실시간 발행만 억제하고 scope는 유지한다`() {
         verdict = ClusterSummaryOutput(
             summary = "금리 인상",
             marketRelevant = true,
@@ -258,22 +255,9 @@ class NewsProcessorTest {
             stocks = emptyList(),
             sectors = listOf(SectorVerdict("27", Sentiment.POSITIVE, Impact.HIGH, 0.9, "")),
         )
-        processor(coverage = listOf("105560")).process(entry("a1", "기준금리 인상", codes = emptyList(), macroHint = "금리"))
-        assertEquals(listOf("105560"), events.inserted.map { it.code })
-    }
-
-    @Test
-    fun `SECTOR - fan-out 상한 초과면 MARKET 강등`() {
-        verdict = ClusterSummaryOutput(
-            summary = "금리 인상",
-            marketRelevant = true,
-            scope = NewsScope.SECTOR,
-            stocks = emptyList(),
-            sectors = listOf(SectorVerdict("27", Sentiment.POSITIVE, Impact.HIGH, 0.9, "")),
-        )
-        processor(fanoutCap = 2, coverage = bankCoverage).process(entry("a1", "기준금리 인상", codes = emptyList(), macroHint = "금리"))
+        processor(fanoutCap = 2).process(entry("a1", "기준금리 인상", codes = emptyList(), macroHint = "금리"))
         assertEquals(0, events.inserted.size)
-        assertEquals("MARKET", store.clusters.values.single().scope)
+        assertEquals("SECTOR", store.clusters.values.single().scope)
     }
 
     @Test

@@ -35,7 +35,6 @@ data class LlmProperties(
 
     data class Sector(
         val fanoutCap: Int = 100,
-        val coverageStocks: List<String> = emptyList(),
     )
 
     data class Models(

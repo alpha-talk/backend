@@ -20,6 +20,7 @@ open class IndustrySyncJob(
     private val requestInterval: Duration = Duration.ofMillis(50),
     private val groupMaxSize: Int = 100,
     private val groupOverrides: Map<String, String> = emptyMap(),
+    private val maxFailureRatio: Double = 0.05,
     private val clock: () -> Instant = Instant::now,
     private val today: () -> LocalDate = { LocalDate.now(SEOUL) },
     private val pause: (Duration) -> Unit = { Thread.sleep(it.toMillis()) },
@@ -32,39 +33,51 @@ open class IndustrySyncJob(
         syncOnce()
     }
 
-    fun syncOnce(): Int {
+    open fun syncOnce(): Int {
         val runDate = today().format(DateTimeFormatter.BASIC_ISO_DATE)
         val runId = runs.start(JOB_NAME, runDate, clock()) ?: run {
             log.info("industry sync skipped, already succeeded: runDate={}", runDate)
             return 0
         }
         try {
-            val catalog = store.upsertIndustries(ksic.entries())
             val listed = dart.corpCodes().filter { !it.stockCode.isNullOrBlank() }
             check(listed.isNotEmpty()) { "OpenDART corpCode 응답에 상장사가 없다" }
             store.upsertCorpMap(listed)
 
             val active = store.activeStockCodes()
             val targets = listed.filter { it.stockCode in active }
-            val collected = mutableListOf<StockIndustryRecord>()
-            val failed = mutableListOf<DartCorp>()
-            targets.forEach { corp -> fetch(corp)?.let(collected::add) ?: failed.add(corp) }
-            failed.toList().forEach { corp ->
-                fetch(corp)?.let {
-                    collected += it
-                    failed -= corp
-                }
-            }
+            val outcome = collectAll(targets)
+            checkFailureBudget(outcome, targets.size)
 
-            val grouped = applyOverrides(regroupOversized(collected))
-            store.upsertIndustries(missingCatalogEntries(grouped))
-            val stored = store.upsertStockIndustries(grouped)
+            val retired = active - targets.mapNotNull(DartCorp::stockCode).toSet() + outcome.missing
+            val indutyCodes = store.activeIndutyCodes().toMutableMap()
+            indutyCodes.keys.removeAll(retired)
+            outcome.profiles.forEach { (code, company) -> company.indutyCode?.let { indutyCodes[code] = it } }
+            val sectorCodes = assignSectors(indutyCodes)
+
+            store.upsertSectors(catalogEntriesFor(sectorCodes.values.toSet()))
+            val records = indutyCodes.map { (code, induty) ->
+                val company = outcome.profiles[code]
+                StockIndustryRecord(
+                    code = code,
+                    indutyCode = induty,
+                    sectorCode = sectorCodes.getValue(code),
+                    corpName = company?.corpName,
+                    corpNameEng = company?.corpNameEng,
+                    stockName = company?.stockName,
+                    homepage = company?.homepage,
+                )
+            }
+            val stored = store.upsertStockIndustries(records)
+            val cleared = store.clearIndustryAssignments(active - indutyCodes.keys)
+
             meters.counter("batch.industry.synced").increment(stored.toDouble())
-            meters.counter("batch.industry.failed").increment(failed.size.toDouble())
-            runs.succeed(runId, stored, failed.size, clock())
+            meters.counter("batch.industry.failed").increment(outcome.failed.size.toDouble())
+            runs.succeed(runId, stored, outcome.failed.size, clock())
             log.info(
-                "industry sync done: catalog={} corpMap={} targets={} stored={} failed={}",
-                catalog, listed.size, targets.size, stored, failed.size,
+                "industry sync done: corpMap={} targets={} fetched={} assigned={} cleared={} missing={} failed={}",
+                listed.size, targets.size, outcome.profiles.size, stored, cleared,
+                outcome.missing.size, outcome.failed.size,
             )
             return stored
         } catch (e: Exception) {
@@ -73,76 +86,119 @@ open class IndustrySyncJob(
         }
     }
 
-    private fun applyOverrides(records: List<StockIndustryRecord>): List<StockIndustryRecord> {
-        if (groupOverrides.isEmpty()) return records
-        val applied = records.map { record ->
-            groupOverrides[record.code]?.takeIf { it != record.groupCode }?.let { group ->
-                log.info("industry group overridden: code={} {} -> {}", record.code, record.groupCode, group)
-                record.copy(groupCode = group)
-            } ?: record
-        }
-        val codes = records.mapTo(mutableSetOf(), StockIndustryRecord::code)
-        groupOverrides.keys.filterNot { it in codes }.forEach {
-            log.warn("industry group override targets an uncollected stock: code={}", it)
-        }
-        return applied
-    }
-
-    private fun missingCatalogEntries(records: List<StockIndustryRecord>): List<KsicEntry> {
-        val known = ksic.entries().mapTo(mutableSetOf(), KsicEntry::code)
-        return records.map(StockIndustryRecord::groupCode)
-            .distinct()
-            .filter { it !in known }
-            .map { group ->
-                val name = ksic.ancestorNameOf(group)
-                if (name == null) {
-                    log.warn("industry group has no KSIC name and no ancestor: group={}", group)
-                } else {
-                    log.info("industry group falls back to ancestor name: group={} name={}", group, name)
-                }
-                KsicEntry(group, name ?: group)
+    private fun assignSectors(indutyCodes: Map<String, String>): Map<String, String> {
+        var assigned = indutyCodes.mapValues { ksic.sectorCodeOf(it.value, KsicCatalog.BASE_LEVEL) }
+        var level = KsicCatalog.BASE_LEVEL
+        while (level < KsicCatalog.MAX_LEVEL) {
+            val splittable = assigned.oversizedGroups().filterKeys { group ->
+                assigned.any { (code, g) -> g == group && indutyCodes.getValue(code).length > group.length }
             }
-    }
-
-    private fun regroupOversized(records: List<StockIndustryRecord>): List<StockIndustryRecord> {
-        val oversized = records.groupingBy(StockIndustryRecord::groupCode).eachCount()
-            .filterValues { it > groupMaxSize }
-        if (oversized.isEmpty()) return records
-        log.info("splitting oversized industry groups: {}", oversized)
-        val split = records.map {
-            if (it.groupCode in oversized.keys) it.copy(groupCode = ksic.subGroupCodeOf(it.indutyCode)) else it
-        }
-        split.groupingBy(StockIndustryRecord::groupCode).eachCount()
-            .filterValues { it > groupMaxSize }
-            .forEach { (group, size) ->
-                log.warn("industry group still exceeds fan-out cap after split: group={} size={}", group, size)
+            if (splittable.isEmpty()) break
+            level += 1
+            log.info("splitting oversized sector groups at level {}: {}", level, splittable)
+            assigned = assigned.mapValues { (code, group) ->
+                if (group in splittable) ksic.sectorCodeOf(indutyCodes.getValue(code), level) else group
             }
-        return split
+        }
+        val overridden = applyOverrides(assigned)
+        reportUnsplittable(overridden, indutyCodes)
+        return overridden
     }
 
-    private fun fetch(corp: DartCorp): StockIndustryRecord? {
+    private fun reportUnsplittable(assigned: Map<String, String>, indutyCodes: Map<String, String>) {
+        val oversized = assigned.oversizedGroups()
+        if (oversized.isEmpty()) return
+        val splittable = oversized.filterKeys { group ->
+            assigned.any { (code, g) -> g == group && indutyCodes.getValue(code).length > group.length }
+        }
+        check(splittable.isEmpty()) {
+            "쪼갤 수 있는데도 fan-out 상한($groupMaxSize)을 넘는 그룹이 남는다: $splittable"
+        }
+        meters.counter("batch.industry.oversized").increment(oversized.size.toDouble())
+        log.warn(
+            "sector groups exceed fan-out cap({}) and cannot be split further — worker-llm이 실시간 발행을 억제한다: {}",
+            groupMaxSize, oversized,
+        )
+    }
+
+    private fun Map<String, String>.oversizedGroups(): Map<String, Int> =
+        values.groupingBy { it }.eachCount().filterValues { it > groupMaxSize }
+
+    private fun applyOverrides(assigned: Map<String, String>): Map<String, String> {
+        if (groupOverrides.isEmpty()) return assigned
+        groupOverrides.keys.filterNot { it in assigned }.forEach {
+            log.warn("sector override targets a stock without an industry code: code={}", it)
+        }
+        return assigned.mapValues { (code, group) ->
+            groupOverrides[code]?.also {
+                if (it != group) log.info("sector overridden: code={} {} -> {}", code, group, it)
+            } ?: group
+        }
+    }
+
+    private fun catalogEntriesFor(sectorCodes: Set<String>): List<KsicEntry> {
+        val fallbacks = sectorCodes.filterNot(ksic::contains).map { code ->
+            val name = ksic.ancestorNameOf(code)
+            if (name == null) {
+                log.warn("sector code has no KSIC name and no ancestor: code={}", code)
+            } else {
+                log.info("sector code falls back to ancestor name: code={} name={}", code, name)
+            }
+            KsicEntry(code, name ?: code)
+        }
+        return ksic.entries() + fallbacks
+    }
+
+    private fun collectAll(targets: List<DartCorp>): CollectOutcome {
+        val outcome = CollectOutcome()
+        targets.forEach { collect(it, outcome) }
+        outcome.failed.toList().forEach { corp ->
+            outcome.failed -= corp
+            collect(corp, outcome)
+        }
+        return outcome
+    }
+
+    private fun collect(corp: DartCorp, outcome: CollectOutcome) {
+        val code = corp.stockCode ?: return
         pause(requestInterval)
         val company = try {
             dart.company(corp.corpCode)
+        } catch (e: DartApiException) {
+            if (e.status in FATAL_STATUSES) throw e
+            log.warn("company lookup failed: corpCode={} status={}", corp.corpCode, e.status)
+            outcome.failed += corp
+            return
         } catch (e: Exception) {
-            log.warn("company lookup failed: corpCode={} corpName={}", corp.corpCode, corp.corpName, e)
-            null
-        } ?: return null
-        val induty = company.indutyCode?.takeIf { it.isNotBlank() } ?: return null
-        val code = corp.stockCode ?: return null
-        return StockIndustryRecord(
-            code = code,
-            indutyCode = induty,
-            groupCode = ksic.groupCodeOf(induty),
-            corpName = company.corpName,
-            corpNameEng = company.corpNameEng,
-            stockName = company.stockName,
-            homepage = company.homepage,
-        )
+            log.warn("company lookup failed: corpCode={}", corp.corpCode, e)
+            outcome.failed += corp
+            return
+        }
+        if (company?.indutyCode == null) {
+            outcome.missing += code
+            return
+        }
+        outcome.profiles[code] = company
+    }
+
+    private fun checkFailureBudget(outcome: CollectOutcome, targetCount: Int) {
+        if (targetCount == 0 || outcome.failed.isEmpty()) return
+        val ratio = outcome.failed.size.toDouble() / targetCount
+        check(ratio <= maxFailureRatio) {
+            "OpenDART 조회 실패가 허용치를 넘는다: ${outcome.failed.size}/$targetCount (허용 ${maxFailureRatio})"
+        }
+        log.warn("industry sync tolerated lookup failures: {}/{}", outcome.failed.size, targetCount)
+    }
+
+    private class CollectOutcome {
+        val profiles = mutableMapOf<String, DartCompany>()
+        val missing = mutableSetOf<String>()
+        val failed = mutableListOf<DartCorp>()
     }
 
     companion object {
         const val JOB_NAME = "industry_sync"
         private val SEOUL: ZoneId = ZoneId.of("Asia/Seoul")
+        private val FATAL_STATUSES = setOf("010", "011", "012", "020", "021", "100", "101", "800", "901")
     }
 }

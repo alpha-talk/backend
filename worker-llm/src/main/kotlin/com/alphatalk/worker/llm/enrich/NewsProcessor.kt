@@ -40,7 +40,6 @@ class NewsProcessor(
     private val clock: Clock = Clock.systemUTC(),
 ) {
     private val fanoutCap: Int = props.sector.fanoutCap
-    private val coverage: Set<String> = props.sector.coverageStocks.toSet()
 
     fun process(entry: IngestQueueEntry) {
         val assignment = assigner.assign(entry)
@@ -131,10 +130,12 @@ class NewsProcessor(
         verdict.sectors.filter { it.impact != Impact.LOW }.forEach { sv ->
             val ref = SectorRef(code = sv.sectorCode, name = sectors.sectorName(sv.sectorCode) ?: sv.sectorCode)
             sectors.memberCodes(sv.sectorCode)
-                .filter { coverage.isEmpty() || it in coverage }
                 .forEach { code -> fanout.putIfAbsent(code, sv to ref) }
         }
-        if (fanout.size > fanoutCap) return NewsScope.MARKET
+        if (fanout.size > fanoutCap) {
+            meters.counter("sector.fanout.suppressed").increment()
+            fanout.clear()
+        }
 
         val direct = relevantStocks.map { it.code }.toSet()
         relevantStocks.forEach { stock ->
