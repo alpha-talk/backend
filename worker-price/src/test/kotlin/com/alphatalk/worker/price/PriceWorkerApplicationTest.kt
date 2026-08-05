@@ -38,10 +38,9 @@ class PriceWorkerApplicationTest {
     }
 
     @Test
-    fun `기본 프로필은 비활성 상태로 뜨고 모의투자 환경을 가리킨다`() {
+    fun `기본 프로필은 비활성 상태로 뜬다`() {
         assertFalse(properties.enabled)
         assertFalse(properties.candleEnabled)
-        assertEquals("vts", properties.env)
         assertEquals(200, properties.conflationMs)
     }
 }

@@ -5,7 +5,6 @@ import org.springframework.boot.context.properties.ConfigurationProperties
 @ConfigurationProperties("alphatalk.price")
 data class PriceProperties(
     val enabled: Boolean = false,
-    val env: String = "vts",
     val accountsJson: String = "[]",
     val conflationMs: Long = 200,
     val rateFactor: Double = 0.75,
