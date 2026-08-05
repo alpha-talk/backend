@@ -1,3 +1,3 @@
 ALTER TABLE sector ALTER COLUMN version SET DEFAULT 'KIS_MASTER';
 
-UPDATE sector SET version = 'KIS_MASTER';
+UPDATE sector SET version = 'KIS_MASTER' WHERE level = 0;

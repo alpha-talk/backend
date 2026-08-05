@@ -23,6 +23,7 @@ import com.alphatalk.worker.llm.persist.StreamEventStore
 import com.alphatalk.worker.llm.publish.StreamPublisher
 import com.alphatalk.worker.llm.sector.SectorDirectory
 import com.fasterxml.jackson.databind.ObjectMapper
+import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -122,7 +123,7 @@ class LlmWorkerIntegrationTest {
     @Autowired
     private lateinit var objectMapper: ObjectMapper
 
-    private fun newsProcessorWithFanoutCap(cap: Int) = NewsProcessor(
+    private fun newsProcessorWithFanoutCap(cap: Int, meters: MeterRegistry = SimpleMeterRegistry()) = NewsProcessor(
         store = clusterStore,
         assigner = clusterAssigner,
         fetcher = articleFetcher,
@@ -132,7 +133,7 @@ class LlmWorkerIntegrationTest {
         publisher = streamPublisher,
         eventIds = eventIdGenerator,
         mapper = objectMapper,
-        meters = SimpleMeterRegistry(),
+        meters = meters,
         transactions = transactions,
         props = LlmProperties(sector = LlmProperties.Sector(fanoutCap = cap)),
     )
@@ -226,7 +227,7 @@ class LlmWorkerIntegrationTest {
             assertNotNull(message)
             assertTrue(message.contains("\"POSITIVE\""))
         } finally {
-            listener.stop()
+            listener.destroy()
         }
     }
 
@@ -369,19 +370,24 @@ class LlmWorkerIntegrationTest {
             )!!
             assertTrue(payload.contains("\"SECTOR\""))
             assertTrue(payload.contains("은행"))
-            assertEquals(3, (0 until 3).count { received.poll(5, TimeUnit.SECONDS) != null })
+            assertEquals(
+                setOf(Channels.stream("055550"), Channels.stream("086790"), Channels.stream("105560")),
+                received.awaitChannels(3),
+            )
         } finally {
-            received.stop()
+            received.close()
         }
     }
 
     @Test
     fun `N6 - fan-out 상한을 넘으면 scope는 SECTOR로 두고 실시간 발행만 억제한다`() {
-        val processor = newsProcessorWithFanoutCap(2)
+        val meters = SimpleMeterRegistry()
+        val processor = newsProcessorWithFanoutCap(2, meters)
 
         processor.process(newsEntry("hankyung:cap1", "기준금리 인상에 은행 이자이익 개선 기대", codes = emptyList()))
 
         assertTrue(sectorEventCodes().isEmpty())
+        assertEquals(1.0, meters.counter("sector.fanout.suppressed").count())
         assertEquals(
             "SECTOR",
             jdbc.queryForObject("SELECT scope FROM news_cluster", emptyMap<String, Any>(), String::class.java),
@@ -403,7 +409,7 @@ class LlmWorkerIntegrationTest {
         val container = RedisMessageListenerContainer().apply {
             setConnectionFactory(redisTemplate.connectionFactory!!)
             channels.forEach { channel ->
-                addMessageListener({ message, _ -> queue.add(String(message.body)) }, ChannelTopic(channel))
+                addMessageListener({ message, _ -> queue.add(String(message.channel)) }, ChannelTopic(channel))
             }
             afterPropertiesSet()
             start()
@@ -415,9 +421,10 @@ class LlmWorkerIntegrationTest {
         private val queue: LinkedBlockingQueue<String>,
         private val container: RedisMessageListenerContainer,
     ) {
-        fun poll(timeout: Long, unit: TimeUnit): String? = queue.poll(timeout, unit)
+        fun awaitChannels(count: Int): Set<String> =
+            (0 until count).mapNotNull { queue.poll(5, TimeUnit.SECONDS) }.toSet()
 
-        fun stop() = container.stop()
+        fun close() = container.destroy()
     }
 
     @Test
