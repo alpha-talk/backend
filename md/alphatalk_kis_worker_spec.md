@@ -326,7 +326,16 @@ OpenDART 응답 상태는 **세 갈래로 나눈다**. ① 데이터 없음(`013
 
 **부분 성공의 경계**: 종목 단위 실패가 `max-failure-ratio`(기본 5%)를 넘으면 아무것도 저장하지 않고 잡을 실패시킨다. 전량 실패를 성공으로 기록하면 다음 실행이 같은 날 열리지 않는다. 허용치 안이면 실패 종목은 직전 실행의 `dart_induty_code`를 그대로 유지한 채 그룹 계산에 포함한다.
 
-**쓰기는 네 트랜잭션으로 나뉜다**(`dart_corp_map` → `sector` → `stock_master` 배정 → 배정 해제). 중간에 프로세스가 죽으면 축이 반만 적용된 상태로 남고, 회복은 다음 실행의 재적재에 맡긴다 — 모든 쓰기가 upsert라 재실행이 수렴한다. 주 1회 크론이라 자동 회복까지 최대 일주일이 걸리므로, `batch_job_run`이 `RUNNING`으로 멈춘 회차는 수동 재실행 대상이다. 금액 컬럼은 원 단위로 저장하고, API 단위 변환은 core-api 책임이다(명세와 합의).
+**쓰기는 네 트랜잭션으로 나뉜다**(`dart_corp_map` → `sector` → `stock_master` 배정 → 배정 해제). 중간에 프로세스가 죽으면 축이 반만 적용된 상태로 남고, 회복은 다음 실행의 재적재에 맡긴다 — 모든 쓰기가 upsert라 재실행이 수렴한다. 스냅샷을 staging 테이블에 적재한 뒤 짧은 트랜잭션으로 교체하는 방식이 더 안전하지만, 주 1회·단일 인스턴스 잡이라 현 단계에서는 부분 적용을 **의식적으로 수용**한다. 대신 아래를 운영 조건으로 둔다.
+
+| 조건 | 내용 |
+|---|---|
+| 알람 | `batch_job_run`의 `industry_sync`가 `RUNNING`(선행 회차 중단) 또는 `FAILED`로 남으면 알람. 주 1회 크론이라 자동 회복까지 최대 일주일이다 |
+| 수동 재실행 | 같은 `run_date`의 `batch_job_run` 행을 지우고 잡을 재실행한다(성공 행이 있으면 스킵된다) |
+| 첫 전환 배포 | ① `industry_sync` 성공 확인 → ② 활성 종목 배정 수·그룹 분포 확인(`sector_code is not null`, 그룹당 종목 수 ≤ `group-max-size`) → ③ worker-llm 기동. 순서를 지키지 않으면 worker-llm이 fail-closed로 멈춘다 |
+| 메트릭 | `batch.industry.synced` · `batch.industry.failed` · `batch.industry.oversized` |
+
+**`sector.version`은 행의 출처를 표시한다** — `industry_sync`가 upsert한 행만 `KSIC_10`이고, 전환 전부터 있던 KIS 업종 행은 `KIS_MASTER`로 남는다(컬럼 기본값도 `KIS_MASTER`). 전환이 끝나 참조가 사라진 `KIS_MASTER` 행은 정리 가능하다. 금액 컬럼은 원 단위로 저장하고, API 단위 변환은 core-api 책임이다(명세와 합의).
 
 ## 5. 설정·환경변수
 
