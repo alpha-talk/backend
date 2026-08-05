@@ -10,7 +10,6 @@ import java.time.Duration
 import java.util.zip.ZipInputStream
 import javax.xml.stream.XMLInputFactory
 import javax.xml.stream.XMLStreamConstants
-import javax.xml.stream.XMLStreamReader
 
 class HttpDartClient(
     private val apiKey: String,
@@ -25,8 +24,9 @@ class HttpDartClient(
         .build()
 
     override fun corpCodes(): List<DartCorp> {
-        val zipped = get("$baseUrl/corpCode.xml?crtfc_key=$apiKey", HttpResponse.BodyHandlers.ofByteArray())
-        val xml = unzipSingleEntry(zipped) ?: throw IllegalStateException("corpCode 응답에 XML 엔트리가 없다")
+        val body = get("$baseUrl/corpCode.xml?crtfc_key=$apiKey", HttpResponse.BodyHandlers.ofByteArray())
+        val xml = unzipSingleEntry(body)
+            ?: throw DartApiException(statusOfXml(body), "corpCode 응답이 zip이 아니다: ${statusOfXml(body)}")
         return parseCorpCodes(xml)
     }
 
@@ -36,7 +36,11 @@ class HttpDartClient(
             HttpResponse.BodyHandlers.ofString(),
         )
         val node = mapper.readTree(body)
-        if (node.path("status").asText() != OK_STATUS) return null
+        when (val status = node.path("status").asText()) {
+            OK_STATUS -> Unit
+            NO_DATA_STATUS -> return null
+            else -> throw DartApiException(status, "OpenDART company 조회 실패: status=$status ${node.path("message").asText()}")
+        }
         return DartCompany(
             corpCode = corpCode,
             stockCode = node.path("stock_code").asText().trim().ifBlank { null },
@@ -56,17 +60,23 @@ class HttpDartClient(
             .build()
         val response = http.send(request, handler)
         if (response.statusCode() !in 200..299) {
-            throw IllegalStateException("OpenDART 응답 실패: status=${response.statusCode()}")
+            throw DartApiException(response.statusCode().toString(), "OpenDART HTTP ${response.statusCode()}")
         }
         return response.body()
     }
 
+    private fun statusOfXml(body: ByteArray): String =
+        Regex("<status>(\\d+)</status>").find(String(body, Charsets.UTF_8).take(512))?.groupValues?.get(1)
+            ?: UNKNOWN_STATUS
+
     private fun unzipSingleEntry(zipped: ByteArray): ByteArray? =
-        ZipInputStream(ByteArrayInputStream(zipped)).use { zip ->
-            generateSequence { zip.nextEntry }
-                .firstOrNull { !it.isDirectory && it.name.endsWith(".xml", ignoreCase = true) }
-                ?.let { zip.readBytes() }
-        }
+        runCatching {
+            ZipInputStream(ByteArrayInputStream(zipped)).use { zip ->
+                generateSequence { zip.nextEntry }
+                    .firstOrNull { !it.isDirectory && it.name.endsWith(".xml", ignoreCase = true) }
+                    ?.let { zip.readBytes() }
+            }
+        }.getOrNull()
 
     private fun parseCorpCodes(xml: ByteArray): List<DartCorp> {
         val reader = xmlInputFactory().createXMLStreamReader(ByteArrayInputStream(xml))
@@ -74,6 +84,7 @@ class HttpDartClient(
         var corpCode: String? = null
         var corpName: String? = null
         var stockCode: String? = null
+        var modifyDate: String? = null
         val text = StringBuilder()
         try {
             while (reader.hasNext()) {
@@ -84,6 +95,7 @@ class HttpDartClient(
                             corpCode = null
                             corpName = null
                             stockCode = null
+                            modifyDate = null
                         }
                     }
                     XMLStreamConstants.CHARACTERS, XMLStreamConstants.CDATA -> text.append(reader.text)
@@ -93,8 +105,14 @@ class HttpDartClient(
                             "corp_code" -> corpCode = value
                             "corp_name" -> corpName = value
                             "stock_code" -> stockCode = value
+                            "modify_date" -> modifyDate = value
                             LIST_ELEMENT -> corpCode?.let {
-                                corps += DartCorp(it, stockCode?.ifBlank { null }, corpName.orEmpty())
+                                corps += DartCorp(
+                                    corpCode = it,
+                                    stockCode = stockCode?.ifBlank { null },
+                                    corpName = corpName.orEmpty(),
+                                    modifyDate = modifyDate?.ifBlank { null },
+                                )
                             }
                         }
                         text.setLength(0)
@@ -102,12 +120,10 @@ class HttpDartClient(
                 }
             }
         } finally {
-            reader.closeQuietly()
+            runCatching { reader.close() }
         }
         return corps
     }
-
-    private fun XMLStreamReader.closeQuietly() = runCatching { close() }
 
     private fun xmlInputFactory(): XMLInputFactory = XMLInputFactory.newFactory().apply {
         setProperty(XMLInputFactory.SUPPORT_DTD, false)
@@ -116,6 +132,8 @@ class HttpDartClient(
 
     private companion object {
         const val OK_STATUS = "000"
+        const val NO_DATA_STATUS = "013"
+        const val UNKNOWN_STATUS = "unknown"
         const val LIST_ELEMENT = "list"
         const val USER_AGENT = "alphatalk-worker-batch"
     }

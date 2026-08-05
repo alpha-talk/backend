@@ -36,8 +36,7 @@ alphatalk:
       similarity-threshold: 0.85
       lock-ttl: 3s
     sector:
-      fanout-cap: 100             # 초과 시 MARKET 강등 (명세 §3.6)
-      coverage-stocks: []
+      fanout-cap: 100             # 초과 시 실시간 fan-out 억제 — 다이제스트로만 반영 (명세 §3.6)
     article:
       allowed-host-suffixes:     # 비우면 본문 fetch 전면 차단 — worker-ingest 피드 언론사와 짝을 맞춘다
         - yna.co.kr

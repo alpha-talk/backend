@@ -207,6 +207,10 @@ KIS 프레임 → 파싱 → 종목별 최신값 버퍼(덮어쓰기)
 | `invest_opinion_sync` | KIS `GET /uapi/domestic-stock/v1/quotations/invest-opbysec` · TR `FHKST663400C0` — 회원사 코드별 전 종목 투자의견(의견·직전의견·목표가) | 영업일 07:00 이상 18:00 미만 **10분 주기**(07:00~17:50) | 활성 회원사 `B`개 × 연속조회 페이지 `P` | `(code, business_date, broker_code, content_hash)` |
 | `dart_corp_map` | OpenDART `corpCode.xml`(zip) — corp_code↔종목코드 매핑 | 주 1회 | 전 상장사 | `corp_code` |
 | `industry_sync` | OpenDART `corpCode.xml` → `company.json`(`induty_code`) + KSIC 10차 분류표(worker-batch 리소스 `ksic10.csv`) | 주 1회 일 06:30 (`dart_corp_map`과 한 잡) | 활성 종목 ~2.6k (우선주 제외 — DART는 보통주에만 corp_code 부여) | `code` upsert |
+
+**업종 소유권**: `stock_master_sync`는 종목명·시장·상장주식수·상장일·활성 여부만 소유하고 **업종 필드를 갱신하지 않는다**(KIS 마스터의 업종 파싱·`sector` 적재는 제거). `sector` 카탈로그와 `stock_master.sector_code`·`dart_induty_code`는 `industry_sync`가 단독 소유한다 — 두 잡이 같은 컬럼을 쓰면 일 배치가 주 배치 결과를 덮는다.
+
+**전환 절차**: 마이그레이션은 기존 `sector` 행과 `stock_master.sector_code`를 지우지 않는다. 지우면 첫 `industry_sync`가 끝날 때까지 worker-llm이 fail-closed로 멈추고, 그 사이 들어온 기사는 PEL 재시도 한도를 넘겨 `queue:ingest:dlq`로 영구 격리된다(DLQ 재처리 경로 없음). KIS 업종축을 그대로 둔 채 `industry_sync`가 `sector_code`를 KSIC로 덮어쓰게 하고, 참조가 끊긴 KIS 업종 행은 `allSectors()`의 사용 중 필터에서 자연히 빠진다.
 | `financials_sync` | OpenDART `list.json`(신규 정기공시 감지) → `fnlttSinglAcntAll.json` (`bsns_year`, `reprt_code` 11013/11012/11014/11011, `fs_div=CFS`→미존재 시 `OFS`) | 매일 06:00 (공시 시즌 증분) | 신규 공시 기업만 | `(corp_code, year, reprt_code)` |
 
 업종은 `idxcode.mst`(45바이트 고정폭 — 코드 5자리 + 이름)가 코드와 이름을 함께 준다. 종목 마스터의 업종 필드는 4자리라 그대로는 `sector.code`와 맞지 않는다. **앞에 시장 접두어(KOSPI `0`, KOSDAQ `1`)를 붙여 5자리로 맞춘다** — 예: KOSPI `0027` → `00027`(제조), KOSDAQ `1009` → `11009`(제조). 두 시장이 별개 코드 대역을 쓰므로 접두어 없이는 서로 충돌한다.
@@ -302,12 +306,11 @@ invest_opinion(code CHAR(6), business_date CHAR(8), broker_code TEXT, broker_nam
 stream_event(..., source_key TEXT NULL, ...)
 -- UNIQUE(source_key) WHERE source_key IS NOT NULL
 -- source_key DDL의 논리 소유자는 core-api stream, changeSet 파일의 단일 소유자는 db-migrations
-dart_corp_map(corp_code CHAR(8) PK, code CHAR(6) UQ NULL, corp_name, updated_at)
-industry(code TEXT PK, name TEXT, level SMALLINT)          -- KSIC 10차 전 계층(2~5자리)
-stock_industry(code CHAR(6) PK, induty_code TEXT,          -- DART 신고 원본(2~5자리, 회사마다 깊이가 다르다)
-             group_code TEXT,                              -- 뉴스 fan-out 단위 → industry.code
-             corp_name, corp_name_eng, stock_name, homepage, updated_at)
--- INDEX stock_industry (group_code)
+dart_corp_map(corp_code CHAR(8) PK, code CHAR(6) UQ NULL, corp_name, modify_date, updated_at)
+sector(code PK, name, level SMALLINT, parent_code NULL, version)  -- KSIC 10차 전 계층(2~5자리)
+stock_master(..., sector_code,        -- 라우팅에 쓰는 유효 KSIC 코드 → sector.code
+             dart_induty_code, ...)   -- DART 신고 원본(2~5자리, 회사마다 깊이가 다르다)
+-- INDEX sector (parent_code) · stock_master (sector_code)
 financial_summary(code, year SMALLINT, reprt_code CHAR(5), fs_div CHAR(3),
              revenue BIGINT, operating_profit BIGINT, net_income BIGINT,
              assets BIGINT, liabilities BIGINT, equity BIGINT, disclosed_at,
@@ -315,7 +318,15 @@ financial_summary(code, year SMALLINT, reprt_code CHAR(5), fs_div CHAR(3),
 batch_job_run(id, job, run_date, status, ok_count, fail_count, started_at, finished_at, error)
 ```
 
-읽기 소비자는 core-api stockinfo/search 모듈(REST 명세 §8, `sector`·`stock_master.sector_code`)과 worker-llm 섹터 해소(`industry`·`stock_industry.group_code` — [뉴스 파이프라인 명세](alphatalk_news_worker_spec.md) §3.6)다. **두 업종 축은 공존한다** — KIS 마스터 업종(18종 대분류)은 core-api 조회용으로 남기고, 뉴스 fan-out은 KSIC 축을 쓴다. `group_code`는 KSIC 소분류(3자리)를 기본으로 하되 구성 종목이 `group-max-size`(기본 100, worker-llm `fanout-cap`과 맞춘다)를 넘는 그룹만 세분류(4자리)로 분할하고, KSIC 표에 없는 옛 코드는 상위 분류 이름으로 대체한다. DART 신고 업종이 뉴스 맥락과 어긋나는 소수 종목은 `group-overrides`로 보정한다(`induty_code` 원본은 보존). 금액 컬럼은 원 단위로 저장하고, API 단위 변환은 core-api 책임이다(명세와 합의).
+읽기 소비자는 core-api stockinfo/search 모듈(REST 명세 §8)과 worker-llm 섹터 해소([뉴스 파이프라인 명세](alphatalk_news_worker_spec.md) §3.6)이며, **둘 다 같은 `sector`·`stock_master.sector_code` 축을 본다**(v0.3에서 KIS 대분류 18종 → KSIC로 교체). core-api는 `sector.name`만 읽으므로 이름이 바뀌어도 API 형태는 깨지지 않는다.
+
+`sector_code` 배정 규칙: KSIC 소분류(3자리)에서 시작해, 구성 종목이 `group-max-size`(기본 100, worker-llm `fanout-cap`과 맞춘다)를 넘는 그룹만 한 단계씩 세세분류(5자리)까지 내린다. **더 내려갈 자릿수가 없는 그룹은 상한을 넘어도 배정을 유지하고 경고·메트릭(`batch.industry.oversized`)만 남긴다** — DART 신고 코드가 3자리뿐인 종목이 100개를 넘으면 어떤 자릿수로도 쪼개지지 않으므로, 여기서 잡을 실패시키면 같은 입력으로 매주 실패해 업종축이 영구히 비게 된다. 그 경우의 노이즈 방어는 worker-llm의 `fanout-cap`(실시간 발행 억제)이 맡는다. 반대로 **쪼갤 수 있는데도 상한을 넘는 배정이 남으면 잡을 실패시킨다** — 그건 배정 로직의 결함이다. 그룹 크기는 **조회 성공분이 아니라 활성 종목 전체**(직전 실행의 `dart_induty_code` 포함)로 계산한다. 부분 성공분만으로 재계산하면 같은 산업이 3자리와 4자리 그룹으로 갈라진다. KSIC 표에 없는 옛 코드는 상위 분류 이름으로 대체하고, DART 신고 업종이 뉴스 맥락과 어긋나는 소수 종목은 `group-overrides`로 `sector_code`만 보정한다(`dart_induty_code` 원본은 보존).
+
+OpenDART 응답 상태는 **세 갈래로 나눈다**. ① 데이터 없음(`013`)·회사코드 목록에서 사라진 종목은 **배정 해제 대상**이다 — `sector_code`와 `dart_induty_code`를 함께 비운다. 둘 중 하나만 지우면 다음 실행이 낡은 `dart_induty_code`를 되살려 배정이 영원히 회수되지 않는다. ② 인증·요청제한·시스템 점검(`010`·`011`·`012`·`020`·`021`·`100`·`101`·`800`·`901`)은 예외로 전파해 잡을 실패시킨다. ③ 네트워크 오류·타임아웃·응답 파싱 실패는 종목 단위 실패로 흡수하고 1회 재시도한다 — 2,600건을 순차 호출하는 잡에서 한 건의 연결 끊김이 전체 회차를 버리면 안 된다.
+
+**부분 성공의 경계**: 종목 단위 실패가 `max-failure-ratio`(기본 5%)를 넘으면 아무것도 저장하지 않고 잡을 실패시킨다. 전량 실패를 성공으로 기록하면 다음 실행이 같은 날 열리지 않는다. 허용치 안이면 실패 종목은 직전 실행의 `dart_induty_code`를 그대로 유지한 채 그룹 계산에 포함한다.
+
+**쓰기는 네 트랜잭션으로 나뉜다**(`dart_corp_map` → `sector` → `stock_master` 배정 → 배정 해제). 중간에 프로세스가 죽으면 축이 반만 적용된 상태로 남고, 회복은 다음 실행의 재적재에 맡긴다 — 모든 쓰기가 upsert라 재실행이 수렴한다. 주 1회 크론이라 자동 회복까지 최대 일주일이 걸리므로, `batch_job_run`이 `RUNNING`으로 멈춘 회차는 수동 재실행 대상이다. 금액 컬럼은 원 단위로 저장하고, API 단위 변환은 core-api 책임이다(명세와 합의).
 
 ## 5. 설정·환경변수
 

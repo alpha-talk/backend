@@ -20,3 +20,10 @@ databaseChangeLog:
         - sqlFile:
             path: sql/0003_dart_industry.sql
             relativeToChangelogFile: true
+  - changeSet:
+      id: 0004-sector-ksic
+      author: worker-batch
+      changes:
+        - sqlFile:
+            path: sql/0004_sector_ksic.sql
+            relativeToChangelogFile: true

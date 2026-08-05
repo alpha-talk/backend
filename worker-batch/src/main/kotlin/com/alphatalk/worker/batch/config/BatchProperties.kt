@@ -22,5 +22,6 @@ data class BatchProperties(
         val requestInterval: Duration = Duration.ofMillis(50),
         val groupMaxSize: Int = 100,
         val groupOverrides: Map<String, String> = emptyMap(),
+        val maxFailureRatio: Double = 0.05,
     )
 }

@@ -7,7 +7,6 @@ import com.alphatalk.worker.batch.industry.IndustrySyncJob
 import com.alphatalk.worker.batch.industry.KsicCatalog
 import com.alphatalk.worker.batch.job.BatchJobRunStore
 import com.alphatalk.worker.batch.master.MasterFileFetcher
-import com.alphatalk.worker.batch.master.SectorStore
 import com.alphatalk.worker.batch.master.StockMasterStore
 import com.alphatalk.worker.batch.master.StockMasterSyncJob
 import com.fasterxml.jackson.databind.ObjectMapper
@@ -24,7 +23,6 @@ class BatchConfig {
         val client = KisMasterClient(props.stockMaster.baseUrl)
         return object : MasterFileFetcher {
             override fun fetch(market: com.alphatalk.kis.master.KisMarket) = client.download(market)
-            override fun fetchSectors() = client.downloadSectors()
         }
     }
 
@@ -48,6 +46,7 @@ class BatchConfig {
             requestInterval = props.dart.requestInterval,
             groupMaxSize = props.dart.groupMaxSize,
             groupOverrides = props.dart.groupOverrides,
+            maxFailureRatio = props.dart.maxFailureRatio,
         )
     }
 
@@ -56,8 +55,7 @@ class BatchConfig {
     fun stockMasterSyncJob(
         files: MasterFileFetcher,
         stocks: StockMasterStore,
-        sectors: SectorStore,
         runs: BatchJobRunStore,
         meters: MeterRegistry,
-    ): StockMasterSyncJob = StockMasterSyncJob(files, stocks, sectors, runs, meters)
+    ): StockMasterSyncJob = StockMasterSyncJob(files, stocks, runs, meters)
 }

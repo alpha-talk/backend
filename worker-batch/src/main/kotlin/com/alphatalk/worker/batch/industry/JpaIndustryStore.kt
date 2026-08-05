@@ -9,15 +9,17 @@ import jakarta.persistence.Table
 import org.hibernate.annotations.JdbcTypeCode
 import org.hibernate.type.SqlTypes
 import org.springframework.data.jpa.repository.JpaRepository
+import org.springframework.data.jpa.repository.Modifying
 import org.springframework.data.jpa.repository.Query
+import org.springframework.data.repository.query.Param
 import org.springframework.stereotype.Repository
 import org.springframework.transaction.annotation.Transactional
 import java.time.Clock
 import java.time.Instant
 
 @Entity
-@Table(name = "industry")
-class IndustryEntity(
+@Table(name = "sector")
+class SectorCatalogEntity(
     @Id
     @Column(name = "code", nullable = false)
     val code: String = "",
@@ -25,6 +27,10 @@ class IndustryEntity(
     var name: String = "",
     @Column(name = "level", nullable = false)
     var level: Short = 0,
+    @Column(name = "parent_code")
+    var parentCode: String? = null,
+    @Column(name = "version", nullable = false)
+    var version: String = KsicCatalog.VERSION,
 )
 
 @Entity
@@ -39,67 +45,67 @@ class DartCorpMapEntity(
     var code: String? = null,
     @Column(name = "corp_name", nullable = false)
     var corpName: String = "",
+    @Column(name = "modify_date")
+    var modifyDate: String? = null,
     @Column(name = "updated_at", nullable = false)
     var updatedAt: Instant = Instant.EPOCH,
 )
 
-@Entity
-@Table(name = "stock_industry")
-class StockIndustryEntity(
-    @Id
-    @JdbcTypeCode(SqlTypes.CHAR)
-    @Column(name = "code", nullable = false, length = 6)
-    val code: String = "",
-    @Column(name = "induty_code", nullable = false)
-    var indutyCode: String = "",
-    @Column(name = "group_code", nullable = false)
-    var groupCode: String = "",
-    @Column(name = "corp_name")
-    var corpName: String? = null,
-    @Column(name = "corp_name_eng")
-    var corpNameEng: String? = null,
-    @Column(name = "stock_name")
-    var stockName: String? = null,
-    @Column(name = "homepage")
-    var homepage: String? = null,
-    @Column(name = "updated_at", nullable = false)
-    var updatedAt: Instant = Instant.EPOCH,
-)
-
-interface IndustryJpaRepository : JpaRepository<IndustryEntity, String>
+interface SectorCatalogJpaRepository : JpaRepository<SectorCatalogEntity, String>
 
 interface DartCorpMapJpaRepository : JpaRepository<DartCorpMapEntity, String>
 
-interface StockIndustryJpaRepository : JpaRepository<StockIndustryEntity, String>
-
-interface ActiveStockCodeRepository : JpaRepository<StockMasterEntity, String> {
+interface IndustryStockJpaRepository : JpaRepository<StockMasterEntity, String> {
     @Query("select trim(s.code) from StockMasterEntity s where s.isActive = true")
     fun activeCodes(): List<String>
+
+    @Query(
+        """
+        select trim(s.code), s.dartIndutyCode from StockMasterEntity s
+        where s.isActive = true and s.dartIndutyCode is not null
+        """,
+    )
+    fun activeIndutyRows(): List<Array<Any>>
+
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
+    @Query(
+        """
+        update StockMasterEntity s set s.sectorCode = null, s.dartIndutyCode = null
+        where s.code in :codes and (s.sectorCode is not null or s.dartIndutyCode is not null)
+        """,
+    )
+    fun clearIndustry(@Param("codes") codes: Collection<String>): Int
 }
 
 @Repository
 class JpaIndustryStore(
-    private val industries: IndustryJpaRepository,
+    private val sectors: SectorCatalogJpaRepository,
     private val corpMaps: DartCorpMapJpaRepository,
-    private val stockIndustries: StockIndustryJpaRepository,
-    private val activeStocks: ActiveStockCodeRepository,
+    private val stocks: IndustryStockJpaRepository,
     private val entityManager: EntityManager,
     private val clock: Clock = Clock.systemUTC(),
 ) : IndustryStore {
 
     @Transactional
-    override fun upsertIndustries(entries: List<KsicEntry>): Int {
+    override fun upsertSectors(entries: List<KsicEntry>): Int {
         if (entries.isEmpty()) return 0
-        val existing = industries.findAllById(entries.map(KsicEntry::code)).associateBy(IndustryEntity::code)
+        val existing = sectors.findAllById(entries.map(KsicEntry::code)).associateBy(SectorCatalogEntity::code)
         entries.forEach { entry ->
             val entity = existing[entry.code]
             if (entity == null) {
                 entityManager.persist(
-                    IndustryEntity(code = entry.code, name = entry.name, level = entry.level.toShort()),
+                    SectorCatalogEntity(
+                        code = entry.code,
+                        name = entry.name,
+                        level = entry.level.toShort(),
+                        parentCode = entry.parentCode,
+                    ),
                 )
             } else {
                 entity.name = entry.name
                 entity.level = entry.level.toShort()
+                entity.parentCode = entry.parentCode
+                entity.version = KsicCatalog.VERSION
             }
         }
         return entries.size
@@ -118,12 +124,14 @@ class JpaIndustryStore(
                         corpCode = corp.corpCode,
                         code = corp.stockCode,
                         corpName = corp.corpName,
+                        modifyDate = corp.modifyDate,
                         updatedAt = now,
                     ),
                 )
             } else {
                 entity.code = corp.stockCode
                 entity.corpName = corp.corpName
+                entity.modifyDate = corp.modifyDate
                 entity.updatedAt = now
             }
         }
@@ -134,38 +142,24 @@ class JpaIndustryStore(
     override fun upsertStockIndustries(records: List<StockIndustryRecord>): Int {
         if (records.isEmpty()) return 0
         val now = clock.instant()
-        val existing = stockIndustries.findAllById(records.map(StockIndustryRecord::code))
-            .associateBy { it.code.trim() }
+        val existing = stocks.findAllById(records.map(StockIndustryRecord::code)).associateBy { it.code.trim() }
         records.forEach { record ->
-            val entity = existing[record.code]
-            if (entity == null) {
-                entityManager.persist(
-                    StockIndustryEntity(
-                        code = record.code,
-                        indutyCode = record.indutyCode,
-                        groupCode = record.groupCode,
-                        corpName = record.corpName,
-                        corpNameEng = record.corpNameEng,
-                        stockName = record.stockName,
-                        homepage = record.homepage,
-                        updatedAt = now,
-                    ),
-                )
-            } else {
-                entity.apply {
-                    indutyCode = record.indutyCode
-                    groupCode = record.groupCode
-                    corpName = record.corpName
-                    corpNameEng = record.corpNameEng
-                    stockName = record.stockName
-                    homepage = record.homepage
-                    updatedAt = now
-                }
-            }
+            val entity = existing[record.code] ?: return@forEach
+            entity.dartIndutyCode = record.indutyCode
+            entity.sectorCode = record.sectorCode
+            entity.updatedAt = now
         }
-        return records.size
+        return records.count { existing.containsKey(it.code) }
     }
 
+    @Transactional
+    override fun clearIndustryAssignments(codes: Collection<String>): Int =
+        if (codes.isEmpty()) 0 else stocks.clearIndustry(codes)
+
     @Transactional(readOnly = true)
-    override fun activeStockCodes(): Set<String> = activeStocks.activeCodes().toSet()
+    override fun activeStockCodes(): Set<String> = stocks.activeCodes().toSet()
+
+    @Transactional(readOnly = true)
+    override fun activeIndutyCodes(): Map<String, String> =
+        stocks.activeIndutyRows().associate { it[0] as String to it[1] as String }
 }

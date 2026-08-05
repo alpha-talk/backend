@@ -8,7 +8,6 @@ import java.time.LocalDate
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
-import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class IndustrySyncJobTest {
@@ -16,33 +15,37 @@ class IndustrySyncJobTest {
     private val ksic = KsicCatalog()
 
     @Test
-    fun `KSIC 분류표는 자릿수별 항목을 모두 읽는다`() {
+    fun `KSIC 분류표는 자릿수별 항목과 상위 코드를 함께 읽는다`() {
         val entries = ksic.entries()
         assertEquals(1196, entries.count { it.level == 5 })
         assertEquals(232, entries.count { it.level == 3 })
-        assertEquals("전기회로 개폐, 보호 장치 제조업", entries.first { it.code == "28121" }.name)
+        val leaf = entries.first { it.code == "28121" }
+        assertEquals("전기회로 개폐, 보호 장치 제조업", leaf.name)
+        assertEquals("2812", leaf.parentCode)
+        assertEquals(null, entries.first { it.code == "28" }.parentCode)
     }
 
     @Test
-    fun `그룹 코드는 앞 3자리로 맞추고 3자리 미만은 원본을 쓴다`() {
-        assertEquals("281", ksic.groupCodeOf("28121"))
-        assertEquals("264", ksic.groupCodeOf("264"))
-        assertEquals("26", ksic.groupCodeOf("26"))
+    fun `업종코드는 요청한 자릿수로 접고 더 짧으면 원본을 쓴다`() {
+        assertEquals("281", ksic.sectorCodeOf("28121", 3))
+        assertEquals("2812", ksic.sectorCodeOf("28121", 4))
+        assertEquals("264", ksic.sectorCodeOf("264", 4))
+        assertEquals("26", ksic.sectorCodeOf("26", 3))
     }
 
     @Test
-    fun `활성 종목만 조회하고 업종코드를 그룹으로 접어 저장한다`() {
+    fun `활성 종목만 조회하고 소분류로 접어 저장한다`() {
         val store = RecordingStore(active = setOf("010120", "005930"))
         val dart = FakeDartClient(
             corps = listOf(
-                DartCorp("00105855", "010120", "엘에스일렉트릭"),
-                DartCorp("00126380", "005930", "삼성전자"),
-                DartCorp("00999999", "999999", "비상장자회사"),
-                DartCorp("00888888", null, "종목코드없음"),
+                corp("00105855", "010120"),
+                corp("00126380", "005930"),
+                corp("00999999", "999999"),
+                corp("00888888", null),
             ),
             companies = mapOf(
-                "00105855" to company("00105855", "010120", "28121"),
-                "00126380" to company("00126380", "005930", "264"),
+                "00105855" to company("010120", "28121"),
+                "00126380" to company("005930", "264"),
             ),
         )
 
@@ -52,53 +55,112 @@ class IndustrySyncJobTest {
         assertEquals(3, store.corpMap.size)
         assertTrue(store.corpMap.none { it.stockCode == null })
         assertEquals(2, dart.companyCalls)
-        assertEquals("281", store.stockIndustries.first { it.code == "010120" }.groupCode)
-        assertEquals("264", store.stockIndustries.first { it.code == "005930" }.groupCode)
-        assertEquals(1196, store.industries.count { it.level == 5 })
+        assertEquals("281", store.sectorOf("010120"))
+        assertEquals("264", store.sectorOf("005930"))
+        assertTrue(store.sectors.any { it.code == "281" })
     }
 
     @Test
-    fun `상한을 넘는 그룹은 한 단계 아래 코드로 쪼갠다`() {
-        val codes = (1..4).map { "01000$it" }
-        val store = RecordingStore(active = codes.toSet())
+    fun `일시적 조회 실패 종목은 기존 업종코드를 유지하고 그룹 계산에 포함된다`() {
+        val store = RecordingStore(
+            active = setOf("000001", "000002", "000003"),
+            existingInduty = mapOf("000001" to "28111", "000002" to "28121", "000003" to "28121"),
+        )
         val dart = FakeDartClient(
-            corps = codes.map { DartCorp("corp$it", it, "회사$it") },
-            companies = codes.mapIndexed { index, code ->
-                "corp$code" to company("corp$code", code, if (index < 2) "28111" else "28121")
-            }.toMap(),
+            corps = listOf(corp("c1", "000001"), corp("c2", "000002"), corp("c3", "000003")),
+            companies = mapOf("c1" to company("000001", "28111")),
+            ioErrorFor = setOf("c2", "c3"),
         )
 
-        job(dart, store, groupMaxSize = 3).syncOnce()
+        job(dart, store, groupMaxSize = 2, maxFailureRatio = 1.0).syncOnce()
 
-        assertEquals(setOf("2811", "2812"), store.stockIndustries.map { it.groupCode }.toSet())
+        assertEquals(3, store.stockIndustries.size)
+        assertEquals(setOf("2811", "2812"), store.stockIndustries.map { it.sectorCode }.toSet())
+        assertEquals("28121", store.stockIndustries.single { it.code == "000003" }.indutyCode)
     }
 
     @Test
-    fun `상한 이내 그룹은 3자리를 유지한다`() {
+    fun `상한 이내면 소분류를 유지한다`() {
         val codes = (1..4).map { "01000$it" }
         val store = RecordingStore(active = codes.toSet())
         val dart = FakeDartClient(
-            corps = codes.map { DartCorp("corp$it", it, "회사$it") },
-            companies = codes.associate { "corp$it" to company("corp$it", it, "28121") },
+            corps = codes.map { corp("corp$it", it) },
+            companies = codes.associate { "corp$it" to company(it, "28121") },
         )
 
         job(dart, store, groupMaxSize = 10).syncOnce()
 
-        assertEquals(setOf("281"), store.stockIndustries.map { it.groupCode }.toSet())
+        assertEquals(setOf("281"), store.stockIndustries.map { it.sectorCode }.toSet())
     }
 
     @Test
-    fun `그룹 오버라이드는 DART 신고 업종을 덮어쓴다`() {
+    fun `소분류로 부족하면 세세분류까지 단계적으로 쪼갠다`() {
+        val store = RecordingStore(active = setOf("000001", "000002"))
+        val dart = FakeDartClient(
+            corps = listOf(corp("c1", "000001"), corp("c2", "000002")),
+            companies = mapOf("c1" to company("000001", "28121"), "c2" to company("000002", "28122")),
+        )
+
+        job(dart, store, groupMaxSize = 1).syncOnce()
+
+        assertEquals(setOf("28121", "28122"), store.stockIndustries.map { it.sectorCode }.toSet())
+    }
+
+    @Test
+    fun `세세분류까지 같은 코드면 상한을 넘어도 배정을 유지한다`() {
+        val codes = (1..3).map { "00000$it" }
+        val store = RecordingStore(active = codes.toSet())
+        val dart = FakeDartClient(
+            corps = codes.map { corp("corp$it", it) },
+            companies = codes.associate { "corp$it" to company(it, "28121") },
+        )
+
+        assertEquals(3, job(dart, store, groupMaxSize = 2).syncOnce())
+        assertEquals(setOf("28121"), store.stockIndustries.map { it.sectorCode }.toSet())
+    }
+
+    @Test
+    fun `더 쪼갤 수 없는 짧은 업종코드는 상한을 넘어도 잡을 실패시키지 않는다`() {
+        val codes = (1..3).map { "00000$it" }
+        val store = RecordingStore(active = codes.toSet())
+        val dart = FakeDartClient(
+            corps = codes.map { corp("corp$it", it) },
+            companies = codes.associate { "corp$it" to company(it, "264") },
+        )
+
+        assertEquals(3, job(dart, store, groupMaxSize = 2).syncOnce())
+        assertEquals(setOf("264"), store.stockIndustries.map { it.sectorCode }.toSet())
+    }
+
+    @Test
+    fun `오버라이드로 쪼갤 수 있는 그룹이 상한을 넘으면 잡을 실패시킨다`() {
+        val store = RecordingStore(active = setOf("000001", "000002", "000003"))
+        val dart = FakeDartClient(
+            corps = listOf(corp("c1", "000001"), corp("c2", "000002"), corp("c3", "000003")),
+            companies = mapOf(
+                "c1" to company("000001", "28111"),
+                "c2" to company("000002", "28121"),
+                "c3" to company("000003", "28122"),
+            ),
+        )
+
+        assertFailsWith<IllegalStateException> {
+            job(dart, store, groupMaxSize = 1, overrides = mapOf("000002" to "281", "000003" to "281")).syncOnce()
+        }
+    }
+
+    @Test
+    fun `오버라이드는 DART 신고 업종을 덮되 원본을 보존한다`() {
         val store = RecordingStore(active = setOf("005930"))
         val dart = FakeDartClient(
-            corps = listOf(DartCorp("corp1", "005930", "삼성전자")),
-            companies = mapOf("corp1" to company("corp1", "005930", "264")),
+            corps = listOf(corp("c1", "005930")),
+            companies = mapOf("c1" to company("005930", "264")),
         )
 
         job(dart, store, overrides = mapOf("005930" to "261")).syncOnce()
 
         val record = store.stockIndustries.single()
-        assertEquals("261", record.groupCode)
+        assertEquals("261", record.sectorCode)
         assertEquals("264", record.indutyCode)
     }
 
@@ -106,58 +168,119 @@ class IndustrySyncJobTest {
     fun `KSIC 표에 없는 업종코드는 상위 분류 이름으로 등록한다`() {
         val store = RecordingStore(active = setOf("010010"))
         val dart = FakeDartClient(
-            corps = listOf(DartCorp("corp1", "010010", "한일사료")),
-            companies = mapOf("corp1" to company("corp1", "010010", "109")),
+            corps = listOf(corp("c1", "010010")),
+            companies = mapOf("c1" to company("010010", "109")),
         )
 
         job(dart, store).syncOnce()
 
-        assertEquals("109", store.stockIndustries.single().groupCode)
-        assertEquals("식료품 제조업", store.industries.last { it.code == "109" }.name)
+        assertEquals("109", store.sectorOf("010010"))
+        assertEquals("식료품 제조업", store.sectors.last { it.code == "109" }.name)
     }
 
     @Test
-    fun `업종코드가 없는 회사는 건너뛰고 실패로 집계한다`() {
-        val store = RecordingStore(active = setOf("010120"))
+    fun `업종코드를 한 번도 못 받은 종목은 배정 대상에서 빠진다`() {
+        val store = RecordingStore(active = setOf("000001", "000002"), existingInduty = mapOf("000001" to "28121"))
         val dart = FakeDartClient(
-            corps = listOf(DartCorp("00105855", "010120", "엘에스일렉트릭")),
-            companies = mapOf("00105855" to company("00105855", "010120", null)),
+            corps = listOf(corp("c1", "000001"), corp("c2", "000002")),
+            companies = mapOf("c1" to company("000001", "28121")),
+            noDataFor = setOf("c2"),
         )
 
-        assertEquals(0, job(dart, store).syncOnce())
-        assertTrue(store.stockIndustries.isEmpty())
-        assertEquals(1, store.failCount)
+        job(dart, store).syncOnce()
+
+        assertEquals(listOf("000002"), store.cleared)
+    }
+
+    @Test
+    fun `운영 오류 상태는 전파해 잡을 실패시킨다`() {
+        val store = RecordingStore(active = setOf("000001"))
+        val dart = FakeDartClient(
+            corps = listOf(corp("c1", "000001")),
+            companies = emptyMap(),
+            errorFor = mapOf("c1" to "020"),
+        )
+        val runs = OnceOnlyRunStore()
+
+        assertFailsWith<DartApiException> { job(dart, store, runs).syncOnce() }
+        assertEquals(null, runs.succeededOk)
+        assertEquals(1L, runs.failedId)
     }
 
     @Test
     fun `조회 실패는 한 번 재시도한다`() {
         val store = RecordingStore(active = setOf("010120"))
         val dart = FakeDartClient(
-            corps = listOf(DartCorp("00105855", "010120", "엘에스일렉트릭")),
-            companies = mapOf("00105855" to company("00105855", "010120", "28121")),
-            failFirstCall = true,
+            corps = listOf(corp("c1", "010120")),
+            companies = mapOf("c1" to company("010120", "28121")),
+            transientFailFirstCall = true,
         )
 
-        assertEquals(1, job(dart, store).syncOnce())
+        assertEquals(1, job(dart, store, maxFailureRatio = 1.0).syncOnce())
         assertEquals(2, dart.companyCalls)
-        assertEquals(0, store.failCount)
     }
 
     @Test
     fun `상장사가 없으면 실패로 기록하고 전파한다`() {
         val store = RecordingStore(active = setOf("010120"))
-        val dart = FakeDartClient(corps = listOf(DartCorp("00888888", null, "종목코드없음")), companies = emptyMap())
+        val dart = FakeDartClient(corps = listOf(corp("c1", null)), companies = emptyMap())
 
         assertFailsWith<IllegalStateException> { job(dart, store).syncOnce() }
         assertTrue(store.stockIndustries.isEmpty())
     }
 
     @Test
+    fun `네트워크 오류도 조회 실패로 흡수한다`() {
+        val store = RecordingStore(active = setOf("000001", "000002"))
+        val dart = FakeDartClient(
+            corps = listOf(corp("c1", "000001"), corp("c2", "000002")),
+            companies = mapOf("c1" to company("000001", "28121")),
+            ioErrorFor = setOf("c2"),
+        )
+
+        assertEquals(1, job(dart, store, maxFailureRatio = 0.5).syncOnce())
+        assertEquals("281", store.sectorOf("000001"))
+    }
+
+    @Test
+    fun `조회 실패가 허용치를 넘으면 부분 결과를 저장하지 않는다`() {
+        val store = RecordingStore(active = setOf("000001", "000002"))
+        val dart = FakeDartClient(
+            corps = listOf(corp("c1", "000001"), corp("c2", "000002")),
+            companies = mapOf("c1" to company("000001", "28121")),
+            ioErrorFor = setOf("c2"),
+        )
+        val runs = OnceOnlyRunStore()
+
+        assertFailsWith<IllegalStateException> { job(dart, store, runs, maxFailureRatio = 0.1).syncOnce() }
+        assertTrue(store.stockIndustries.isEmpty())
+        assertEquals(1L, runs.failedId)
+    }
+
+    @Test
+    fun `DART에서 사라진 종목은 기존 업종코드까지 지운다`() {
+        val store = RecordingStore(
+            active = setOf("000001", "000002"),
+            existingInduty = mapOf("000001" to "28121", "000002" to "28121"),
+        )
+        val dart = FakeDartClient(
+            corps = listOf(corp("c1", "000001"), corp("c2", "000002")),
+            companies = mapOf("c1" to company("000001", "28121")),
+            noDataFor = setOf("c2"),
+        )
+
+        job(dart, store).syncOnce()
+
+        assertEquals(listOf("000002"), store.cleared)
+        assertTrue(store.stockIndustries.none { it.code == "000002" })
+    }
+
+    @Test
     fun `같은 날 성공한 실행은 건너뛴다`() {
         val store = RecordingStore(active = setOf("010120"))
         val dart = FakeDartClient(
-            corps = listOf(DartCorp("00105855", "010120", "엘에스일렉트릭")),
-            companies = mapOf("00105855" to company("00105855", "010120", "28121")),
+            corps = listOf(corp("c1", "010120")),
+            companies = mapOf("c1" to company("010120", "28121")),
         )
         val runs = OnceOnlyRunStore()
 
@@ -172,21 +295,26 @@ class IndustrySyncJobTest {
         runs: BatchJobRunStore = OnceOnlyRunStore(),
         groupMaxSize: Int = 100,
         overrides: Map<String, String> = emptyMap(),
+        maxFailureRatio: Double = 0.05,
     ) = IndustrySyncJob(
         dart = dart,
         ksic = ksic,
         store = store,
-        runs = runs.also { store.runs = it },
+        runs = runs,
         meters = SimpleMeterRegistry(),
         requestInterval = Duration.ZERO,
         groupMaxSize = groupMaxSize,
         groupOverrides = overrides,
+        maxFailureRatio = maxFailureRatio,
         today = { LocalDate.of(2026, 8, 5) },
         pause = {},
     )
 
-    private fun company(corpCode: String, stockCode: String, induty: String?) = DartCompany(
-        corpCode = corpCode,
+    private fun corp(corpCode: String, stockCode: String?) =
+        DartCorp(corpCode, stockCode, "회사$corpCode", "20260805")
+
+    private fun company(stockCode: String, induty: String?) = DartCompany(
+        corpCode = "corp",
         stockCode = stockCode,
         indutyCode = induty,
         corpName = "정식명칭",
@@ -198,7 +326,10 @@ class IndustrySyncJobTest {
     private class FakeDartClient(
         private val corps: List<DartCorp>,
         private val companies: Map<String, DartCompany>,
-        private val failFirstCall: Boolean = false,
+        private val noDataFor: Set<String> = emptySet(),
+        private val errorFor: Map<String, String> = emptyMap(),
+        private val ioErrorFor: Set<String> = emptySet(),
+        private val transientFailFirstCall: Boolean = false,
     ) : DartClient {
         var companyCalls = 0
 
@@ -206,21 +337,27 @@ class IndustrySyncJobTest {
 
         override fun company(corpCode: String): DartCompany? {
             companyCalls += 1
-            if (failFirstCall && companyCalls == 1) throw IllegalStateException("일시 실패")
+            if (transientFailFirstCall && companyCalls == 1) throw DartApiException("013", "일시 실패")
+            errorFor[corpCode]?.let { throw DartApiException(it, "운영 오류") }
+            if (corpCode in ioErrorFor) throw java.io.IOException("connection reset")
+            if (corpCode in noDataFor) return null
             return companies[corpCode]
         }
     }
 
-    private class RecordingStore(private val active: Set<String>) : IndustryStore {
-        val industries = mutableListOf<KsicEntry>()
+    private class RecordingStore(
+        private val active: Set<String>,
+        private val existingInduty: Map<String, String> = emptyMap(),
+    ) : IndustryStore {
+        val sectors = mutableListOf<KsicEntry>()
         val corpMap = mutableListOf<DartCorp>()
         val stockIndustries = mutableListOf<StockIndustryRecord>()
-        var runs: BatchJobRunStore? = null
+        val cleared = mutableListOf<String>()
 
-        val failCount: Int get() = (runs as? OnceOnlyRunStore)?.lastFailCount ?: 0
+        fun sectorOf(code: String): String? = stockIndustries.firstOrNull { it.code == code }?.sectorCode
 
-        override fun upsertIndustries(entries: List<KsicEntry>): Int {
-            industries += entries
+        override fun upsertSectors(entries: List<KsicEntry>): Int {
+            sectors += entries
             return entries.size
         }
 
@@ -234,23 +371,30 @@ class IndustrySyncJobTest {
             return records.size
         }
 
+        override fun clearIndustryAssignments(codes: Collection<String>): Int {
+            cleared += codes
+            return codes.size
+        }
+
         override fun activeStockCodes(): Set<String> = active
+
+        override fun activeIndutyCodes(): Map<String, String> = existingInduty
     }
 
     private class OnceOnlyRunStore : BatchJobRunStore {
         private var succeeded = false
-        var lastFailCount = 0
+        var succeededOk: Int? = null
+        var failedId: Long? = null
 
-        override fun start(job: String, runDate: String, startedAt: Instant): Long? =
-            if (succeeded) null else 1L
+        override fun start(job: String, runDate: String, startedAt: Instant): Long? = if (succeeded) null else 1L
 
         override fun succeed(id: Long, okCount: Int, failCount: Int, finishedAt: Instant) {
             succeeded = true
-            lastFailCount = failCount
+            succeededOk = okCount
         }
 
         override fun fail(id: Long, error: String, finishedAt: Instant) {
-            assertNull(null)
+            failedId = id
         }
     }
 }

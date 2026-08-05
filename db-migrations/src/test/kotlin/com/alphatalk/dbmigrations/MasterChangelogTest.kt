@@ -34,7 +34,7 @@ class MasterChangelogTest {
         withConnection { connection ->
             update(connection)
 
-            assertEquals(20, appliedChangeSetCount(connection))
+            assertEquals(21, appliedChangeSetCount(connection))
             assertTrue(tableExists(connection, "news_cluster"))
             assertTrue(tableExists(connection, "stream_event"))
             assertTrue(tableExists(connection, "daily_candle"))
@@ -56,8 +56,8 @@ class MasterChangelogTest {
             assertTrue(tableExists(connection, "investor_flow_daily"))
             assertTrue(tableExists(connection, "financial_summary"))
             assertTrue(tableExists(connection, "dart_corp_map"))
-            assertTrue(tableExists(connection, "industry"))
-            assertTrue(tableExists(connection, "stock_industry"))
+            assertTrue(columnExists(connection, "sector", "parent_code"))
+            assertTrue(columnExists(connection, "stock_master", "dart_induty_code"))
         }
     }
 
@@ -103,6 +103,9 @@ class MasterChangelogTest {
 
     private fun tableExists(connection: Connection, table: String): Boolean =
         connection.metaData.getTables(null, "public", table, arrayOf("TABLE")).use { it.next() }
+
+    private fun columnExists(connection: Connection, table: String, column: String): Boolean =
+        connection.metaData.getColumns(null, "public", table, column).use { it.next() }
 
     companion object {
         private const val MASTER_CHANGELOG = "db/changelog/db.changelog-master.yaml"

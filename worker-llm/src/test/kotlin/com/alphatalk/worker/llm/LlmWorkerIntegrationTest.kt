@@ -48,7 +48,6 @@ import kotlin.test.assertTrue
     properties = [
         "alphatalk.llm.consumer-block=300ms",
         "alphatalk.llm.cluster.similarity-threshold=0.8",
-        "alphatalk.llm.sector.coverage-stocks=105560,055550,086790",
         "alphatalk.llm.article.min-host-interval=100ms",
     ],
 )
@@ -100,22 +99,17 @@ class LlmWorkerIntegrationTest {
         redisTemplate.execute { it.serverCommands().flushAll() }
         jdbc.jdbcTemplate.execute(
             "TRUNCATE news_article, news_cluster_stock, news_cluster_sector, news_cluster, stream_event, " +
-                "stock_alias, stock_industry, industry, stock_master, sector CASCADE",
+                "stock_alias, stock_master, sector CASCADE",
         )
         jdbc.jdbcTemplate.execute(
-            "INSERT INTO industry (code, name, level) VALUES ('261', '반도체', 3), ('641', '은행', 3)",
-        )
-        jdbc.jdbcTemplate.execute(
-            """
-            INSERT INTO stock_master (code, name, market) VALUES
-            ('005930', '삼성전자', 'KOSPI'), ('000660', 'SK하이닉스', 'KOSPI'),
-            ('105560', 'KB금융', 'KOSPI')
-            """,
+            "INSERT INTO sector (code, name, level) VALUES ('261', '반도체', 3), ('641', '은행', 3)",
         )
         jdbc.jdbcTemplate.execute(
             """
-            INSERT INTO stock_industry (code, induty_code, group_code) VALUES
-            ('005930', '26120', '261'), ('000660', '26120', '261'), ('105560', '64110', '641')
+            INSERT INTO stock_master (code, name, market, sector_code, dart_induty_code) VALUES
+            ('005930', '삼성전자', 'KOSPI', '261', '26120'),
+            ('000660', 'SK하이닉스', 'KOSPI', '261', '26120'),
+            ('105560', 'KB금융', 'KOSPI', '641', '64110')
             """,
         )
         consumer.ensureGroup()
