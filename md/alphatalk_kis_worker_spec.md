@@ -206,6 +206,7 @@ KIS 프레임 → 파싱 → 종목별 최신값 버퍼(덮어쓰기)
 | `investor_flow_daily` | KIS `GET .../inquire-investor` · TR `FHKST01010900` — **장마감 후 확정치** | 영업일 17:10 | 전 종목 | `(code,date)` |
 | `invest_opinion_sync` | KIS `GET /uapi/domestic-stock/v1/quotations/invest-opbysec` · TR `FHKST663400C0` — 회원사 코드별 전 종목 투자의견(의견·직전의견·목표가) | 영업일 07:00 이상 18:00 미만 **10분 주기**(07:00~17:50) | 활성 회원사 `B`개 × 연속조회 페이지 `P` | `(code, business_date, broker_code, content_hash)` |
 | `dart_corp_map` | OpenDART `corpCode.xml`(zip) — corp_code↔종목코드 매핑 | 주 1회 | 전 상장사 | `corp_code` |
+| `industry_sync` | OpenDART `corpCode.xml` → `company.json`(`induty_code`) + KSIC 10차 분류표(worker-batch 리소스 `ksic10.csv`) | 주 1회 일 06:30 (`dart_corp_map`과 한 잡) | 활성 종목 ~2.6k (우선주 제외 — DART는 보통주에만 corp_code 부여) | `code` upsert |
 | `financials_sync` | OpenDART `list.json`(신규 정기공시 감지) → `fnlttSinglAcntAll.json` (`bsns_year`, `reprt_code` 11013/11012/11014/11011, `fs_div=CFS`→미존재 시 `OFS`) | 매일 06:00 (공시 시즌 증분) | 신규 공시 기업만 | `(corp_code, year, reprt_code)` |
 
 업종은 `idxcode.mst`(45바이트 고정폭 — 코드 5자리 + 이름)가 코드와 이름을 함께 준다. 종목 마스터의 업종 필드는 4자리라 그대로는 `sector.code`와 맞지 않는다. **앞에 시장 접두어(KOSPI `0`, KOSDAQ `1`)를 붙여 5자리로 맞춘다** — 예: KOSPI `0027` → `00027`(제조), KOSDAQ `1009` → `11009`(제조). 두 시장이 별개 코드 대역을 쓰므로 접두어 없이는 서로 충돌한다.
@@ -301,7 +302,12 @@ invest_opinion(code CHAR(6), business_date CHAR(8), broker_code TEXT, broker_nam
 stream_event(..., source_key TEXT NULL, ...)
 -- UNIQUE(source_key) WHERE source_key IS NOT NULL
 -- source_key DDL의 논리 소유자는 core-api stream, changeSet 파일의 단일 소유자는 db-migrations
-dart_corp_map(corp_code CHAR(8) PK, code CHAR(6) UQ NULL, corp_name)
+dart_corp_map(corp_code CHAR(8) PK, code CHAR(6) UQ NULL, corp_name, updated_at)
+industry(code TEXT PK, name TEXT, level SMALLINT)          -- KSIC 10차 전 계층(2~5자리)
+stock_industry(code CHAR(6) PK, induty_code TEXT,          -- DART 신고 원본(2~5자리, 회사마다 깊이가 다르다)
+             group_code TEXT,                              -- 뉴스 fan-out 단위 → industry.code
+             corp_name, corp_name_eng, stock_name, homepage, updated_at)
+-- INDEX stock_industry (group_code)
 financial_summary(code, year SMALLINT, reprt_code CHAR(5), fs_div CHAR(3),
              revenue BIGINT, operating_profit BIGINT, net_income BIGINT,
              assets BIGINT, liabilities BIGINT, equity BIGINT, disclosed_at,
@@ -309,7 +315,7 @@ financial_summary(code, year SMALLINT, reprt_code CHAR(5), fs_div CHAR(3),
 batch_job_run(id, job, run_date, status, ok_count, fail_count, started_at, finished_at, error)
 ```
 
-읽기 소비자는 core-api stockinfo/search 모듈(REST 명세 §8)과 worker-llm 섹터 해소(`sector`·`stock_master.sector_code` — [뉴스 파이프라인 명세](alphatalk_news_worker_spec.md) §3.6)다. 금액 컬럼은 원 단위로 저장하고, API 단위 변환은 core-api 책임이다(명세와 합의).
+읽기 소비자는 core-api stockinfo/search 모듈(REST 명세 §8, `sector`·`stock_master.sector_code`)과 worker-llm 섹터 해소(`industry`·`stock_industry.group_code` — [뉴스 파이프라인 명세](alphatalk_news_worker_spec.md) §3.6)다. **두 업종 축은 공존한다** — KIS 마스터 업종(18종 대분류)은 core-api 조회용으로 남기고, 뉴스 fan-out은 KSIC 축을 쓴다. `group_code`는 KSIC 소분류(3자리)를 기본으로 하되 구성 종목이 `group-max-size`(기본 100, worker-llm `fanout-cap`과 맞춘다)를 넘는 그룹만 세분류(4자리)로 분할하고, KSIC 표에 없는 옛 코드는 상위 분류 이름으로 대체한다. DART 신고 업종이 뉴스 맥락과 어긋나는 소수 종목은 `group-overrides`로 보정한다(`induty_code` 원본은 보존). 금액 컬럼은 원 단위로 저장하고, API 단위 변환은 core-api 책임이다(명세와 합의).
 
 ## 5. 설정·환경변수
 
