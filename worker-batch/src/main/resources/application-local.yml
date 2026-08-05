@@ -7,4 +7,6 @@ spring:
 alphatalk:
   batch:
     stock-master:
-      cron: "-"                                 # 로컬은 자동 실행하지 않는다 — 필요할 때 테스트·수동 호출로 적재
+      cron: "0 * * * * *"                                 # 로컬은 자동 실행하지 않는다 — 필요할 때 테스트·수동 호출로 적재
+    dart:
+      cron: "30 * * * * *"                                # 매분 트리거 — batch_job_run이 같은 날 2회차를 건너뛴다
