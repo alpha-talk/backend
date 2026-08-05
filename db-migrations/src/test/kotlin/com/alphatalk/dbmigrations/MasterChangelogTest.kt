@@ -31,7 +31,7 @@ class MasterChangelogTest {
 
     @Test
     fun `빈 PostgreSQL에 마스터 changelog 전체가 적용된다`() {
-        withConnection { connection ->
+        withFreshDatabase("full_apply") { connection ->
             update(connection)
 
             assertEquals(22, appliedChangeSetCount(connection))
@@ -62,29 +62,24 @@ class MasterChangelogTest {
     }
 
     @Test
-    fun `KIS 업종이 들어 있는 DB를 올리면 기존 행은 KIS_MASTER로 남는다`() {
-        withConnection { connection ->
-            update(connection, KIS_SECTOR_CHANGESETS)
+    fun `KIS 업종이 들어 있는 DB를 올리면 기존 행만 KIS_MASTER로 남는다`() {
+        withFreshDatabase("kis_upgrade") { connection ->
+            update(connection, changeSetsThrough(connection, LAST_KIS_SECTOR_CHANGESET))
             connection.createStatement().use {
                 it.execute("INSERT INTO sector (code, name) VALUES ('00027', '제조'), ('11009', '제조')")
+                it.execute("INSERT INTO sector (code, name, level) VALUES ('261', '반도체 제조업', 3)")
+                it.execute("UPDATE sector SET version = 'KSIC_10' WHERE code = '261'")
             }
 
             update(connection)
 
-            connection.createStatement().use { statement ->
-                statement.executeQuery("SELECT version, count(*) FROM sector GROUP BY version").use { rows ->
-                    val origins = buildMap {
-                        while (rows.next()) put(rows.getString(1), rows.getInt(2))
-                    }
-                    assertEquals(mapOf("KIS_MASTER" to 2), origins)
-                }
-            }
+            assertEquals(mapOf("KIS_MASTER" to 2, "KSIC_10" to 1), versionCounts(connection))
         }
     }
 
     @Test
     fun `재적용은 멱등하고 체크섬 검증을 통과한다`() {
-        withConnection { connection ->
+        withFreshDatabase("idempotent") { connection ->
             update(connection)
             val afterFirst = appliedChangeSetCount(connection)
 
@@ -95,9 +90,17 @@ class MasterChangelogTest {
         }
     }
 
-    private fun withConnection(block: (Connection) -> Unit) {
-        DriverManager.getConnection(postgres.jdbcUrl, postgres.username, postgres.password).use(block)
+    private fun withFreshDatabase(name: String, block: (Connection) -> Unit) {
+        adminConnection().use { admin ->
+            admin.createStatement().use { it.execute("DROP DATABASE IF EXISTS $name") }
+            admin.createStatement().use { it.execute("CREATE DATABASE $name") }
+        }
+        val url = postgres.jdbcUrl.substringBeforeLast('/') + "/$name"
+        DriverManager.getConnection(url, postgres.username, postgres.password).use(block)
     }
+
+    private fun adminConnection(): Connection =
+        DriverManager.getConnection(postgres.jdbcUrl, postgres.username, postgres.password)
 
     @Suppress("DEPRECATION")
     private fun update(connection: Connection) {
@@ -109,6 +112,15 @@ class MasterChangelogTest {
     private fun update(connection: Connection, changesToApply: Int) {
         Liquibase(MASTER_CHANGELOG, ClassLoaderResourceAccessor(), database(connection))
             .update(changesToApply, Contexts(), LabelExpression())
+    }
+
+    @Suppress("DEPRECATION")
+    private fun changeSetsThrough(connection: Connection, changeSetId: String): Int {
+        val unrun = Liquibase(MASTER_CHANGELOG, ClassLoaderResourceAccessor(), database(connection))
+            .listUnrunChangeSets(Contexts(), LabelExpression())
+        val index = unrun.indexOfFirst { it.id == changeSetId }
+        check(index >= 0) { "changeset을 찾지 못했다: $changeSetId" }
+        return index + 1
     }
 
     @Suppress("DEPRECATION")
@@ -128,6 +140,13 @@ class MasterChangelogTest {
             }
         }
 
+    private fun versionCounts(connection: Connection): Map<String, Int> =
+        connection.createStatement().use { statement ->
+            statement.executeQuery("SELECT version, count(*) FROM sector GROUP BY version").use { rows ->
+                buildMap { while (rows.next()) put(rows.getString(1), rows.getInt(2)) }
+            }
+        }
+
     private fun tableExists(connection: Connection, table: String): Boolean =
         connection.metaData.getTables(null, "public", table, arrayOf("TABLE")).use { it.next() }
 
@@ -136,6 +155,6 @@ class MasterChangelogTest {
 
     companion object {
         private const val MASTER_CHANGELOG = "db/changelog/db.changelog-master.yaml"
-        private const val KIS_SECTOR_CHANGESETS = 20
+        private const val LAST_KIS_SECTOR_CHANGESET = "0004-sector-ksic"
     }
 }
