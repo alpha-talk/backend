@@ -131,7 +131,7 @@ class NewsProcessor(
         verdict.sectors.filter { it.impact != Impact.LOW }.forEach { sv ->
             val ref = SectorRef(code = sv.sectorCode, name = sectors.sectorName(sv.sectorCode) ?: sv.sectorCode)
             sectors.memberCodes(sv.sectorCode)
-                .filter { it in coverage }
+                .filter { coverage.isEmpty() || it in coverage }
                 .forEach { code -> fanout.putIfAbsent(code, sv to ref) }
         }
         if (fanout.size > fanoutCap) return NewsScope.MARKET
