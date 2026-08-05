@@ -4,7 +4,8 @@ import com.alphatalk.kis.auth.KisApprovalClient
 import com.alphatalk.kis.auth.KisTokenManager
 import com.alphatalk.kis.auth.KisTokenStore
 import com.alphatalk.kis.model.KisAccount
-import com.alphatalk.kis.model.KisEnv
+import com.alphatalk.kis.model.KisApi
+import com.alphatalk.kis.model.KisLimits
 import com.alphatalk.kis.rate.KisRateGate
 import com.alphatalk.kis.rate.KisRateLimiters
 import com.alphatalk.kis.rest.KisRestClient
@@ -72,26 +73,20 @@ class PriceConfig {
         buffer: ConflationBuffer,
         meters: MeterRegistry,
     ): SessionPool {
-        val env = kisEnv(props)
         val accounts = parseAccounts(props.accountsJson)
         check(accounts.isNotEmpty()) {
             "alphatalk.price.enabled=true에는 KIS_ACCOUNTS 계정이 최소 1개 필요하다"
         }
-        val approvals = KisApprovalClient(env.restBaseUrl)
+        val approvals = KisApprovalClient(KisApi.REST_BASE_URL)
         return SessionPool(
             accounts = accounts,
-            wsUrl = env.wsUrl,
+            wsUrl = KisApi.WS_URL,
             approvalKeys = { approvals.approvalKey(it) },
             buffer = buffer,
             meters = meters,
-            tickTrIds = tickTrIds(env),
+            tickTrIds = TICK_TR_IDS,
             removalGraceMillis = props.removalGraceMs,
         )
-    }
-
-    internal fun tickTrIds(env: KisEnv): List<String> = when (env) {
-        KisEnv.PROD -> listOf(KisFrameParser.TR_ID_TICK_TOTAL, KisFrameParser.TR_ID_TICK_OVERTIME)
-        KisEnv.VTS -> listOf(KisFrameParser.TR_ID_TICK)
     }
 
     @Bean
@@ -123,13 +118,13 @@ class PriceConfig {
 
     @Bean
     @ConditionalOnProperty("alphatalk.price.enabled", havingValue = "true")
-    fun kisTokenManager(props: PriceProperties, store: KisTokenStore): KisTokenManager =
-        KisTokenManager(kisEnv(props).restBaseUrl, store)
+    fun kisTokenManager(store: KisTokenStore): KisTokenManager =
+        KisTokenManager(KisApi.REST_BASE_URL, store)
 
     @Bean
     @ConditionalOnProperty("alphatalk.price.enabled", havingValue = "true")
     fun kisRateGate(props: PriceProperties, redis: StringRedisTemplate): KisRateGate {
-        val rate = kisEnv(props).restCallsPerSecond * props.rateFactor
+        val rate = KisLimits.REST_CALLS_PER_SECOND * props.rateFactor
         return RedisKisRateGate(
             redis = redis,
             capacity = ceil(rate).toInt().coerceAtLeast(1),
@@ -144,16 +139,18 @@ class PriceConfig {
         tokens: KisTokenManager,
         gate: KisRateGate,
     ): QuoteSnapshotFetcher {
-        val env = kisEnv(props)
         val accounts = parseAccounts(props.accountsJson)
         check(accounts.isNotEmpty()) {
             "alphatalk.price.enabled=true에는 KIS_ACCOUNTS 계정이 최소 1개 필요하다"
         }
         val account = accounts.first()
         val rest = KisRestClient(
-            env.restBaseUrl,
+            KisApi.REST_BASE_URL,
             tokens,
-            KisRateLimiters(env.restCallsPerSecond, props.rateFactor * props.pollBudgetFactor),
+            KisRateLimiters(
+                KisLimits.REST_CALLS_PER_SECOND,
+                props.rateFactor * props.pollBudgetFactor,
+            ),
             gate,
         )
         return QuoteSnapshotFetcher { code -> rest.quoteSnapshot(account, code) }
@@ -183,7 +180,7 @@ class PriceConfig {
     @ConditionalOnProperty("alphatalk.price.enabled", havingValue = "true")
     fun candleRestLimiters(props: PriceProperties): KisRateLimiters =
         KisRateLimiters(
-            kisEnv(props).restCallsPerSecond,
+            KisLimits.REST_CALLS_PER_SECOND,
             props.rateFactor * (1 - props.pollBudgetFactor),
             CANDLE_ACQUIRE_TIMEOUT,
         )
@@ -199,13 +196,12 @@ class PriceConfig {
         candleRestLimiters: KisRateLimiters,
         gate: KisRateGate,
     ): DailyCandleFetcher {
-        val env = kisEnv(props)
         val accounts = parseAccounts(props.accountsJson)
         check(accounts.isNotEmpty()) {
             "alphatalk.price.candle-enabled=true에는 KIS_ACCOUNTS 계정이 최소 1개 필요하다"
         }
         val account = accounts.first()
-        val rest = KisRestClient(env.restBaseUrl, tokens, candleRestLimiters, gate)
+        val rest = KisRestClient(KisApi.REST_BASE_URL, tokens, candleRestLimiters, gate)
         return DailyCandleFetcher { code, from, to -> rest.dailyCandles(account, code, from, to) }
     }
 
@@ -215,16 +211,12 @@ class PriceConfig {
         havingValue = "true",
     )
     fun candleUniverse(
-        props: PriceProperties,
         demand: DemandSource,
         masterCodes: StockMasterCodeRepository,
-    ): CandleUniverse = when (kisEnv(props)) {
-        KisEnv.PROD -> MasterCandleUniverse(
-            activeCodes = { masterCodes.findActiveCodes() },
-            fallback = { demand.targetSymbols() },
-        )
-        KisEnv.VTS -> CandleUniverse { demand.targetSymbols() }
-    }
+    ): CandleUniverse = MasterCandleUniverse(
+        activeCodes = { masterCodes.findActiveCodes() },
+        fallback = { demand.targetSymbols() },
+    )
 
     @Bean
     @ConditionalOnProperty(
@@ -271,20 +263,15 @@ class PriceConfig {
         candleRestLimiters: KisRateLimiters,
         gate: KisRateGate,
     ): MinuteCandleFetcher {
-        val env = kisEnv(props)
         val accounts = parseAccounts(props.accountsJson)
         check(accounts.isNotEmpty()) {
             "alphatalk.price.minute-candle-enabled=true에는 KIS_ACCOUNTS 계정이 최소 1개 필요하다"
         }
         val account = accounts.first()
-        val rest = KisRestClient(env.restBaseUrl, tokens, candleRestLimiters, gate)
-        val marketDiv = minuteMarketDiv(env)
-        return MinuteCandleFetcher { code, to -> rest.minuteCandles(account, code, to, marketDiv) }
-    }
-
-    internal fun minuteMarketDiv(env: KisEnv): String = when (env) {
-        KisEnv.PROD -> KisRestClient.MARKET_DIV_UNIFIED
-        KisEnv.VTS -> KisRestClient.MARKET_DIV_KRX
+        val rest = KisRestClient(KisApi.REST_BASE_URL, tokens, candleRestLimiters, gate)
+        return MinuteCandleFetcher { code, to ->
+            rest.minuteCandles(account, code, to, KisRestClient.MARKET_DIV_UNIFIED)
+        }
     }
 
     @Bean
@@ -369,9 +356,9 @@ class PriceConfig {
         retentionDays = props.minuteCandleRetentionDays,
     )
 
-    internal fun kisEnv(props: PriceProperties): KisEnv = KisEnv.valueOf(props.env.trim().uppercase())
-
-    private companion object {
+    internal companion object {
+        val TICK_TR_IDS: List<String> =
+            listOf(KisFrameParser.TR_ID_TICK_TOTAL, KisFrameParser.TR_ID_TICK_OVERTIME)
         val CANDLE_ACQUIRE_TIMEOUT: Duration = Duration.ofSeconds(10)
     }
 
