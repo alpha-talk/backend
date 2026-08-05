@@ -331,11 +331,11 @@ OpenDART 응답 상태는 **세 갈래로 나눈다**. ① 데이터 없음(`013
 | 조건 | 내용 |
 |---|---|
 | 알람 | `batch_job_run`의 `industry_sync`가 `RUNNING`(선행 회차 중단) 또는 `FAILED`로 남으면 알람. 주 1회 크론이라 자동 회복까지 최대 일주일이다 |
-| 수동 재실행 | 같은 `run_date`의 `batch_job_run` 행을 지우고 잡을 재실행한다(성공 행이 있으면 스킵된다) |
-| 첫 전환 배포 | ① `industry_sync` 성공 확인 → ② 활성 종목 배정 수·그룹 분포 확인(`sector_code is not null`, 그룹당 종목 수 ≤ `group-max-size`) → ③ worker-llm 기동. 순서를 지키지 않으면 worker-llm이 fail-closed로 멈춘다 |
+| 수동 재실행 | 잡을 다시 호출하기만 하면 된다 — `BatchJobRunStore.start`가 `RUNNING`·`FAILED` 행을 같은 `run_date`로 재시작한다(`SUCCESS` 행만 스킵). **행을 지우지 않는다** — 감사 이력이다 |
+| 첫 전환 배포 | ① `industry_sync` 성공 확인 → ② 활성 종목 배정 수(`sector_code is not null`)와 `batch.industry.oversized = 0` 확인 — 0이 아니면 더 쪼갤 수 없는 초과 그룹이 있다는 뜻이므로 로그의 그룹 목록을 보고 운영 승인 후 진행 → ③ worker-llm 기동. 순서를 지키지 않으면 worker-llm이 fail-closed로 멈춘다 |
 | 메트릭 | `batch.industry.synced` · `batch.industry.failed` · `batch.industry.oversized` |
 
-**`sector.version`은 행의 출처를 표시한다** — `industry_sync`가 upsert한 행만 `KSIC_10`이고, 전환 전부터 있던 KIS 업종 행은 `KIS_MASTER`로 남는다(컬럼 기본값도 `KIS_MASTER`). 전환이 끝나 참조가 사라진 `KIS_MASTER` 행은 정리 가능하다. 금액 컬럼은 원 단위로 저장하고, API 단위 변환은 core-api 책임이다(명세와 합의).
+**`sector.version`은 행의 출처를 표시한다** — `industry_sync`가 upsert한 행만 `KSIC_10`이고, 전환 전부터 있던 KIS 업종 행은 `KIS_MASTER`로 남는다(컬럼 기본값도 `KIS_MASTER`). 판별은 `level`로 한다 — 전환 마이그레이션이 KIS 행을 `level = 0`으로 남기고 KSIC 행은 항상 `level >= 2`다. 전환이 끝나 참조가 사라진 `KIS_MASTER` 행은 정리 가능하다. 금액 컬럼은 원 단위로 저장하고, API 단위 변환은 core-api 책임이다(명세와 합의).
 
 ## 5. 설정·환경변수
 
