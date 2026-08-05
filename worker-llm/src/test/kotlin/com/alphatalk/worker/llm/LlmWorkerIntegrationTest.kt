@@ -8,14 +8,21 @@ import com.alphatalk.contracts.envelope.StreamCategory
 import com.alphatalk.contracts.envelope.StreamData
 import com.alphatalk.contracts.queue.IngestQueueEntry
 import com.alphatalk.contracts.queue.IngestType
+import com.alphatalk.worker.llm.article.ArticleFetcher
 import com.alphatalk.worker.llm.article.ArticleRequestGate
+import com.alphatalk.worker.llm.cluster.ClusterAssigner
 import com.alphatalk.worker.llm.cluster.ClusterStore
 import com.alphatalk.worker.llm.config.LlmProperties
 import com.alphatalk.worker.llm.consume.IngestConsumer
+import com.alphatalk.worker.llm.enrich.ClusterSummarizer
 import com.alphatalk.worker.llm.enrich.DigestProcessor
 import com.alphatalk.worker.llm.enrich.NewsProcessor
 import com.alphatalk.worker.llm.enrich.TransactionRunner
+import com.alphatalk.worker.llm.persist.EventIdGenerator
 import com.alphatalk.worker.llm.persist.StreamEventStore
+import com.alphatalk.worker.llm.publish.StreamPublisher
+import com.alphatalk.worker.llm.sector.SectorDirectory
+import com.fasterxml.jackson.databind.ObjectMapper
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -94,6 +101,42 @@ class LlmWorkerIntegrationTest {
     @Autowired
     private lateinit var transactions: TransactionRunner
 
+    @Autowired
+    private lateinit var clusterAssigner: ClusterAssigner
+
+    @Autowired
+    private lateinit var articleFetcher: ArticleFetcher
+
+    @Autowired
+    private lateinit var summarizer: ClusterSummarizer
+
+    @Autowired
+    private lateinit var sectorDirectory: SectorDirectory
+
+    @Autowired
+    private lateinit var streamPublisher: StreamPublisher
+
+    @Autowired
+    private lateinit var eventIdGenerator: EventIdGenerator
+
+    @Autowired
+    private lateinit var objectMapper: ObjectMapper
+
+    private fun newsProcessorWithFanoutCap(cap: Int) = NewsProcessor(
+        store = clusterStore,
+        assigner = clusterAssigner,
+        fetcher = articleFetcher,
+        summarizer = summarizer,
+        sectors = sectorDirectory,
+        events = eventStore,
+        publisher = streamPublisher,
+        eventIds = eventIdGenerator,
+        mapper = objectMapper,
+        meters = SimpleMeterRegistry(),
+        transactions = transactions,
+        props = LlmProperties(sector = LlmProperties.Sector(fanoutCap = cap)),
+    )
+
     @BeforeEach
     fun reset() {
         redisTemplate.execute { it.serverCommands().flushAll() }
@@ -109,7 +152,9 @@ class LlmWorkerIntegrationTest {
             INSERT INTO stock_master (code, name, market, sector_code, dart_induty_code) VALUES
             ('005930', '삼성전자', 'KOSPI', '261', '26120'),
             ('000660', 'SK하이닉스', 'KOSPI', '261', '26120'),
-            ('105560', 'KB금융', 'KOSPI', '641', '64110')
+            ('105560', 'KB금융', 'KOSPI', '641', '64110'),
+            ('055550', '신한지주', 'KOSPI', '641', '64110'),
+            ('086790', '하나금융지주', 'KOSPI', '641', '64110')
             """,
         )
         consumer.ensureGroup()
@@ -310,18 +355,69 @@ class LlmWorkerIntegrationTest {
 
     @Test
     fun `N6 DoD - 매크로 기사 - 섹터 구성 종목 방으로 SECTOR 이벤트 fan-out`() {
-        xadd(newsEntry("hankyung:m1", "기준금리 인상에 은행 이자이익 개선 기대", codes = emptyList(), macroHint = "금리"))
-        drain()
+        val received = subscribe(Channels.stream("105560"), Channels.stream("055550"), Channels.stream("086790"))
+        try {
+            xadd(newsEntry("hankyung:m1", "기준금리 인상에 은행 이자이익 개선 기대", codes = emptyList(), macroHint = "금리"))
+            drain()
 
-        assertEquals(1, newsEventCount("105560"))
-        assertEquals(0, newsEventCount("005930"))
-        val payload = jdbc.queryForObject(
-            "SELECT payload::text FROM stream_event WHERE code = '105560'",
-            emptyMap<String, Any>(),
-            String::class.java,
-        )!!
-        assertTrue(payload.contains("\"SECTOR\""))
-        assertTrue(payload.contains("은행"))
+            assertEquals(listOf("055550", "086790", "105560"), sectorEventCodes())
+            assertEquals(0, newsEventCount("005930"))
+            val payload = jdbc.queryForObject(
+                "SELECT payload::text FROM stream_event WHERE code = '105560'",
+                emptyMap<String, Any>(),
+                String::class.java,
+            )!!
+            assertTrue(payload.contains("\"SECTOR\""))
+            assertTrue(payload.contains("은행"))
+            assertEquals(3, (0 until 3).count { received.poll(5, TimeUnit.SECONDS) != null })
+        } finally {
+            received.stop()
+        }
+    }
+
+    @Test
+    fun `N6 - fan-out 상한을 넘으면 scope는 SECTOR로 두고 실시간 발행만 억제한다`() {
+        val processor = newsProcessorWithFanoutCap(2)
+
+        processor.process(newsEntry("hankyung:cap1", "기준금리 인상에 은행 이자이익 개선 기대", codes = emptyList()))
+
+        assertTrue(sectorEventCodes().isEmpty())
+        assertEquals(
+            "SECTOR",
+            jdbc.queryForObject("SELECT scope FROM news_cluster", emptyMap<String, Any>(), String::class.java),
+        )
+        assertEquals(
+            1,
+            jdbc.queryForObject("SELECT count(*) FROM news_cluster_sector", emptyMap<String, Any>(), Long::class.java),
+        )
+    }
+
+    private fun sectorEventCodes(): List<String> = jdbc.queryForList(
+        "SELECT code FROM stream_event WHERE type = 'NEWS' AND payload ->> 'scope' = 'SECTOR' ORDER BY code",
+        emptyMap<String, Any>(),
+        String::class.java,
+    ).map(String::trim)
+
+    private fun subscribe(vararg channels: String): Subscription {
+        val queue = LinkedBlockingQueue<String>()
+        val container = RedisMessageListenerContainer().apply {
+            setConnectionFactory(redisTemplate.connectionFactory!!)
+            channels.forEach { channel ->
+                addMessageListener({ message, _ -> queue.add(String(message.body)) }, ChannelTopic(channel))
+            }
+            afterPropertiesSet()
+            start()
+        }
+        return Subscription(queue, container)
+    }
+
+    private class Subscription(
+        private val queue: LinkedBlockingQueue<String>,
+        private val container: RedisMessageListenerContainer,
+    ) {
+        fun poll(timeout: Long, unit: TimeUnit): String? = queue.poll(timeout, unit)
+
+        fun stop() = container.stop()
     }
 
     @Test

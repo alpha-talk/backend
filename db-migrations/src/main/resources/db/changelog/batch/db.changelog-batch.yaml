@@ -27,3 +27,10 @@ databaseChangeLog:
         - sqlFile:
             path: sql/0004_sector_ksic.sql
             relativeToChangelogFile: true
+  - changeSet:
+      id: 0005-sector-version-origin
+      author: worker-batch
+      changes:
+        - sqlFile:
+            path: sql/0005_sector_version_origin.sql
+            relativeToChangelogFile: true

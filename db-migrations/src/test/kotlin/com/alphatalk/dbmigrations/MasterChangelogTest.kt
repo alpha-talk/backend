@@ -34,7 +34,7 @@ class MasterChangelogTest {
         withConnection { connection ->
             update(connection)
 
-            assertEquals(21, appliedChangeSetCount(connection))
+            assertEquals(22, appliedChangeSetCount(connection))
             assertTrue(tableExists(connection, "news_cluster"))
             assertTrue(tableExists(connection, "stream_event"))
             assertTrue(tableExists(connection, "daily_candle"))
@@ -62,6 +62,27 @@ class MasterChangelogTest {
     }
 
     @Test
+    fun `KIS 업종이 들어 있는 DB를 올리면 기존 행은 KIS_MASTER로 남는다`() {
+        withConnection { connection ->
+            update(connection, KIS_SECTOR_CHANGESETS)
+            connection.createStatement().use {
+                it.execute("INSERT INTO sector (code, name) VALUES ('00027', '제조'), ('11009', '제조')")
+            }
+
+            update(connection)
+
+            connection.createStatement().use { statement ->
+                statement.executeQuery("SELECT version, count(*) FROM sector GROUP BY version").use { rows ->
+                    val origins = buildMap {
+                        while (rows.next()) put(rows.getString(1), rows.getInt(2))
+                    }
+                    assertEquals(mapOf("KIS_MASTER" to 2), origins)
+                }
+            }
+        }
+    }
+
+    @Test
     fun `재적용은 멱등하고 체크섬 검증을 통과한다`() {
         withConnection { connection ->
             update(connection)
@@ -82,6 +103,12 @@ class MasterChangelogTest {
     private fun update(connection: Connection) {
         Liquibase(MASTER_CHANGELOG, ClassLoaderResourceAccessor(), database(connection))
             .update(Contexts(), LabelExpression())
+    }
+
+    @Suppress("DEPRECATION")
+    private fun update(connection: Connection, changesToApply: Int) {
+        Liquibase(MASTER_CHANGELOG, ClassLoaderResourceAccessor(), database(connection))
+            .update(changesToApply, Contexts(), LabelExpression())
     }
 
     @Suppress("DEPRECATION")
@@ -109,5 +136,6 @@ class MasterChangelogTest {
 
     companion object {
         private const val MASTER_CHANGELOG = "db/changelog/db.changelog-master.yaml"
+        private const val KIS_SECTOR_CHANGESETS = 20
     }
 }
