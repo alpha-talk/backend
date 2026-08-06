@@ -454,6 +454,10 @@ class NewsProcessorTest {
         assertEquals("105560", event.code)
         assertEquals("SECTOR", event.data.scope)
         assertEquals("27", event.data.sector?.code)
+        assertEquals("POSITIVE", event.data.sentiment)
+        val link = store.stockLinks(store.clusters.keys.single()).single { it.code == "105560" }
+        assertEquals("POSITIVE", link.sentiment)
+        assertEquals(0.9, link.confidence)
     }
 
     @Test
