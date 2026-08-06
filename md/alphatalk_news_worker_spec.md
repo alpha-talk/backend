@@ -188,7 +188,7 @@ worker-llm은 큐 엔트리를 방에 뜨는 이벤트로 바꾼다. 인스턴�
 - `relevant=false`인 종목 후보는 제외한다(후보 오탐 제거). STOCK/SECTOR 판정인데 채택할 종목·섹터가 없으면 방어적으로 `IRRELEVANT` 처리한다.
 - confidence < 0.6이면 sentiment를 NEUTRAL로 강등한다 — 애매한 건을 호재/악재로 단정하지 않는다.
 - 운영 `anthropic` provider의 기본 모델은 클러스터 요약 **claude-haiku-4-5**(건수 많음·단순), 일일 다이제스트 **claude-sonnet-5**(하루 종목당 1회·종합 판단)다. `LlmClient` 포트 뒤라 교체는 자유롭다.
-- 로컬은 `claude-cli`(기본) 또는 `codex-cli` provider로 로그인된 개인 구독을 쓰며 **단일 worker-llm 인스턴스 운용만 지원**한다. 두 CLI 모두 단발성 비대화형 실행·JSON Schema 강제·세션 비영속·2분 타임아웃이고, 자식 프로세스에서 API 키 환경변수를 제거해 구독 인증과 API 과금이 섞이지 않게 한다. Claude는 도구를 전부 끄고 safe mode로, Codex는 빈 임시 작업공간과 read-only sandbox에서 실행한다. local 프로파일은 `consumer-batch=1`로 한 번에 PEL에 한 건만 선점하고, 기동 시 CLI timeout이 `claim-idle`보다 짧은지 검증한다. worker-llm ×N 운용은 운영 `anthropic` provider에만 적용한다.
+- 로컬은 `claude-cli`(기본) 또는 `codex-cli` provider로 로그인된 개인 구독을 쓰며 **단일 worker-llm 인스턴스 운용만 지원**한다. `claude-cli`는 기본적으로 `sonnet` 별칭을 명시하며 `CLAUDE_CLI_MODEL`로 바꿀 수 있다. 두 CLI 모두 단발성 비대화형 실행·JSON Schema 강제·세션 비영속·2분 타임아웃이고, 자식 프로세스에서 API 키 환경변수를 제거해 구독 인증과 API 과금이 섞이지 않게 한다. Claude는 도구를 전부 끄고 safe mode로, Codex는 빈 임시 작업공간과 read-only sandbox에서 실행한다. local 프로파일은 `consumer-batch=1`로 한 번에 PEL에 한 건만 선점하고, 기동 시 CLI timeout이 `claim-idle`보다 짧은지 검증한다. worker-llm ×N 운용은 운영 `anthropic` provider에만 적용한다.
 - 비용 추정: 시드 41종목 기준 일 ~500기사 → ~150클러스터 × ~2K tokens(Haiku) + 41다이제스트 × ~3K tokens(Sonnet) — 월 수 달러 수준.
 - 워커 내 재시도는 백오프 1회까지다. 그 이상은 PEL 재처리에 맡긴다(이중 재시도 루프 금지).
 
@@ -424,7 +424,7 @@ worker-llm/
 
 provider는 명시 설정이고 자동 fallback이 없다. 엉뚱한 경로로 조용히 돌아가느니 기동에 실패하는 쪽을 택한다.
 
-- LLM provider는 `anthropic|claude-cli|codex-cli|fake` 중 하나를 명시한다. 기본 프로파일은 `anthropic`, local 프로파일은 `claude-cli`이며 `LLM_PROVIDER=codex-cli`로 전환한다. provider 사이 자동 fallback은 없다.
+- LLM provider는 `anthropic|claude-cli|codex-cli|fake` 중 하나를 명시한다. 기본 프로파일은 `anthropic`, local 프로파일은 `claude-cli`이며 `LLM_PROVIDER=codex-cli`로 전환한다. `claude-cli`의 기본 모델은 최신 Sonnet을 가리키는 `sonnet` 별칭이고 `CLAUDE_CLI_MODEL`로 재정의한다. provider 사이 자동 fallback은 없다.
 - 로컬 무료 임베딩은 Ollama+BGE-M3를 기본으로 쓴다. 설치·환경변수·Docker 연결·문제 해결은 [로컬 임베딩 설정](local_embedding_setup.md)을 따른다.
 - `anthropic`은 `ANTHROPIC_API_KEY`가 없으면 기동에 실패한다. `claude-cli`·`codex-cli`는 각각 로그인된 로컬 CLI가 필요하고, 실행 실패·타임아웃은 PEL 재처리 경로로 전파한다. `fake`는 `alphatalk.llm.allow-fake=true`일 때만 허용한다.
 - CLI provider는 개인 구독 로컬 단일 인스턴스 전용이다. `consumer-batch=1`이 아니거나 CLI timeout이 `claim-idle` 이상이면 기동에 실패해, 긴 CLI 호출 중 다른 consumer가 아직 처리하지 않은 배치 레코드를 회수하는 구성을 막는다.
