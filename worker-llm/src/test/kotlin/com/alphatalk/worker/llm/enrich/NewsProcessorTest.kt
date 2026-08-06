@@ -285,20 +285,41 @@ class NewsProcessorTest {
     }
 
     @Test
-    fun `SECTOR - 같은 섹터를 impact 다르게 두 번 판정하면 높은 쪽으로 귀속된다`() {
+    fun `SECTOR - 같은 섹터를 impact 다르게 두 번 판정하면 LOW가 먼저 와도 높은 쪽을 쓴다`() {
+        assertHighestSectorVerdictWins(
+            listOf(
+                SectorVerdict("33", Sentiment.NEUTRAL, Impact.LOW, 0.5, "중복 판정"),
+                SectorVerdict("33", Sentiment.POSITIVE, Impact.HIGH, 0.9, ""),
+            ),
+        )
+    }
+
+    @Test
+    fun `SECTOR - 같은 섹터 중복 판정은 HIGH가 먼저 와도 저장 행까지 높은 쪽으로 남는다`() {
+        assertHighestSectorVerdictWins(
+            listOf(
+                SectorVerdict("33", Sentiment.POSITIVE, Impact.HIGH, 0.9, ""),
+                SectorVerdict("33", Sentiment.NEUTRAL, Impact.LOW, 0.5, "중복 판정"),
+            ),
+        )
+    }
+
+    private fun assertHighestSectorVerdictWins(sectors: List<SectorVerdict>) {
         verdict = ClusterSummaryOutput(
             summary = "반도체 영향",
             marketRelevant = true,
             scope = NewsScope.SECTOR,
             stocks = emptyList(),
-            sectors = listOf(
-                SectorVerdict("33", Sentiment.NEUTRAL, Impact.LOW, 0.5, "중복 판정"),
-                SectorVerdict("33", Sentiment.POSITIVE, Impact.HIGH, 0.9, ""),
-            ),
+            sectors = sectors,
         )
         processor(fanoutCap = 1).process(entry("a1", "반도체 이슈", codes = emptyList()))
+
         assertEquals(listOf("005930", "000660"), events.inserted.map { it.code })
         assertTrue(events.inserted.all { it.data.sentiment == "POSITIVE" })
+        assertEquals(
+            Triple("POSITIVE", 0.9, "HIGH"),
+            store.sectorLinkRows.getValue(store.clusters.keys.single() to "33"),
+        )
     }
 
     @Test

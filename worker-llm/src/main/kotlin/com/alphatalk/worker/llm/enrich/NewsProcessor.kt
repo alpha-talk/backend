@@ -88,7 +88,8 @@ class NewsProcessor(
                 if (!store.markIrrelevant(cluster.id, token)) throw ClusterContendedException(cluster.id)
                 return@run
             }
-            verdict.sectors.forEach {
+            val sectorVerdicts = normalizeSectors(verdict.sectors)
+            sectorVerdicts.forEach {
                 store.upsertSectorLink(cluster.id, it.sectorCode, it.sentiment.name, it.confidence, it.impact.name)
             }
 
@@ -103,7 +104,8 @@ class NewsProcessor(
             }
             val finalScope = when (verdict.scope) {
                 NewsScope.STOCK -> persistStockScope(cluster, verdict, relevantStocks, publications)
-                NewsScope.SECTOR -> persistSectorScope(cluster, verdict, relevantStocks, publications)
+                NewsScope.SECTOR ->
+                    persistSectorScope(cluster, verdict, sectorVerdicts, relevantStocks, publications)
                 NewsScope.MARKET -> NewsScope.MARKET
             }
             if (finalScope == null) {
@@ -132,11 +134,12 @@ class NewsProcessor(
     private fun persistSectorScope(
         cluster: ClusterRecord,
         verdict: ClusterSummaryOutput,
+        sectorVerdicts: List<SectorVerdict>,
         relevantStocks: List<StockVerdict>,
         publications: MutableList<PendingPublication>,
     ): NewsScope? {
-        if (relevantStocks.isEmpty() && verdict.sectors.isEmpty()) return null
-        val fanout = resolveFanout(verdict.sectors)
+        if (relevantStocks.isEmpty() && sectorVerdicts.isEmpty()) return null
+        val fanout = resolveFanout(cluster.id, sectorVerdicts)
 
         val direct = relevantStocks.map { it.code }.toSet()
         relevantStocks.forEach { stock ->
@@ -158,25 +161,38 @@ class NewsProcessor(
         return NewsScope.SECTOR
     }
 
-    private fun resolveFanout(verdicts: List<SectorVerdict>): Map<String, Pair<SectorVerdict, SectorRef>> {
-        val all = memberFanout(verdicts.sortedBy { it.impact.ordinal })
+    private fun normalizeSectors(verdicts: List<SectorVerdict>): List<SectorVerdict> =
+        verdicts.sortedBy { it.impact.ordinal }.distinctBy(SectorVerdict::sectorCode)
+
+    private fun resolveFanout(
+        clusterId: String,
+        verdicts: List<SectorVerdict>,
+    ): Map<String, Pair<SectorVerdict, SectorRef>> {
+        val all = memberFanout(verdicts)
         if (all.size <= fanoutCap) return all
 
         val material = all.filterValues { it.first.impact != Impact.LOW }
         if (material.isEmpty() || material.size > fanoutHardCap) {
             meters.counter("sector.fanout.suppressed").increment()
             log.warn(
-                "sector fan-out suppressed: all={} material={} cap={} hardCap={}",
-                all.size, material.size, fanoutCap, fanoutHardCap,
+                "sector fan-out suppressed: clusterId={} sectors={} all={} material={} cap={} hardCap={}",
+                clusterId, sectorCodesOf(verdicts), all.size, material.size, fanoutCap, fanoutHardCap,
             )
             return emptyMap()
         }
         if (material.size < all.size) {
             meters.counter("sector.fanout.degraded").increment()
-            log.info("sector fan-out degraded to material impact: all={} material={}", all.size, material.size)
+            log.info(
+                "sector fan-out degraded to material impact: clusterId={} sectors={} all={} material={}",
+                clusterId, sectorCodesOf(verdicts), all.size, material.size,
+            )
         }
         return material
     }
+
+    private fun sectorCodesOf(verdicts: List<SectorVerdict>): String =
+        verdicts.take(LOGGED_SECTORS).joinToString(",") { "${it.sectorCode}:${it.impact}" } +
+            if (verdicts.size > LOGGED_SECTORS) ",…(+${verdicts.size - LOGGED_SECTORS})" else ""
 
     private fun memberFanout(verdicts: List<SectorVerdict>): Map<String, Pair<SectorVerdict, SectorRef>> {
         val fanout = linkedMapOf<String, Pair<SectorVerdict, SectorRef>>()
@@ -246,6 +262,10 @@ class NewsProcessor(
 
     private fun publish(publications: List<PendingPublication>) {
         publications.forEach { publisher.publish(it.code, it.eventId, it.data) }
+    }
+
+    private companion object {
+        const val LOGGED_SECTORS = 10
     }
 
     private data class PendingPublication(
