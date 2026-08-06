@@ -144,8 +144,6 @@ class NewsProcessor(
         val discoveredCodes = discovered.mapTo(mutableSetOf(), StockVerdict::code)
         val exemptCodes = sourced.mapTo(mutableSetOf(), StockVerdict::code)
         val plan = resolveFanout(cluster.id, sectorVerdicts, discoveredCodes, exemptCodes)
-
-        // F3: 억제돼 이벤트를 만들지 않아도 링크는 남긴다 — 없으면 후속 기사가 같은 클러스터로 합류하지 못한다
         if (!plan.includeDiscovered) {
             discovered.forEach {
                 store.applyStockVerdict(cluster.id, it.code, it.sentiment.name, it.confidence, rejected = false)
@@ -190,7 +188,7 @@ class NewsProcessor(
         meters.counter("sector.fanout.tier2").increment()
         val material = all.filterValues { it.first.impact != Impact.LOW }
         val materialCount = cappedCount(material, discovered, exemptCodes)
-        if (material.isEmpty() || materialCount > fanoutHardCap) {
+        if ((material.isEmpty() && discovered.isEmpty()) || materialCount > fanoutHardCap) {
             meters.counter("sector.fanout.suppressed").increment()
             log.warn(
                 "sector fan-out suppressed: clusterId={} sectors={} all={} material={} discovered={} " +
@@ -276,9 +274,17 @@ class NewsProcessor(
 
             val published = links.filter { it.streamEventId != null }.map { it.code }.toSet()
             val rejected = links.filter { it.rejected == true }.map { it.code }.toSet()
+            val sectorScoped = cluster.scope == NewsScope.SECTOR.name
             entry.codes.filter { it !in published && it !in rejected }.forEach { code ->
-                persistStockEvent(cluster, cluster.summary.orEmpty(), code, null, null, null, null)
-                    ?.let(publications::add)
+                persistStockEvent(
+                    cluster,
+                    cluster.summary.orEmpty(),
+                    code,
+                    null,
+                    null,
+                    if (sectorScoped) NewsScope.SECTOR else null,
+                    if (sectorScoped) sectorRefOf(code) else null,
+                )?.let(publications::add)
             }
         }
         publish(publications)
