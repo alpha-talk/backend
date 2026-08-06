@@ -25,7 +25,7 @@ internal class CodexCliLlmClient(
             StructuredLlmCodec.marketDigestPrompt(input.copy(research = false)),
             StructuredLlmCodec.marketDigestSchema,
         )
-        return StructuredLlmCodec.parseMarketDigest(output)
+        return StructuredLlmCodec.parseMarketDigest(output, research = false)
     }
 
     private fun call(prompt: String, schema: Map<String, Any>): JsonNode {

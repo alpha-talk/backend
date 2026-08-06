@@ -65,11 +65,14 @@ class MarketDigestProcessor(
             sectorClusters = sectorClusters.map(::toDigestCluster),
             research = researchExpected,
         )
-        val output = runCatching { llm.marketDigest(input) }.getOrElse { failure ->
+        var usedResearch = researchExpected
+        val rawOutput = runCatching { llm.marketDigest(input) }.getOrElse { failure ->
             if (!researchExpected) throw failure
             recordLayerFailure("research", failure)
+            usedResearch = false
             llm.marketDigest(input.copy(research = false))
         }
+        val output = if (usedResearch) rawOutput else rawOutput.copy(global = emptyList(), sources = emptyList())
 
         if (factSheet == null && marketClusters.isEmpty() && sectorClusters.isEmpty() && output.global.isEmpty()) {
             check(!factsResult.isFailure && !clustersResult.isFailure) {
@@ -80,7 +83,7 @@ class MarketDigestProcessor(
             return
         }
 
-        val researched = researchExpected && output.global.isNotEmpty()
+        val researched = usedResearch && output.global.isNotEmpty()
         val degraded = factsResult.getOrNull() !is FactSheetLookup.Found ||
             clustersResult.isFailure ||
             !researched
