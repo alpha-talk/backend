@@ -3,8 +3,9 @@ package com.alphatalk.worker.ingest.scheduler
 import com.alphatalk.contracts.queue.IngestQueueEntry
 import com.alphatalk.contracts.queue.IngestType
 import com.alphatalk.worker.ingest.config.IngestProperties
-import com.alphatalk.worker.ingest.dedup.SeenMarker
-import com.alphatalk.worker.ingest.queue.IngestQueue
+import com.alphatalk.worker.ingest.queue.DigestEnqueueResult
+import com.alphatalk.worker.ingest.queue.DigestJobQueue
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import org.junit.jupiter.api.Test
 import org.springframework.scheduling.annotation.Scheduled
 import java.time.Clock
@@ -15,8 +16,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 class DigestTriggerTest {
-    private val queue = RecordingQueue()
-    private val seen = InMemorySeenMarker()
+    private val queue = RecordingDigestJobQueue()
     private val stocks = listOf(
         IngestProperties.Stock("005930", "삼성전자"),
         IngestProperties.Stock("000660", "SK하이닉스"),
@@ -25,8 +25,8 @@ class DigestTriggerTest {
     private fun triggerAt(instant: String, digest: IngestProperties.Digest = IngestProperties.Digest()) =
         DigestTrigger(
             queue = queue,
-            seen = seen,
             props = IngestProperties(stocks = stocks, digest = digest),
+            meters = SimpleMeterRegistry(),
             catchUpExecutor = { it.run() },
             clock = Clock.fixed(Instant.parse(instant), ZoneOffset.UTC),
         )
@@ -54,7 +54,7 @@ class DigestTriggerTest {
     }
 
     @Test
-    fun `적재에 실패한 종목은 마커를 되돌려 다음 트리거에서 재시도된다`() {
+    fun `적재에 실패한 종목은 다음 트리거에서 재시도된다`() {
         queue.failFor("005930")
         val trigger = triggerAt("2026-07-16T09:00:00Z")
 
@@ -63,6 +63,34 @@ class DigestTriggerTest {
         queue.failFor(null)
         assertEquals(1, trigger.triggerFor(LocalDate.parse("2026-07-16")))
         assertEquals(listOf("000660", "005930"), queue.entries.map { it.codes.single() })
+    }
+
+    @Test
+    fun `크론 틱이 자정을 넘겨 지연돼도 예정 날짜로 적재한다`() {
+        val trigger = triggerAt("2026-07-16T15:10:00Z")
+
+        trigger.trigger()
+
+        assertEquals(2, queue.entries.size)
+        assertTrue(queue.entries.all { it.sourceId.endsWith("2026-07-16") })
+
+        trigger.reconcileCatchUp()
+        assertEquals(2, queue.entries.size)
+    }
+
+    @Test
+    fun `기동 시 Redis 장애로 보충이 실패하면 다음 재조정에서 다시 적재한다`() {
+        queue.failAll(true)
+        val trigger = triggerAt("2026-07-16T11:30:00Z")
+
+        trigger.catchUpOnStartup()
+        assertEquals(0, queue.entries.size)
+
+        queue.failAll(false)
+        trigger.reconcileCatchUp()
+
+        assertEquals(2, queue.entries.size)
+        assertTrue(queue.entries.all { it.sourceId.endsWith("2026-07-16") })
     }
 
     @Test
@@ -116,30 +144,33 @@ class DigestTriggerTest {
 
     @Test
     fun `보충을 끄면 예정 시각이 지나도 적재하지 않는다`() {
-        triggerAt("2026-07-16T11:30:00Z", IngestProperties.Digest(catchUpOnStartup = false)).catchUpOnStartup()
+        val trigger = triggerAt("2026-07-16T11:30:00Z", IngestProperties.Digest(catchUpOnStartup = false))
+
+        trigger.catchUpOnStartup()
+        trigger.reconcileCatchUp()
 
         assertEquals(0, queue.entries.size)
     }
 
-    private class RecordingQueue : IngestQueue {
+    private class RecordingDigestJobQueue : DigestJobQueue {
         val entries = mutableListOf<IngestQueueEntry>()
+        private val marked = mutableSetOf<String>()
         private var failingCode: String? = null
+        private var failingAll = false
 
         fun failFor(code: String?) {
             failingCode = code
         }
 
-        override fun enqueue(entry: IngestQueueEntry) {
-            if (entry.codes.single() == failingCode) throw IllegalStateException("queue down")
-            entries.add(entry)
+        fun failAll(failing: Boolean) {
+            failingAll = failing
         }
-    }
 
-    private class InMemorySeenMarker : SeenMarker {
-        private val marked = mutableSetOf<String>()
-        override fun markIfNew(sourceId: String) = marked.add(sourceId)
-        override fun clear(sourceId: String) {
-            marked.remove(sourceId)
+        override fun enqueueIfNew(entry: IngestQueueEntry): DigestEnqueueResult {
+            if (failingAll || entry.codes.single() == failingCode) throw IllegalStateException("queue down")
+            if (!marked.add(entry.sourceId)) return DigestEnqueueResult.ALREADY_ENQUEUED
+            entries.add(entry)
+            return DigestEnqueueResult.ENQUEUED
         }
     }
 }
