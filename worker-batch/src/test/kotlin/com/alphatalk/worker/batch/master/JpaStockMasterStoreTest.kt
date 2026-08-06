@@ -1,7 +1,6 @@
 package com.alphatalk.worker.batch.master
 
 import com.alphatalk.kis.master.KisMarket
-import com.alphatalk.kis.master.KisSector
 import com.alphatalk.kis.master.KisStockMaster
 import org.junit.jupiter.api.Test
 import org.springframework.beans.factory.annotation.Autowired
@@ -21,7 +20,7 @@ import kotlin.test.assertTrue
 
 @DataJpaTest(properties = ["spring.liquibase.change-log=classpath:db/changelog/batch/db.changelog-batch.yaml"])
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
-@Import(JpaStockMasterStore::class, JpaSectorStore::class)
+@Import(JpaStockMasterStore::class)
 @Testcontainers(disabledWithoutDocker = true)
 class JpaStockMasterStoreTest {
     companion object {
@@ -34,14 +33,10 @@ class JpaStockMasterStoreTest {
     @Autowired
     private lateinit var store: JpaStockMasterStore
 
-    @Autowired
-    private lateinit var sectorStore: JpaSectorStore
 
     @Autowired
     private lateinit var stocks: StockMasterJpaRepository
 
-    @Autowired
-    private lateinit var sectors: SectorJpaRepository
 
     @Autowired
     private lateinit var entityManager: TestEntityManager
@@ -113,13 +108,4 @@ class JpaStockMasterStoreTest {
         assertTrue(stocks.findById("000660").orElseThrow().isActive)
     }
 
-    @Test
-    fun `업종 upsert는 두 번 실행해도 행이 늘지 않고 이름을 갱신한다`() {
-        sectorStore.upsertAll(listOf(KisSector("0027", "반도체")))
-        sectorStore.upsertAll(listOf(KisSector("0027", "반도체·반도체장비"), KisSector("0021", "금융")))
-
-        readBack()
-        assertEquals(2, sectors.count())
-        assertEquals("반도체·반도체장비", sectors.findById("0027").orElseThrow().name)
-    }
 }

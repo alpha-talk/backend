@@ -10,6 +10,7 @@ import com.alphatalk.worker.llm.cluster.ClusterContendedException
 import com.alphatalk.worker.llm.cluster.ClusterRecord
 import com.alphatalk.worker.llm.cluster.ClusterStatus
 import com.alphatalk.worker.llm.cluster.ClusterStore
+import com.alphatalk.worker.llm.cluster.StockLink
 import com.alphatalk.worker.llm.config.LlmProperties
 import com.alphatalk.worker.llm.persist.EventIdGenerator
 import com.alphatalk.worker.llm.persist.StreamEventStore
@@ -17,6 +18,7 @@ import com.alphatalk.worker.llm.publish.StreamPublisher
 import com.alphatalk.worker.llm.sector.SectorDirectory
 import com.fasterxml.jackson.databind.ObjectMapper
 import io.micrometer.core.instrument.MeterRegistry
+import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
 import java.time.Clock
 import java.time.Duration
@@ -39,8 +41,16 @@ class NewsProcessor(
     private val summarizeLease: Duration = Duration.ofMinutes(2),
     private val clock: Clock = Clock.systemUTC(),
 ) {
+    private val log = LoggerFactory.getLogger(javaClass)
     private val fanoutCap: Int = props.sector.fanoutCap
-    private val coverage: Set<String> = props.sector.coverageStocks.toSet()
+    private val fanoutHardCap: Int = props.sector.fanoutHardCap
+
+    init {
+        require(fanoutCap > 0 && fanoutHardCap >= fanoutCap) {
+            "fan-out 상한은 fanout-cap > 0 이고 fanout-hard-cap >= fanout-cap 이어야 한다: " +
+                "cap=$fanoutCap hardCap=$fanoutHardCap"
+        }
+    }
 
     fun process(entry: IngestQueueEntry) {
         val assignment = assigner.assign(entry)
@@ -79,7 +89,8 @@ class NewsProcessor(
                 if (!store.markIrrelevant(cluster.id, token)) throw ClusterContendedException(cluster.id)
                 return@run
             }
-            verdict.sectors.forEach {
+            val sectorVerdicts = normalizeSectors(verdict.sectors)
+            sectorVerdicts.forEach {
                 store.upsertSectorLink(cluster.id, it.sectorCode, it.sentiment.name, it.confidence, it.impact.name)
             }
 
@@ -94,7 +105,8 @@ class NewsProcessor(
             }
             val finalScope = when (verdict.scope) {
                 NewsScope.STOCK -> persistStockScope(cluster, verdict, relevantStocks, publications)
-                NewsScope.SECTOR -> persistSectorScope(cluster, verdict, relevantStocks, publications)
+                NewsScope.SECTOR ->
+                    persistSectorScope(cluster, verdict, sectorVerdicts, relevantStocks, candidates, publications)
                 NewsScope.MARKET -> NewsScope.MARKET
             }
             if (finalScope == null) {
@@ -123,21 +135,26 @@ class NewsProcessor(
     private fun persistSectorScope(
         cluster: ClusterRecord,
         verdict: ClusterSummaryOutput,
+        sectorVerdicts: List<SectorVerdict>,
         relevantStocks: List<StockVerdict>,
+        sourceCandidates: Set<String>,
         publications: MutableList<PendingPublication>,
     ): NewsScope? {
-        if (relevantStocks.isEmpty() && verdict.sectors.isEmpty()) return null
-        val fanout = linkedMapOf<String, Pair<SectorVerdict, SectorRef>>()
-        verdict.sectors.filter { it.impact != Impact.LOW }.forEach { sv ->
-            val ref = SectorRef(code = sv.sectorCode, name = sectors.sectorName(sv.sectorCode) ?: sv.sectorCode)
-            sectors.memberCodes(sv.sectorCode)
-                .filter { it in coverage }
-                .forEach { code -> fanout.putIfAbsent(code, sv to ref) }
+        if (relevantStocks.isEmpty() && sectorVerdicts.isEmpty()) return null
+        val (sourced, discovered) = relevantStocks.partition { it.code in sourceCandidates }
+        val discoveredCodes = discovered.mapTo(mutableSetOf(), StockVerdict::code)
+        val exemptCodes = sourced.mapTo(mutableSetOf(), StockVerdict::code)
+        val plan = resolveFanout(cluster.id, sectorVerdicts, discoveredCodes, exemptCodes)
+        if (!plan.includeDiscovered) {
+            discovered.forEach {
+                store.applyStockVerdict(cluster.id, it.code, it.sentiment.name, it.confidence, rejected = false)
+            }
         }
-        if (fanout.size > fanoutCap) return NewsScope.MARKET
 
-        val direct = relevantStocks.map { it.code }.toSet()
-        relevantStocks.forEach { stock ->
+        val published = mutableSetOf<String>()
+        val capExempt = sourced + if (plan.includeDiscovered) discovered else emptyList()
+        capExempt.forEach { stock ->
+            published += stock.code
             persistStockEvent(
                 cluster,
                 verdict.summary,
@@ -148,12 +165,71 @@ class NewsProcessor(
                 sectorRefOf(stock.code),
             )?.let(publications::add)
         }
-        fanout.filterKeys { it !in direct }.forEach { (code, ctx) ->
+        plan.members.filterKeys { it !in published }.forEach { (code, ctx) ->
             val (sv, ref) = ctx
             persistStockEvent(cluster, verdict.summary, code, sv.sentiment.name, sv.confidence, NewsScope.SECTOR, ref)
                 ?.let(publications::add)
         }
         return NewsScope.SECTOR
+    }
+
+    private fun normalizeSectors(verdicts: List<SectorVerdict>): List<SectorVerdict> =
+        verdicts.sortedBy { it.impact.ordinal }.distinctBy(SectorVerdict::sectorCode)
+
+    private fun resolveFanout(
+        clusterId: String,
+        verdicts: List<SectorVerdict>,
+        discovered: Set<String>,
+        exemptCodes: Set<String>,
+    ): FanoutPlan {
+        val all = memberFanout(verdicts)
+        val allCount = cappedCount(all, discovered, exemptCodes)
+        if (allCount <= fanoutCap) return FanoutPlan(all, includeDiscovered = true)
+
+        meters.counter("sector.fanout.tier2").increment()
+        val material = all.filterValues { it.first.impact != Impact.LOW }
+        val materialCount = cappedCount(material, discovered, exemptCodes)
+        if ((material.isEmpty() && discovered.isEmpty()) || materialCount > fanoutHardCap) {
+            meters.counter("sector.fanout.suppressed").increment()
+            log.warn(
+                "sector fan-out suppressed: clusterId={} sectors={} all={} material={} discovered={} " +
+                    "cap={} hardCap={}",
+                clusterId, sectorCodesOf(verdicts), allCount, materialCount, discovered.size, fanoutCap, fanoutHardCap,
+            )
+            return FanoutPlan(emptyMap(), includeDiscovered = false)
+        }
+        if (materialCount < allCount) {
+            meters.counter("sector.fanout.degraded").increment()
+            log.info(
+                "sector fan-out degraded to material impact: clusterId={} sectors={} all={} material={} discovered={}",
+                clusterId, sectorCodesOf(verdicts), allCount, materialCount, discovered.size,
+            )
+        }
+        return FanoutPlan(material, includeDiscovered = true)
+    }
+
+    private fun cappedCount(
+        members: Map<String, Pair<SectorVerdict, SectorRef>>,
+        discovered: Set<String>,
+        exemptCodes: Set<String>,
+    ): Int = ((members.keys - exemptCodes) + discovered).size
+
+    private data class FanoutPlan(
+        val members: Map<String, Pair<SectorVerdict, SectorRef>>,
+        val includeDiscovered: Boolean,
+    )
+
+    private fun sectorCodesOf(verdicts: List<SectorVerdict>): String =
+        verdicts.take(LOGGED_SECTORS).joinToString(",") { "${it.sectorCode}:${it.impact}" } +
+            if (verdicts.size > LOGGED_SECTORS) ",…(+${verdicts.size - LOGGED_SECTORS})" else ""
+
+    private fun memberFanout(verdicts: List<SectorVerdict>): Map<String, Pair<SectorVerdict, SectorRef>> {
+        val fanout = linkedMapOf<String, Pair<SectorVerdict, SectorRef>>()
+        verdicts.forEach { sv ->
+            val ref = SectorRef(code = sv.sectorCode, name = sectors.sectorName(sv.sectorCode) ?: sv.sectorCode)
+            sectors.memberCodes(sv.sectorCode).forEach { code -> fanout.putIfAbsent(code, sv to ref) }
+        }
+        return fanout
     }
 
     private fun sectorRefOf(code: String): SectorRef? =
@@ -199,9 +275,19 @@ class NewsProcessor(
 
             val published = links.filter { it.streamEventId != null }.map { it.code }.toSet()
             val rejected = links.filter { it.rejected == true }.map { it.code }.toSet()
+            val linkByCode = links.associateBy(StockLink::code)
+            val sectorScoped = cluster.scope == NewsScope.SECTOR.name
             entry.codes.filter { it !in published && it !in rejected }.forEach { code ->
-                persistStockEvent(cluster, cluster.summary.orEmpty(), code, null, null, null, null)
-                    ?.let(publications::add)
+                val existing = linkByCode[code]
+                persistStockEvent(
+                    cluster,
+                    cluster.summary.orEmpty(),
+                    code,
+                    existing?.sentiment,
+                    existing?.confidence,
+                    if (sectorScoped) NewsScope.SECTOR else null,
+                    if (sectorScoped) sectorRefOf(code) else null,
+                )?.let(publications::add)
             }
         }
         publish(publications)
@@ -215,6 +301,10 @@ class NewsProcessor(
 
     private fun publish(publications: List<PendingPublication>) {
         publications.forEach { publisher.publish(it.code, it.eventId, it.data) }
+    }
+
+    private companion object {
+        const val LOGGED_SECTORS = 10
     }
 
     private data class PendingPublication(

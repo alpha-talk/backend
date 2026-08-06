@@ -50,7 +50,6 @@ class CliLlmClientTest {
                 provider = "claude-cli",
                 claudeCli = LlmProperties.ClaudeCli(
                     executable = "claude-test",
-                    model = "sonnet",
                     timeout = Duration.ofSeconds(3),
                 ),
             ),

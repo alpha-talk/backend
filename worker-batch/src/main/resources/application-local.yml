@@ -8,3 +8,5 @@ alphatalk:
   batch:
     stock-master:
       cron: "-"                                 # 로컬은 자동 실행하지 않는다 — 필요할 때 테스트·수동 호출로 적재
+    dart:
+      cron: "-"                                 # 로컬은 자동 실행하지 않는다 — 외부 API 호출·DB 변경은 수동 트리거로만

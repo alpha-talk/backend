@@ -31,6 +31,8 @@ class StockMasterEntity(
     var market: String = "",
     @Column(name = "sector_code")
     var sectorCode: String? = null,
+    @Column(name = "dart_induty_code")
+    var dartIndutyCode: String? = null,
     @Column(name = "shares_outstanding")
     var sharesOutstanding: Long? = null,
     @Column(name = "is_active", nullable = false)
@@ -72,7 +74,6 @@ class JpaStockMasterStore(
                         code = stock.code,
                         name = stock.name,
                         market = stock.market.name,
-                        sectorCode = stock.sectorCode,
                         sharesOutstanding = stock.sharesOutstanding,
                         isActive = true,
                         listedAt = stock.listedAt,
@@ -83,7 +84,6 @@ class JpaStockMasterStore(
                 entity.apply {
                     name = stock.name
                     market = stock.market.name
-                    sectorCode = stock.sectorCode
                     sharesOutstanding = stock.sharesOutstanding
                     isActive = true
                     listedAt = stock.listedAt
