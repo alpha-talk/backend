@@ -16,8 +16,8 @@
 |---|---|
 | [md/ws_architecture.md](md/ws_architecture.md) | **코드 레벨 설계 기준** — 컴포넌트 책임, 인덱스/동시성, 시퀀스, 에러 정책 |
 | [md/ws_module_plan.md](md/ws_module_plan.md) | 구현 계획 — 단계(S0~S7)별 범위·DoD, 열린 합의 안건 |
-| [md/ws_api_spec.md](md/ws_api_spec.md) | 클라 ↔ 게이트웨이 STOMP 프로토콜 계약 (v0.6) |
-| [md/redis_contract.md](md/redis_contract.md) | 게이트웨이 ↔ 워커 ↔ 메인서버 Redis 계약 — **서비스 간 단일 진실** (v0.15) |
+| [md/ws_api_spec.md](md/ws_api_spec.md) | 클라 ↔ 게이트웨이 STOMP 프로토콜 계약 (v0.7) |
+| [md/redis_contract.md](md/redis_contract.md) | 게이트웨이 ↔ 워커 ↔ 메인서버 Redis 계약 — **서비스 간 단일 진실** (v0.16) |
 | [md/alphatalk_core_api_spec.md](md/alphatalk_core_api_spec.md) | 클라 ↔ 메인서버 REST 계약 (v0.3) — core-api 구현 기준 |
 | [md/alphatalk_kis_worker_spec.md](md/alphatalk_kis_worker_spec.md) | KIS/OpenDART 수집 워커 명세 — 워커 적재 테이블 스키마(§4)의 원천 |
 | [md/alphatalk_news_worker_spec.md](md/alphatalk_news_worker_spec.md) | 뉴스 파이프라인 명세 — worker-ingest·worker-llm (수집·클러스터링·일일 호재/악재 브리핑) |
