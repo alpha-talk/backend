@@ -1,6 +1,7 @@
-# Alpha Talk — WebSocket(STOMP) API 명세 v0.6
+# Alpha Talk — WebSocket(STOMP) API 명세 v0.7
 **WS Gateway · 실시간 푸시 전용**
 
+> **v0.6 → v0.7**: `digest{}`에 optional `marketAnalysis{}` 추가 — 하루 1건 생성되는 시장 매크로 브리핑(순환매·수급·해외 지표)을 전 종목 일일 브리핑에 동일하게 삽입([뉴스 파이프라인 명세](alphatalk_news_worker_spec.md) §4.3). 생성이 늦거나 실패하면 필드가 생략된다. 기존 필드 변경 없음 — 비파괴.
 > **v0.5 → v0.6**: `stream`의 `category=report`에 증권사 투자의견 subtype 추가 — optional `kind=opinion`·`opinion{}` 필드. STOMP 목적지·봉투·기존 필드는 변경 없음([KIS 워커 명세](alphatalk_kis_worker_spec.md) §3.3).
 > **v0.4 → v0.5**: `stream` payload 확장(§4.3) — `sentiment`·`scope`·`sector`·`sources[]`(news) · `digest{}`(ai) **optional** 필드 추가([뉴스 파이프라인 명세](alphatalk_news_worker_spec.md) §3.5·§3.6·§4.2). 기존 필드 변경 없음 — 모르는 필드는 무시하면 된다(비파괴).
 > **v0.3 → v0.4**: 게이트웨이 구현 스택을 WebFlux → **Spring MVC + STOMP 브로커**로 변경 (하단 구현 노트만 수정, 클라이언트 노출 프로토콜 §1~§9는 변경 없음)
@@ -127,7 +128,19 @@ accept-version:1.2
   "scope": "STOCK | SECTOR | MARKET",
   "sector": { "code": "27", "name": "은행" },
   "sources": [ { "name": "한국경제", "url": "https://..." } ],
-  "digest": { "date": "2026-07-16", "positives": [], "negatives": [], "sectorIssues": [], "marketIssues": [], "neutralCount": 0, "newsCount": 0 },
+  "digest": {
+    "date": "2026-07-16", "positives": [], "negatives": [], "sectorIssues": [], "marketIssues": [],
+    "neutralCount": 0, "newsCount": 0,
+    "marketAnalysis": {
+      "summary": "…시장 종합 3줄…",
+      "domestic": [ { "title": "반도체→2차전지 순환매", "line": "…" } ],
+      "global": [ { "title": "미 10년물 4.1%로 하락", "line": "…", "sourceIds": ["s1"] } ],
+      "sources": [ { "id": "s1", "title": "기사 제목", "url": "https://…", "publisher": "Reuters" } ],
+      "asOf": "2026-07-16T17:40:00+09:00",
+      "factDate": "2026-07-16",
+      "degraded": false
+    }
+  },
 
   "kind": "opinion",
   "opinion": {
@@ -145,7 +158,7 @@ accept-version:1.2
 
 - 빈 줄 아래 필드는 **전부 optional**이다.
   - `sentiment`·`scope`·`sector`·`sources`: 뉴스·공시·일반 리포트
-  - `digest`: `category=ai` 일일 브리핑
+  - `digest`: `category=ai` 일일 브리핑. `digest.marketAnalysis`는 그 안에서도 optional이다 — 하루 1건의 시장 브리핑을 전 종목에 동일 삽입하며(종목별 내용이 아니다), 생성 지연·실패 시 생략된다. `degraded=true`는 일부 입력(해외 리서치 등)이 빠진 채 생성됐다는 뜻이고, `global[]` 항목의 `sourceIds`가 `sources[]`의 `id`를 가리켜 수치별 검색 근거를 잇는다. 신선도 판단은 `date`가 아니라 `asOf`(생성 기준 시각)·`factDate`(국내 데이터 기준 거래일)로 한다 — 지연 생성 시 `asOf`가 늦고, 주말·휴장일엔 `factDate`가 지난 거래일이며, 국내 팩트 층이 빠진 산출물엔 `factDate`가 없다(optional)
   - `kind=opinion`·`opinion`: `category=report`인 증권사 투자의견
 - 투자의견은 `summary`·`sourceUrl`·`sentiment`를 싣지 않는다. `occurredAt`은 최초 수집 시각이다. KIS가 제공한 영업일자는 `opinion.businessDate`에 원문 그대로 둔다.
 - `opinion.brokerName`·`previousRatingCode`·`previousRating`·`targetPrice`는 원천 값이 없으면 `null`일 수 있다. `brokerCode`·`ratingCode`·`rating`·`businessDate`는 필수다.
