@@ -188,7 +188,7 @@ worker-llm은 큐 엔트리를 방에 뜨는 이벤트로 바꾼다. 인스턴�
 - `relevant=false`인 종목 후보는 제외한다(후보 오탐 제거). STOCK/SECTOR 판정인데 채택할 종목·섹터가 없으면 방어적으로 `IRRELEVANT` 처리한다.
 - confidence < 0.6이면 sentiment를 NEUTRAL로 강등한다 — 애매한 건을 호재/악재로 단정하지 않는다.
 - 운영 `anthropic` provider의 기본 모델은 클러스터 요약 **claude-haiku-4-5**(건수 많음·단순), 일일 다이제스트 **claude-sonnet-5**(하루 종목당 1회·종합 판단)다. `LlmClient` 포트 뒤라 교체는 자유롭다.
-- 로컬은 `claude-cli`(기본) 또는 `codex-cli` provider로 로그인된 개인 구독을 쓰며 **단일 worker-llm 인스턴스 운용만 지원**한다. 두 CLI 모두 단발성 비대화형 실행·JSON Schema 강제·세션 비영속·2분 타임아웃이고, 자식 프로세스에서 API 키 환경변수를 제거해 구독 인증과 API 과금이 섞이지 않게 한다. Claude는 도구를 전부 끄고 safe mode로, Codex는 빈 임시 작업공간과 read-only sandbox에서 실행한다. local 프로파일은 `consumer-batch=1`로 한 번에 PEL에 한 건만 선점하고, 기동 시 CLI timeout이 `claim-idle`보다 짧은지 검증한다. worker-llm ×N 운용은 운영 `anthropic` provider에만 적용한다.
+- 로컬은 `claude-cli`(기본) 또는 `codex-cli` provider로 로그인된 개인 구독을 쓰며 **단일 worker-llm 인스턴스 운용만 지원**한다. `claude-cli`는 기본적으로 `sonnet` 별칭을 명시하며 `CLAUDE_CLI_MODEL`로 바꿀 수 있다. 두 CLI 모두 단발성 비대화형 실행·JSON Schema 강제·세션 비영속·2분 타임아웃이고, 자식 프로세스에서 API 키 환경변수를 제거해 구독 인증과 API 과금이 섞이지 않게 한다. Claude는 도구를 전부 끄고 safe mode로, Codex는 빈 임시 작업공간과 read-only sandbox에서 실행한다. local 프로파일은 `consumer-batch=1`로 한 번에 PEL에 한 건만 선점하고, 기동 시 CLI timeout이 `claim-idle`보다 짧은지 검증한다. worker-llm ×N 운용은 운영 `anthropic` provider에만 적용한다.
 - 비용 추정: 시드 41종목 기준 일 ~500기사 → ~150클러스터 × ~2K tokens(Haiku) + 41다이제스트 × ~3K tokens(Sonnet) — 월 수 달러 수준.
 - 워커 내 재시도는 백오프 1회까지다. 그 이상은 PEL 재처리에 맡긴다(이중 재시도 루프 금지).
 
@@ -231,7 +231,17 @@ stream payload (ws_api_spec §4.3 확장 — ⚠️ §6 증보):
 | `MARKET` | 코스피 전체 급락, 거시 지표 | 방 fan-out **없음** — 일일 다이제스트 '시장 이슈'로만 반영(§4.2) | 전 방 동보(~2,600방)는 노이즈·비용만 크고 종목 방의 정보가치가 없다 |
 
 - **섹터 축은 KSIC 업종이다(v0.7 변경)**: 기존 `sector`·`stock_master.sector_code`를 **그대로 쓰되 내용을 KSIC로 교체**했다(KIS 워커 명세 §4). 축을 둘로 늘리지 않는다 — 종목당 유효 업종이 하나인 현재 요구에서는 별도 membership 테이블이 필요 없고, core-api는 `sector.name`만 읽으므로 이름이 KSIC 세부 업종명으로 바뀌어도 API 형태가 깨지지 않는다. KIS 마스터의 업종 필드는 대분류 18종(`제조` 하나에 557종목)뿐이라 fan-out 대상이 되지 못했다 — 중분류 필드도 28종에 그쳐 한계가 같다. `sector`에는 KSIC 전 계층(2~5자리)을 `level`·`parent_code`·`version`과 함께 보유하고, 라우팅에 쓰는 유효 코드만 `stock_master.sector_code`에 배정한다. 배정은 **소분류(3자리)에서 시작해 상한을 넘는 그룹만 한 단계씩 세세분류(5자리)까지 내린다**. 실측(2026-08, 활성 2,604종목): 177그룹 · 중앙값 6 · 최대 95 · 상한 초과 0.
-- **섹터 해소**: `stock_master.sector_code`로 활성 구성 종목을 조회해 합집합·중복 제거 후 배달한다. **커버리지 화이트리스트는 제거했다** — 무차별 배달의 방어선은 배치가 유지하는 그룹 크기이고, worker-llm의 `fanout-cap`(기본 100)은 그 불변식이 깨졌을 때만 작동하는 이중 안전장치다. **상한 초과를 MARKET으로 바꾸지 않는다** — `MARKET`은 시장 전체 기사라는 뜻이고 fan-out 규모와 무관하다. 초과 시 scope는 `SECTOR`로 두고 실시간 발행만 억제해 일일 다이제스트에만 반영한다(`sector.fanout.suppressed` 카운터).
+- **섹터 해소**: `stock_master.sector_code`로 활성 구성 종목을 조회해 합집합·중복 제거 후 배달한다. **커버리지 화이트리스트는 제거했다** — 무차별 배달의 방어선은 배치가 유지하는 그룹 크기다. **상한 초과를 MARKET으로 바꾸지 않는다** — `MARKET`은 시장 전체 기사라는 뜻이고 fan-out 규모와 무관하다.
+- **impact는 배달 여부가 아니라 강등 순서를 정한다(v0.8 변경)**: 이전에는 `impact=LOW` 섹터를 실시간 fan-out에서 무조건 제외했다. 실측 결과 LLM이 `impact`를 판정할 기준을 프롬프트에서 받지 못해 LOW가 63%를 차지했고, SECTOR 클러스터의 절반(76/153)이 어느 방에도 배달되지 않았다. **LOW도 기본적으로 배달**하고, 규모가 커질 때만 LOW부터 덜어낸다.
+
+| 단계 | 대상 | 상한 | 초과 시 |
+|---|---|---|---|
+| 1차 | 전체(LOW 포함) | `fanout-cap`(100) | 2차로 강등 |
+| 2차 | `impact != LOW`만 | `fanout-hard-cap`(500) | 실시간 억제 |
+| 3차 | — | — | 다이제스트에만 반영 |
+
+  2차 상한은 사실상 무제한이다 — 실측 MEDIUM+ fan-out은 중앙값 24 · 최대 152이고 200을 넘는 클러스터가 없다. LLM이 업종을 비정상적으로 많이 붙였을 때만 걸리는 폭주 방지선이며, 걸리면 `sector.fanout.suppressed`와 경고 로그로 남겨 오판정을 추적한다. **덜어낼 LOW가 없어 2차 대상이 비면 그것도 억제로 집계한다** — 배달 0건인데 `degraded`만 오르면 운영에서 감지되지 않는다. `sector.fanout.degraded`는 LOW를 실제로 덜어낸 회차에만 올린다. 두 상한은 `fanout-cap > 0`·`fanout-hard-cap >= fanout-cap`을 기동 시 검증한다(어긋나면 2차가 1차보다 좁아져 상한이 조용히 무력화된다).
+- **같은 섹터를 impact 다르게 두 번 판정하면 높은 쪽을 쓴다**: fan-out은 `impact` 내림차순으로 구성 종목을 모으고 먼저 잡은 판정을 유지한다. `stock_master.sector_code`가 단일값이라 서로 다른 섹터의 구성 종목은 겹치지 않으므로, 이 규칙이 실제로 작동하는 경우는 LLM이 같은 `sectorCode`를 중복 출력했을 때다.
 - **직접 관련 종목**도 SECTOR scope 클러스터에서는 `scope=SECTOR` + 자기 섹터(`sectorOf`)를 payload에 표기한다(클라 배지 일관성).
 - **섹터 스키마는 N6 선행 조건**: `sector`·`stock_master.sector_code` 조회 예외는 삼키지 않고 전파해 PEL이 재시도하게 한다(빈 결과를 성공으로 오인해 영구 미발행되는 것 방지). 업종 목록이 **빈 결과인 것도 예외로 취급**한다 — worker-batch `industry_sync`가 적재하지 않았으면 뉴스 처리가 진행되지 않는 게 정상이다(fail-closed).
 - **DART 신고 업종이 뉴스 맥락과 어긋나는 종목은 수동 보정한다**: `alphatalk.batch.dart.group-overrides`. 예로 삼성전자의 신고 업종은 `264 통신 및 방송장비`라 반도체 그룹에 들어가지 않는다 — `sector_code`만 `261`로 덮고 `stock_master.dart_induty_code`에 DART 원본을 보존해 추적 가능하게 둔다. 손으로 관리하는 예외라 **시총 상위·뉴스 빈출 종목으로 짧게 유지**하고, 늘어나면 축 자체를 재검토한다.
@@ -240,7 +250,7 @@ stream payload (ws_api_spec §4.3 확장 — ⚠️ §6 증보):
 - **업종 후보 제시는 아직 전량 열거다**: 프롬프트에 실제 사용 중인 업종(2026-08 기준 177개)을 모두 싣는다. KSIC 세세분류(1,196개)까지 라우팅을 넓히려면 열거로는 감당되지 않으므로, 기사 임베딩으로 업종 Top-K를 뽑아 후보 10~20개만 제시하는 구조가 선행돼야 한다 — 후속 과제(§7).
 - **이번 단계의 수용 기준은 그룹 해상도다**: `KIS 대분류 18개 → 적응형 KSIC 177그룹`까지가 범위다. LLM이 `26410` 같은 **세세분류를 직접 골라 그 5자리 업종에만 배달**하는 leaf 라우팅은 위 Top-K 검색이 들어온 뒤의 목표다 — 지금은 `26410`도 정상 상황에서는 `264`로 접힌다.
 - **감성은 섹터별로 반대일 수 있다** — 금리 인상은 은행 POSITIVE·건설 NEGATIVE. `news_cluster_sector`에 섹터 단위로 저장하고, fan-out된 각 stream_event에는 **그 종목이 속한 섹터의 감성**을 싣는다.
-- **노이즈 가드 2중**: ① 매크로 기사는 물량이 많지만 클러스터링(§3.3)이 선행 방어선이다 — 금리 기사 수십 건도 1클러스터 1이벤트. ② `impact=LOW` 판정은 실시간 fan-out 없이 다이제스트에만 반영한다(방 스트림은 HIGH·MEDIUM만).
+- **노이즈 가드**: 매크로 기사는 물량이 많지만 클러스터링(§3.3)이 선행 방어선이다 — 금리 기사 수십 건도 1클러스터 1이벤트. 두 번째 방어선은 위 2단 상한이다(v0.8 이전에는 `impact=LOW` 무조건 제외였다).
 - SECTOR 이벤트 payload 예:
 
 ```json
@@ -287,7 +297,7 @@ stream payload (ws_api_spec §4.3 확장 — ⚠️ §6 증보):
 }
 ```
 
-- **입력에 세 층을 모두 취합한다**: 종목 직접 클러스터(STOCK) + 그 종목 섹터의 SECTOR 클러스터(impact LOW 포함 — 실시간에서 걸렀어도 여기엔 반영) + MARKET 클러스터. 단 `positives/negatives`에는 종목 직접 뉴스만 담고, 섹터·시장 요인은 `sectorIssues`/`marketIssues` 버킷으로 분리한다 — 전 종목 브리핑에 같은 매크로 문구가 반복돼 종목 고유 정보가 희석되는 것을 막는다.
+- **입력에 세 층을 모두 취합한다**: 종목 직접 클러스터(STOCK) + 그 종목 섹터의 SECTOR 클러스터(impact LOW 포함 — 실시간에서 억제됐어도 여기엔 반영) + MARKET 클러스터. 단 `positives/negatives`에는 종목 직접 뉴스만 담고, 섹터·시장 요인은 `sectorIssues`/`marketIssues` 버킷으로 분리한다 — 전 종목 브리핑에 같은 매크로 문구가 반복돼 종목 고유 정보가 희석되는 것을 막는다.
 - `eventId` 참조 덕분에 클라가 브리핑에서 원 뉴스 이벤트로 점프한다(MARKET 클러스터는 방 이벤트가 없으므로 eventId 없이 제목·한 줄만).
 - 프롬프트에 면책을 고정한다: 투자 판단의 근거가 아니라 정보 요약임을 명시(기획안 FR-17 면책 방침과 같은 기조). 클라 노출 문구는 클라 몫이다.
 - persist → publish(`stream:{code}`) → XACK — 뉴스와 같은 불변식이다.
@@ -414,7 +424,7 @@ worker-llm/
 
 provider는 명시 설정이고 자동 fallback이 없다. 엉뚱한 경로로 조용히 돌아가느니 기동에 실패하는 쪽을 택한다.
 
-- LLM provider는 `anthropic|claude-cli|codex-cli|fake` 중 하나를 명시한다. 기본 프로파일은 `anthropic`, local 프로파일은 `claude-cli`이며 `LLM_PROVIDER=codex-cli`로 전환한다. provider 사이 자동 fallback은 없다.
+- LLM provider는 `anthropic|claude-cli|codex-cli|fake` 중 하나를 명시한다. 기본 프로파일은 `anthropic`, local 프로파일은 `claude-cli`이며 `LLM_PROVIDER=codex-cli`로 전환한다. `claude-cli`의 기본 모델은 최신 Sonnet을 가리키는 `sonnet` 별칭이고 `CLAUDE_CLI_MODEL`로 재정의한다. provider 사이 자동 fallback은 없다.
 - 로컬 무료 임베딩은 Ollama+BGE-M3를 기본으로 쓴다. 설치·환경변수·Docker 연결·문제 해결은 [로컬 임베딩 설정](local_embedding_setup.md)을 따른다.
 - `anthropic`은 `ANTHROPIC_API_KEY`가 없으면 기동에 실패한다. `claude-cli`·`codex-cli`는 각각 로그인된 로컬 CLI가 필요하고, 실행 실패·타임아웃은 PEL 재처리 경로로 전파한다. `fake`는 `alphatalk.llm.allow-fake=true`일 때만 허용한다.
 - CLI provider는 개인 구독 로컬 단일 인스턴스 전용이다. `consumer-batch=1`이 아니거나 CLI timeout이 `claim-idle` 이상이면 기동에 실패해, 긴 CLI 호출 중 다른 consumer가 아직 처리하지 않은 배치 레코드를 회수하는 구성을 막는다.
@@ -458,5 +468,5 @@ SPRING_PROFILES_ACTIVE=local LLM_PROVIDER=fake ./gradlew :worker-llm:bootRun
 | 5 | RSS 이용조건 확정 | 현재 9개 언론사의 공식 RSS를 사용한다. 상업 출시 전 언론사별 이용조건·제휴 필요 여부를 최종 확인 |
 | 6 | 편입 시 클라 갱신 | 현재 재발행 없음(접속 중 클라는 `sources` 갱신을 못 봄). 필요해지면 갱신 전용 경량 이벤트 검토 — MVP 아님 |
 | 7 | 섹터 분류 체계 | 기본: KIS 마스터 파일 업종 필드(`stock_master_sync`가 이미 파싱하는 소스). 세분화가 부족하면 KRX 업종분류/GICS 검토 — 판단 기준은 LLM 섹터 후보 목록의 품질 |
-| 8 | SECTOR fan-out 파라미터 | 상한 100종목·impact LOW 제외로 시작, 실데이터로 튜닝 |
+| 8 | SECTOR fan-out 파라미터 | v0.8에서 2단 상한(100/500)으로 확정 — LOW 제외 정책은 폐기(§3.6). 상한값은 실데이터로 계속 튜닝 |
 | 9 | MARKET 뉴스 실시간 노출면 | MVP는 다이제스트만. 홈 피드/시장 브리핑 방(종목 방 밖 노출면)은 별도 기획 필요 — P3 |

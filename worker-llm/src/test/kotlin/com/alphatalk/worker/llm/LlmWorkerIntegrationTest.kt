@@ -123,7 +123,11 @@ class LlmWorkerIntegrationTest {
     @Autowired
     private lateinit var objectMapper: ObjectMapper
 
-    private fun newsProcessorWithFanoutCap(cap: Int, meters: MeterRegistry = SimpleMeterRegistry()) = NewsProcessor(
+    private fun newsProcessorWithFanoutCap(
+        cap: Int,
+        hardCap: Int = 500,
+        meters: MeterRegistry = SimpleMeterRegistry(),
+    ) = NewsProcessor(
         store = clusterStore,
         assigner = clusterAssigner,
         fetcher = articleFetcher,
@@ -135,7 +139,7 @@ class LlmWorkerIntegrationTest {
         mapper = objectMapper,
         meters = meters,
         transactions = transactions,
-        props = LlmProperties(sector = LlmProperties.Sector(fanoutCap = cap)),
+        props = LlmProperties(sector = LlmProperties.Sector(fanoutCap = cap, fanoutHardCap = hardCap)),
     )
 
     @BeforeEach
@@ -380,9 +384,9 @@ class LlmWorkerIntegrationTest {
     }
 
     @Test
-    fun `N6 - fan-out 상한을 넘으면 scope는 SECTOR로 두고 실시간 발행만 억제한다`() {
+    fun `N6 - MEDIUM 이상만으로도 하드 상한을 넘으면 실시간 발행을 억제한다`() {
         val meters = SimpleMeterRegistry()
-        val processor = newsProcessorWithFanoutCap(2, meters)
+        val processor = newsProcessorWithFanoutCap(cap = 2, hardCap = 2, meters = meters)
 
         processor.process(newsEntry("hankyung:cap1", "기준금리 인상에 은행 이자이익 개선 기대", codes = emptyList()))
 

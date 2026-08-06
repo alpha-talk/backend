@@ -35,6 +35,7 @@ data class LlmProperties(
 
     data class Sector(
         val fanoutCap: Int = 100,
+        val fanoutHardCap: Int = 500,
     )
 
     data class Models(
