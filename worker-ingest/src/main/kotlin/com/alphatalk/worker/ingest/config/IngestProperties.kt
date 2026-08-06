@@ -34,5 +34,7 @@ data class IngestProperties(
         val zone: String = "Asia/Seoul",
         val catchUpOnStartup: Boolean = true,
         val catchUpReconcileDelay: Duration = Duration.ofMinutes(1),
+        val marketEnabled: Boolean = false,
+        val marketCron: String = "0 40 17 * * *",
     )
 }

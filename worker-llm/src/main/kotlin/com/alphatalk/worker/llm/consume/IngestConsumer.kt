@@ -6,6 +6,7 @@ import com.alphatalk.contracts.queue.IngestType
 import com.alphatalk.worker.llm.cluster.ClusterContendedException
 import com.alphatalk.worker.llm.config.LlmProperties
 import com.alphatalk.worker.llm.enrich.DigestProcessor
+import com.alphatalk.worker.llm.enrich.MarketDigestProcessor
 import com.alphatalk.worker.llm.enrich.NewsProcessor
 import io.lettuce.core.RedisBusyException
 import io.micrometer.core.instrument.MeterRegistry
@@ -28,6 +29,7 @@ class IngestConsumer(
     private val redis: StringRedisTemplate,
     private val news: NewsProcessor,
     private val digest: DigestProcessor,
+    private val marketDigest: MarketDigestProcessor,
     private val meters: MeterRegistry,
     props: LlmProperties,
     val consumerName: String = ManagementFactory.getRuntimeMXBean().name,
@@ -98,9 +100,10 @@ class IngestConsumer(
             return false
         }
         return runCatching {
-            when (entry.type) {
-                IngestType.DIGEST -> digest.process(entry)
-                else -> news.process(entry)
+            when {
+                entry.type != IngestType.DIGEST -> news.process(entry)
+                entry.codes.singleOrNull() == IngestQueueEntry.MARKET_CODE -> marketDigest.process(entry)
+                else -> digest.process(entry)
             }
         }.fold(
             onSuccess = {

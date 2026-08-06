@@ -1,5 +1,6 @@
 package com.alphatalk.worker.llm.enrich
 
+import com.alphatalk.contracts.envelope.MarketAnalysis
 import com.alphatalk.contracts.envelope.NewsScope
 import com.alphatalk.contracts.envelope.Sentiment
 
@@ -50,6 +51,31 @@ class FakeLlmClient : LlmClient {
             summary = top.joinToString("\n") { it.title }.ifBlank { "오늘의 주요 소식이 없습니다" },
         )
     }
+
+    override fun marketDigest(input: MarketDigestInput): MarketDigestOutput {
+        val domestic = buildList {
+            input.factSheet?.topSectors?.firstOrNull()?.let {
+                add(
+                    MarketAnalysis.DomesticItem(
+                        title = "${it.name} 강세",
+                        line = "업종 평균 ${"%.2f".format(it.avgChangePct)}% (${it.stockCount}종목)",
+                    ),
+                )
+            }
+            (input.marketClusters + input.sectorClusters).take(2).forEach {
+                add(MarketAnalysis.DomesticItem(title = it.title, line = firstLine(it.summary)))
+            }
+        }
+        return MarketDigestOutput(
+            summary = domestic.joinToString("\n") { it.title }.ifBlank { "오늘의 시장 소식이 없습니다" },
+            domestic = domestic,
+            global = emptyList(),
+            sources = emptyList(),
+        )
+    }
+
+    private fun firstLine(summary: String): String =
+        summary.lineSequence().firstOrNull().orEmpty().take(80)
 
     private fun summaryOf(input: ClusterSummaryInput): String {
         val lead = input.body?.take(160)

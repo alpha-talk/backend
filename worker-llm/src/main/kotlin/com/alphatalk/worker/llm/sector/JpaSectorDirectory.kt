@@ -59,6 +59,8 @@ interface StockMasterJpaRepository : JpaRepository<StockMasterEntity, String> {
         """,
     )
     fun findActiveMemberCodes(@Param("sectorCode") sectorCode: String): List<String>
+
+    fun findByIsActiveTrue(): List<StockMasterEntity>
 }
 
 @Repository

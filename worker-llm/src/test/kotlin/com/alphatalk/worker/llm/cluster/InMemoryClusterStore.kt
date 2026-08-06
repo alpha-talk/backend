@@ -206,6 +206,15 @@ class InMemoryClusterStore : ClusterStore {
             digestRow(id, from, to, null, null)
         }
 
+    @Synchronized
+    override fun highImpactSectorClustersInWindow(from: Instant, to: Instant): List<DigestClusterRow> =
+        clusters.entries
+            .filter { (id, state) ->
+                state.scope == "SECTOR" &&
+                    sectorLinkRows.any { (key, value) -> key.first == id && value.third == "HIGH" }
+            }
+            .mapNotNull { (id, _) -> digestRow(id, from, to, null, null) }
+
     private fun digestRow(clusterId: String, from: Instant, to: Instant, sentiment: String?, eventId: String?): DigestClusterRow? {
         val state = clusters.getValue(clusterId)
         if (state.status != ClusterStatus.SUMMARIZED) return null

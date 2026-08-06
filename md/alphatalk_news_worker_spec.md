@@ -332,7 +332,7 @@ stream payload (ws_api_spec §4.3 확장 — ⚠️ §6 증보):
 
 - **순환매·수급은 검색이 아니라 ①에서 나온다.** 남의 해석 기사를 찾는 것보다 자기 데이터가 정확하고 빠르다 — LLM에는 집계된 팩트만 주고 "순환매"라는 해석을 시킨다. 두 테이블 모두 거래일 17:40 전에 확정되므로 타이밍이 맞고, worker-llm의 읽기 전용 조회는 DB 계약 원칙(서버 간 통신은 Redis/DB 계약) 안이다.
 - **①층의 기준일은 두 테이블이 함께 완결된 공통 최근 거래일이다.** 두 테이블은 거래일에만, 서로 다른 잡이(16:30·17:10) 쌓는다. 각자의 최신 일자를 따로 쓰면 봉과 수급의 날짜가 어긋나고, 적재 잡이 도중 실패한 날짜를 쓰면 일부 종목만 반영된 편향 통계가 조용히 들어간다. 그래서 기준일은 **잡 날짜 이하에서 두 테이블 모두 행이 있는 최근 일자**로 잡고, 그 일자의 행 수가 활성 종목 수 대비 임계(설정, 예 90%) 미만이면 부분 적재로 보고 **①층을 제외·`degraded`** 한다. 사용한 기준일은 `factDate`로 팩트시트와 출력에 표기한다(§ 출력 스키마) — 주말·휴장일 잡은 지난 거래일 팩트가 표기된 채 들어가는 것이 정상이다.
-- **③만 검색을 연다.** 기존 LLM 호출은 도구 봉인(`--tools ""`·1턴)이 원칙이고 그대로 유지한다 — 시장 다이제스트 호출만 별도 프로파일(검색 도구 허용·멀티턴)을 쓴다. 폭주 방지로 **턴 상한과 타임아웃 상한은 필수**다(하루 1회라 비용이 아니라 무한 루프가 위험이다). `LlmClient`에 `marketDigest(input)`을 추가하고, 검색을 지원하지 않는 provider(fake)는 ③을 건너뛰고 `degraded`로 생성한다.
+- **③만 검색을 연다.** 기존 LLM 호출은 도구 봉인(`--tools ""`·1턴)이 원칙이고 그대로 유지한다 — 시장 다이제스트 호출만 별도 프로파일(검색 도구 허용·멀티턴)을 쓴다. 폭주 방지의 **최종 방어선은 전체 타임아웃(프로세스 강제 종료)**이고 모든 provider에 필수다(하루 1회라 비용이 아니라 무한 루프가 위험이다). 턴 상한은 그걸 노출하는 provider(claude-cli `--max-turns`)에 추가로 적용한다. `LlmClient`에 `marketDigest(input)`을 추가하고, 검색을 지원하지 않는 provider는 ③을 건너뛰고 `degraded`로 생성한다 — **codex-cli는 검색을 켜면 로컬 파일 읽기 도구까지 함께 열려**(검색 결과 프롬프트 인젝션 → 로컬 자격증명 유출 경로) 도구 봉인이 가능해질 때까지 리서치 미지원으로 둔다(fake도 미지원). 리서치 호출 자체가 실패(검색 타임아웃·권한·출력 검증 거부)하면 잡을 실패시키지 않고 **리서치 없이 한 번 재호출해 ①·②층만으로 `degraded` 생성**한다 — 그 재호출도 실패하면 LLM 실패로서 PEL 재시도다.
 - 윈도는 종목 다이제스트와 같은 규칙 — 잡의 날짜에서 `windowTo = {date} 17:40 KST`, `windowFrom = -24h`. 크론을 옮기면 윈도도 함께 옮겨야 한다(§4.2의 경고와 동일).
 
 **리서치 가드레일** — 검색을 여는 순간 생기는 위험을 출력 계약으로 막는다:
@@ -474,7 +474,7 @@ worker-llm/
 ├─ article/     ArticleFetcher(포트) · ArticleRequestGate(포트) · JsoupArticleFetcher(본문 추출) · RedisArticleRequestGate(호스트별 요청 간격)
 ├─ cluster/     EmbeddingClient·ClusterLock·ClusterStore(포트) · ClusterAssigner(판정·락) · JdbcClusterStore(pgvector)
 ├─ enrich/      LlmClient·TransactionRunner(포트) · ClusterSummarizer(§3.4) · NewsProcessor(§3.2) · DigestProcessor(§4) · MarketDigestProcessor·MarketFactSheetSource(포트)(§4.3)
-├─ persist/     StreamEventStore(포트) · JdbcStreamEventStore(upsert·payload 병합)
+├─ persist/     StreamEventStore·MarketDigestStore(포트) · JdbcStreamEventStore(upsert·payload 병합) · JdbcMarketDigestStore(교체 규칙 §4.3)
 ├─ sector/      SectorDirectory(포트) · JpaSectorDirectory(sector·stock_master 조회)
 └─ publish/     StreamPublisher(포트) · RedisStreamPublisher
 ```
@@ -491,6 +491,7 @@ worker-llm/
 | `JpaSectorDirectory` (`sector`·`stock_master` 조회) | Spring Data JPA 파생 쿼리 | 엔티티 중심 단순 조회 — PostgreSQL 전용 기능 불필요 |
 | `JdbcClusterStore` | native SQL | pgvector 거리 연산자(`<=>`)·`CAST(... AS vector)` 최근접 검색, `ON CONFLICT DO NOTHING/DO UPDATE` 업서트, `GREATEST` 부분 갱신, 상태 전이 CAS(`claimSummarize`·`markSummarized`) 조건부 UPDATE의 갱신 행 수 판정 |
 | `JdbcStreamEventStore` | native SQL | `jsonb` 캐스팅·`jsonb_set` 부분 갱신·`payload -> 'digest' ->> 'date'` 경로 조회, 멱등 삽입 `ON CONFLICT DO NOTHING` |
+| `JdbcMarketDigestStore` | native SQL | `jsonb` 캐스팅과 조건부 교체 `ON CONFLICT DO UPDATE ... WHERE`(§4.3 교체 규칙 — degraded 완성본 보호를 DB 원자 연산으로 보장) |
 
 - 두 예외 어댑터도 모든 입력값을 named parameter로 바인딩한다 — 문자열 연결로 값을 넣지 않는다. 동적으로 조립하는 부분은 종목 후보 유무에 따른 필터 **절 선택**뿐이고, 값은 항상 파라미터로 간다.
 - JPA는 스키마를 소유하지 않는다. `ddl-auto=validate`로 엔티티 매핑과 `:db-migrations` Liquibase 스키마의 정합성만 검증한다(`stock_master.code`는 `CHAR(6)`이므로 엔티티에서 `@JdbcTypeCode(SqlTypes.CHAR)`로 맞춘다).
@@ -518,7 +519,7 @@ SPRING_PROFILES_ACTIVE=local LLM_PROVIDER=fake ./gradlew :worker-llm:bootRun
 
 ## 9. 구현 단계 & DoD
 
-> **상태(2026-07-24): N0~N6 전 단계 구현 완료.** LLM·임베딩은 포트 뒤에 있고 기본 프로파일은 API 키 미설정 시 fail-closed한다. local은 Claude/Codex CLI 구독을 고르고 test는 명시적 fake를 쓴다. 실서비스 투입 전 남은 것: 키 주입, RSS 소스 목록·시드 종목 설정(§10-5·§2.2), 임베딩 제공자 확정(§10-1).
+> **상태(2026-08-07): N0~N7 전 단계 구현 완료.** LLM·임베딩은 포트 뒤에 있고 기본 프로파일은 API 키 미설정 시 fail-closed한다. local은 Claude/Codex CLI 구독을 고르고 test는 명시적 fake를 쓴다. N7 시장 잡 트리거는 게이트 기본 off — 소비자 전체 배포 후 `alphatalk.ingest.digest.market-enabled=true`로 켠다(§4.3). 실서비스 투입 전 남은 것: 키 주입, RSS 소스 목록·시드 종목 설정(§10-5·§2.2), 임베딩 제공자 확정(§10-1), CLI 검색 권한 확정(§10-11).
 
 | 단계 | 범위 | DoD |
 |---|---|---|
@@ -549,4 +550,4 @@ SPRING_PROFILES_ACTIVE=local LLM_PROVIDER=fake ./gradlew :worker-llm:bootRun
 | 8 | SECTOR fan-out 파라미터 | v0.8에서 2단 상한(100/500)으로 확정 — LOW 제외 정책은 폐기(§3.6). 상한값은 실데이터로 계속 튜닝 |
 | 9 | MARKET 뉴스 실시간 노출면 | MVP는 다이제스트만. 홈 피드/시장 브리핑 방(종목 방 밖 노출면)은 별도 기획 필요 — P3. 노출면이 생기면 `market_digest`(§4.3)를 core-api 조회 API로 여는 것부터 |
 | 10 | 시장 리서치의 매크로 지표 수집 전환 | §4.3 ③층은 웹 검색으로 시작한다(열린 주제 대응·수집기 구축 비용 회피). 운영해 보고 매일 반복되는 핵심 지표(환율·미 국채 금리)는 한은 ECOS 등 자체 수집으로 옮기는 하이브리드 검토 — 판단 기준은 검색 실패율과 수치 정확도 |
-| 11 | 시장 리서치 provider 커버리지 | 검색 도구는 provider마다 다르다(Claude CLI WebSearch · Codex CLI search · API web search tool · fake 미지원). CLI 헤드리스에서 검색 권한 부여 방식과 운영(API) 경로의 도구 파라미터를 구현 시 확정 — 미지원 조합은 ③층 생략·degraded로 동작 |
+| 11 | 시장 리서치 provider 커버리지 | 현재 리서치 지원은 claude-cli(WebSearch)뿐이다. codex-cli는 검색 시 파일 읽기 도구 봉인이 불가능해 보류(§4.3), anthropic API는 web search tool 연동 미구현, fake는 미지원 — 셋 다 ③층 생략·degraded로 동작. API 경로 도구 파라미터와 CLI 검색 권한 부여 방식(--tools가 --safe-mode와 공존하는지)은 실호출로 확정 |

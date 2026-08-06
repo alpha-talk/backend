@@ -79,5 +79,13 @@ class LlmConfig {
         check(!timeout.isZero && !timeout.isNegative && timeout < props.claimIdle) {
             "CLI LLM timeout은 양수이고 claim-idle(${props.claimIdle})보다 짧아야 한다"
         }
+        if (props.market.researchEnabled) {
+            val batchWait = timeout.multipliedBy((props.consumerBatch - 1).toLong())
+            val worstCase = batchWait.plus(props.market.researchTimeout)
+            check(!props.market.researchTimeout.isZero && !props.market.researchTimeout.isNegative && worstCase < props.claimIdle) {
+                "시장 리서치 데드라인은 배치 대기 포함 claim-idle(${props.claimIdle})보다 짧아야 한다 — " +
+                    "(consumer-batch-1)×timeout + research-timeout = $worstCase"
+            }
+        }
     }
 }

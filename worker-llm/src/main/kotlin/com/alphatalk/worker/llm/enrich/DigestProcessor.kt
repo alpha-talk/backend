@@ -8,6 +8,7 @@ import com.alphatalk.contracts.queue.IngestQueueEntry
 import com.alphatalk.worker.llm.cluster.ClusterStore
 import com.alphatalk.worker.llm.cluster.DigestClusterRow
 import com.alphatalk.worker.llm.persist.EventIdGenerator
+import com.alphatalk.worker.llm.persist.MarketDigestStore
 import com.alphatalk.worker.llm.persist.StreamEventStore
 import com.alphatalk.worker.llm.publish.StreamPublisher
 import com.alphatalk.worker.llm.sector.SectorDirectory
@@ -23,6 +24,7 @@ class DigestProcessor(
     private val store: ClusterStore,
     private val sectors: SectorDirectory,
     private val events: StreamEventStore,
+    private val marketDigests: MarketDigestStore,
     private val publisher: StreamPublisher,
     private val eventIds: EventIdGenerator,
     private val llm: LlmClient,
@@ -77,6 +79,7 @@ class DigestProcessor(
                     )
                 },
                 marketIssues = marketRows.map { DigestData.MarketIssue(title = it.title, line = firstLine(it.summary)) },
+                marketAnalysis = runCatching { marketDigests.find(date) }.getOrNull(),
                 neutralCount = stockRows.count { it.sentiment == null || it.sentiment == Sentiment.NEUTRAL.name },
                 newsCount = (stockRows + sectorRows + marketRows).sumOf { it.articleCount },
             ),

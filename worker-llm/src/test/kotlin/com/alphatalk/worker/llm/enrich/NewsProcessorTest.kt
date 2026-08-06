@@ -58,6 +58,8 @@ class NewsProcessorTest {
     private fun defaultLlm() = object : LlmClient {
         override fun summarize(input: ClusterSummaryInput) = verdict
         override fun digest(input: DigestInput) = DigestOutput("t", "s")
+        override fun marketDigest(input: MarketDigestInput) =
+            MarketDigestOutput("m", emptyList(), emptyList(), emptyList())
     }
 
     private fun processor(
@@ -603,6 +605,8 @@ class NewsProcessorTest {
                 return stockVerdict()
             }
             override fun digest(input: DigestInput) = DigestOutput("t", "s")
+        override fun marketDigest(input: MarketDigestInput) =
+            MarketDigestOutput("m", emptyList(), emptyList(), emptyList())
         }
         val p = processor(llm = blockingLlm)
 

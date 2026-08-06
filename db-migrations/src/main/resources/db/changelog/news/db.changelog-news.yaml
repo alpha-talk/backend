@@ -48,3 +48,10 @@ databaseChangeLog:
         - sqlFile:
             path: sql/0007_article_candidate_boundary.sql
             relativeToChangelogFile: true
+  - changeSet:
+      id: 0008-market-digest
+      author: worker-llm
+      changes:
+        - sqlFile:
+            path: sql/0008_market_digest.sql
+            relativeToChangelogFile: true
