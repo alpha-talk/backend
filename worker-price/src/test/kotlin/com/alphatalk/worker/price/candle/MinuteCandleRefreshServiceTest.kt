@@ -97,18 +97,20 @@ class MinuteCandleRefreshServiceTest {
     }
 
     private class InMemoryMarketDivs : MinuteMarketDivStore {
-        val divs = ConcurrentHashMap<String, String>()
+        private val divs = ConcurrentHashMap<String, String>()
 
-        override fun get(code: String): String? = divs[code]
+        override fun get(code: String, date: String): String? = divs["$code:$date"]
 
-        override fun put(code: String, div: String) {
-            divs[code] = div
+        override fun put(code: String, date: String, div: String) {
+            divs["$code:$date"] = div
         }
     }
 
-    private fun unifiedDivs(code: String = "005930") = InMemoryMarketDivs().apply { put(code, "UN") }
+    private fun unifiedDivs(code: String = "005930", date: String = "20260804") =
+        InMemoryMarketDivs().apply { put(code, date, "UN") }
 
-    private fun krxDivs(code: String = "005930") = InMemoryMarketDivs().apply { put(code, "J") }
+    private fun krxDivs(code: String = "005930", date: String = "20260804") =
+        InMemoryMarketDivs().apply { put(code, date, "J") }
 
     private class FakeRefreshLock(private val acquirable: Boolean = true) : MinuteRefreshLock {
         val acquired = AtomicInteger()
@@ -522,7 +524,7 @@ class MinuteCandleRefreshServiceTest {
 
         service.refresh("005930")
 
-        assertEquals("UN", marketDivs.get("005930"))
+        assertEquals("UN", marketDivs.get("005930", "20260804"))
     }
 
     @Test
@@ -542,7 +544,7 @@ class MinuteCandleRefreshServiceTest {
 
         val synced = service.refresh("005930")
 
-        assertEquals("J", marketDivs.get("005930"))
+        assertEquals("J", marketDivs.get("005930", "20260804"))
         assertEquals(300, synced)
         assertEquals("0900", store.rows.keys.minOf { it.third })
         assertEquals("1359", store.latestTime("005930", "20260804"))
@@ -586,7 +588,7 @@ class MinuteCandleRefreshServiceTest {
 
         assertEquals(0, service.refresh("005930"))
 
-        assertEquals("UN", marketDivs.get("005930"))
+        assertEquals("UN", marketDivs.get("005930", "20260804"))
         assertEquals(1, store.rows.size)
         assertEquals(1.0, meters.counter("minute.candle.zero.page").count())
         assertFalse(service.isDayComplete("005930", "20260804"))
@@ -602,14 +604,14 @@ class MinuteCandleRefreshServiceTest {
 
         assertEquals(0, service.refresh("005930"))
 
-        assertNull(marketDivs.get("005930"))
+        assertNull(marketDivs.get("005930", "20260804"))
         assertTrue(store.rows.isEmpty())
         assertEquals(1.0, meters.counter("minute.candle.zero.page").count())
         assertFalse(service.isDayComplete("005930", "20260804"))
     }
 
     @Test
-    fun `시장 구분 캐시가 없어도 당일 저장분을 지우지 않고 이어서 채운다`() {
+    fun `그날 구분 기록이 없는데 적재분이 있으면 KIS를 조회하지 않고 그날을 넘긴다`() {
         val store = InMemoryMinuteStore()
         store.upsert(
             listOf(
@@ -618,16 +620,42 @@ class MinuteCandleRefreshServiceTest {
             ),
         )
         val marketDivs = InMemoryMarketDivs()
+        val meters = SimpleMeterRegistry()
         val fetcher = PagingFetcher(accPerMinute = 100)
-        val service = service(fetcher, store, at = ZonedDateTime.of(2026, 8, 4, 10, 30, 30, 0, seoul), marketDivs = marketDivs)
+        val service = service(
+            fetcher,
+            store,
+            at = ZonedDateTime.of(2026, 8, 4, 10, 30, 30, 0, seoul),
+            marketDivs = marketDivs,
+            meters = meters,
+        )
 
-        val synced = service.refresh("005930")
+        assertEquals(0, service.refresh("005930"))
 
-        assertEquals("UN", marketDivs.get("005930"))
-        assertEquals(88, synced)
-        assertEquals("0900", store.rows.keys.minOf { it.third })
-        assertEquals(1, store.rows.getValue(Triple("005930", "20260804", "0900")).value)
-        assertEquals("1029", store.latestTime("005930", "20260804"))
+        assertEquals(0, fetcher.calls.get())
+        assertEquals(2, store.rows.size)
+        assertNull(marketDivs.get("005930", "20260804"))
+        assertEquals(1.0, meters.counter("minute.candle.div.unknown").count())
+    }
+
+    @Test
+    fun `어제 구분 기록은 오늘 조회에 쓰이지 않는다`() {
+        val store = InMemoryMinuteStore()
+        val marketDivs = InMemoryMarketDivs()
+        marketDivs.put("005930", "20260803", "J")
+        val calls = mutableListOf<String>()
+        val fetcher = MinuteCandleFetcher { code, to, div ->
+            calls += div
+            PagingFetcher().fetch(code, to, div)
+        }
+        val service = service(fetcher, store, marketDivs = marketDivs)
+
+        service.refresh("005930")
+
+        assertEquals("UN", marketDivs.get("005930", "20260804"))
+        assertEquals("J", marketDivs.get("005930", "20260803"))
+        assertTrue(calls.all { it == "UN" })
+        assertEquals("0800", store.rows.keys.minOf { it.third })
     }
 
     @Test
@@ -639,37 +667,88 @@ class MinuteCandleRefreshServiceTest {
                 MinuteCandle("005930", "20260804", "0901", 1, 1, 1, 1, 1, 1),
             ),
         )
-        val marketDivs = InMemoryMarketDivs()
         val fetcher = MinuteCandleFetcher { _, _, _ -> throw IllegalStateException("kis down") }
-        val service = service(fetcher, store, marketDivs = marketDivs)
+        val service = service(fetcher, store, marketDivs = unifiedDivs())
 
         runCatching { service.refresh("005930") }
 
         assertEquals(2, store.rows.size)
-        assertNull(marketDivs.get("005930"))
+        assertEquals(1, store.rows.getValue(Triple("005930", "20260804", "0900")).value)
     }
 
     @Test
-    fun `당일 저장분이 있으면 캐시가 없어도 0봉 페이지에 시장 구분을 바꾸지 않는다`() {
+    fun `당일 저장분이 있으면 통합 기록이 살아 있는 한 0봉 페이지에 구분을 바꾸지 않는다`() {
         val store = InMemoryMinuteStore()
         store.upsert(listOf(MinuteCandle("005930", "20260804", "1000", 16000, 16000, 16000, 16000, 10, 100)))
-        val marketDivs = InMemoryMarketDivs()
+        val marketDivs = unifiedDivs()
         val watermarks = InMemoryWatermarks()
         watermarks.record("005930", "20260804", "1000")
+        val meters = SimpleMeterRegistry()
         val calls = mutableListOf<String>()
         val fetcher = MinuteCandleFetcher { _, _, div ->
             calls += div
             KisMinuteChart(1_000_000, zeroCandles())
         }
         val at = ZonedDateTime.of(2026, 8, 4, 14, 0, 30, 0, seoul)
-        val service = service(fetcher, store, at = at, marketDivs = marketDivs, watermarks = watermarks)
+        val service = service(
+            fetcher,
+            store,
+            at = at,
+            marketDivs = marketDivs,
+            watermarks = watermarks,
+            meters = meters,
+        )
 
         assertEquals(0, service.refresh("005930"))
 
-        assertNull(marketDivs.get("005930"))
+        assertEquals("UN", marketDivs.get("005930", "20260804"))
         assertEquals(listOf("UN"), calls)
         assertEquals(1, store.rows.size)
         assertEquals("1000", watermarks.fetchedThrough("005930", "20260804"))
+        assertEquals(1.0, meters.counter("minute.candle.zero.page").count())
+    }
+
+    @Test
+    fun `구분 판정에 쓴 0봉 페이지도 계측에 남는다`() {
+        val store = InMemoryMinuteStore()
+        val krx = PagingFetcher(firstBar = LocalTime.of(9, 0), lastBar = LocalTime.of(15, 30))
+        val meters = SimpleMeterRegistry()
+        val fetcher = MinuteCandleFetcher { code, to, div ->
+            if (div == "UN") KisMinuteChart(1_000_000, zeroCandles()) else krx.fetch(code, to, div)
+        }
+        val at = ZonedDateTime.of(2026, 8, 4, 14, 0, 30, 0, seoul)
+        val service = service(fetcher, store, at = at, meters = meters)
+
+        assertTrue(service.refresh("005930") > 0)
+
+        assertEquals(1.0, meters.counter("minute.candle.zero.page").count())
+    }
+
+    @Test
+    fun `KRX 전환은 워터마크를 지운 뒤에 구분을 기록한다`() {
+        val store = InMemoryMinuteStore()
+        val watermarks = InMemoryWatermarks()
+        watermarks.record("005930", "20260804", "1200")
+        val marketDivs = object : MinuteMarketDivStore {
+            val seen = mutableListOf<String?>()
+            private val delegate = InMemoryMarketDivs()
+            override fun get(code: String, date: String): String? = delegate.get(code, date)
+            override fun put(code: String, date: String, div: String) {
+                seen += watermarks.fetchedThrough(code, date)
+                delegate.put(code, date, div)
+            }
+        }
+        val krx = PagingFetcher(firstBar = LocalTime.of(9, 0), lastBar = LocalTime.of(15, 30))
+        val fetcher = MinuteCandleFetcher { code, to, div ->
+            if (div == "UN") KisMinuteChart(1_000_000, zeroCandles()) else krx.fetch(code, to, div)
+        }
+        val at = ZonedDateTime.of(2026, 8, 4, 14, 0, 30, 0, seoul)
+        val service = service(fetcher, store, at = at, marketDivs = marketDivs, watermarks = watermarks)
+
+        service.refresh("005930")
+
+        assertEquals(listOf<String?>(null), marketDivs.seen)
+        assertEquals("0900", store.rows.keys.minOf { it.third })
     }
 
     @Test
@@ -696,7 +775,7 @@ class MinuteCandleRefreshServiceTest {
 
         assertEquals(listOf("UN"), calls)
         assertTrue(store.rows.isEmpty())
-        assertEquals("J", marketDivs.get("005930"))
+        assertEquals("J", marketDivs.get("005930", "20260804"))
         assertFalse(service.isDayComplete("005930", "20260804"))
 
         assertTrue(service.refresh("005930") > 0)

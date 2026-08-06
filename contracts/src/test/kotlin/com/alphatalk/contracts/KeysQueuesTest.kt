@@ -18,6 +18,14 @@ class KeysQueuesTest {
     }
 
     @Test
+    fun `분봉 수집 키 생성 - Redis 계약 §3`() {
+        assertEquals("lock:minute-refresh:005930", Keys.minuteRefreshLock("005930"))
+        assertEquals("minute:through:005930:20260806", Keys.minuteRefreshWatermark("005930", "20260806"))
+        assertEquals("minute:market-div:005930:20260806", Keys.minuteMarketDiv("005930", "20260806"))
+        assertEquals("rate:kis-rest:real-1", Keys.kisRestRate("real-1"))
+    }
+
+    @Test
     fun `메인서버 전용 키 생성 - Redis 계약 §3 주석`() {
         assertEquals("cursor:123:005930", Keys.cursor(123, "005930"))
         assertEquals("rl:post:123:29552131", Keys.rateLimitWindow("post", "123", 29552131))

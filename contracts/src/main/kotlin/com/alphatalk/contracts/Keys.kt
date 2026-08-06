@@ -27,7 +27,7 @@ object Keys {
 
     fun minuteRefreshWatermark(code: String, date: String) = "minute:through:$code:$date"
 
-    fun minuteMarketDiv(code: String) = "minute:market-div:$code"
+    fun minuteMarketDiv(code: String, date: String) = "minute:market-div:$code:$date"
 
     fun badge(userId: Long) = "badge:$userId"
 }

@@ -20,5 +20,4 @@ data class PriceProperties(
     val minuteCandleEnabled: Boolean = false,
     val minuteCandleFreshSec: Long = 60,
     val minuteCandleRetentionDays: Long = 30,
-    val minuteCandleMarketDivTtlDays: Long = 7,
 )

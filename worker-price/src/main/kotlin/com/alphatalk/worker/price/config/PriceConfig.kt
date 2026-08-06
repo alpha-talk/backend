@@ -281,8 +281,8 @@ class PriceConfig {
         name = ["alphatalk.price.enabled", "alphatalk.price.minute-candle-enabled"],
         havingValue = "true",
     )
-    fun minuteMarketDivStore(redis: StringRedisTemplate, props: PriceProperties): MinuteMarketDivStore =
-        RedisMinuteMarketDivStore(redis, ttl = Duration.ofDays(props.minuteCandleMarketDivTtlDays))
+    fun minuteMarketDivStore(redis: StringRedisTemplate): MinuteMarketDivStore =
+        RedisMinuteMarketDivStore(redis)
 
     @Bean
     @ConditionalOnProperty(

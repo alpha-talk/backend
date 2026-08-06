@@ -51,7 +51,6 @@ alphatalk:
     minute-candle-enabled: false          # 분봉 read-through 신선화 내부 API + 16:00 확정·04:30 퍼지 (§2.6)
     minute-candle-fresh-sec: ${MINUTE_CANDLE_FRESH_SEC:60}              # 신선 임계 — 이 안에서는 KIS 재조회 없이 no-op (§2.6)
     minute-candle-retention-days: ${MINUTE_CANDLE_RETENTION_DAYS:30}    # 보존 일수 — 초과분은 새벽 퍼지 (§2.6)
-    minute-candle-market-div-ttl-days: ${MINUTE_CANDLE_MARKET_DIV_TTL_DAYS:7}  # 종목별 NXT 지원 판별 캐시 수명 (§2.6)
 
 management:
   endpoints:
