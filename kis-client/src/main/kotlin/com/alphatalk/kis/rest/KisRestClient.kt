@@ -104,7 +104,7 @@ class KisRestClient(
         code: String,
         toTime: LocalTime,
         marketDiv: String,
-    ): List<KisMinuteCandle> {
+    ): KisMinuteChart {
         val json = getJson(
             account,
             MINUTE_CHART_PATH,
@@ -123,7 +123,8 @@ class KisRestClient(
                 "minute chart failed: keyId=${account.keyId} code=$code rt_cd=$rtCd msg_cd=${json.path("msg_cd").asText("")}",
             )
         }
-        return json.path("output2").mapNotNull { row ->
+        val dailyVolume = json.path("output1").path("acml_vol").asText().trim().toLongOrNull() ?: 0L
+        val candles = json.path("output2").mapNotNull { row ->
             val date = row.path("stck_bsop_date").asText("")
             val hour = row.path("stck_cntg_hour").asText("")
             if (date.isBlank() || hour.length < 4) {
@@ -142,6 +143,7 @@ class KisRestClient(
                 )
             }
         }
+        return KisMinuteChart(dailyVolume = dailyVolume, candles = candles)
     }
 
     internal fun getJson(account: KisAccount, path: String, trId: String, params: Map<String, String>): JsonNode {

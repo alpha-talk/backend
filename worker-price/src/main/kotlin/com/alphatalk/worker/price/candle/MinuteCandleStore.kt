@@ -5,5 +5,6 @@ interface MinuteCandleStore {
     fun latestTime(code: String, date: String): String?
     fun sumValueBefore(code: String, date: String, timeExclusive: String): Long
     fun codesOn(date: String): Set<String>
+    fun deleteDay(code: String, date: String): Int
     fun purgeBatchBefore(dateExclusive: String, batchSize: Int): Int
 }
