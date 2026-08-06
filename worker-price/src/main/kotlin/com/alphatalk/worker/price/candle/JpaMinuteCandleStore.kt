@@ -70,9 +70,6 @@ interface MinuteCandleJpaRepository : JpaRepository<MinuteCandleEntity, MinuteCa
     @Query("delete from MinuteCandleEntity c where c.id in :ids")
     fun deleteByIds(@Param("ids") ids: List<MinuteCandleId>): Int
 
-    @Modifying
-    @Query("delete from MinuteCandleEntity c where c.id.code = :code and c.id.date = :date")
-    fun deleteDay(@Param("code") code: String, @Param("date") date: String): Int
 }
 
 @Repository
@@ -123,9 +120,6 @@ class JpaMinuteCandleStore(
 
     @Transactional(readOnly = true)
     override fun codesOn(date: String): Set<String> = repository.findCodesOn(date).toSet()
-
-    @Transactional
-    override fun deleteDay(code: String, date: String): Int = repository.deleteDay(code, date)
 
     @Transactional
     override fun purgeBatchBefore(dateExclusive: String, batchSize: Int): Int {

@@ -41,12 +41,6 @@ class MinuteCandleRefreshServiceTest {
         override fun codesOn(date: String): Set<String> =
             rows.keys.filter { it.second == date }.map { it.first }.toSet()
 
-        override fun deleteDay(code: String, date: String): Int {
-            val victims = rows.keys.filter { it.first == code && it.second == date }
-            victims.forEach(rows::remove)
-            return victims.size
-        }
-
         override fun purgeBatchBefore(dateExclusive: String, batchSize: Int): Int {
             val victims = rows.keys.filter { it.second < dateExclusive }.take(batchSize)
             victims.forEach(rows::remove)
@@ -615,7 +609,7 @@ class MinuteCandleRefreshServiceTest {
     }
 
     @Test
-    fun `시장 구분 캐시가 없는데 당일 저장분이 있으면 지우고 처음부터 재적재한다`() {
+    fun `시장 구분 캐시가 없어도 당일 저장분을 지우지 않고 이어서 채운다`() {
         val store = InMemoryMinuteStore()
         store.upsert(
             listOf(
@@ -630,10 +624,83 @@ class MinuteCandleRefreshServiceTest {
         val synced = service.refresh("005930")
 
         assertEquals("UN", marketDivs.get("005930"))
-        assertEquals(150, synced)
-        assertEquals(150, store.rows.size)
-        assertEquals("0800", store.rows.keys.minOf { it.third })
-        assertEquals(100, store.rows.getValue(Triple("005930", "20260804", "0900")).value)
+        assertEquals(88, synced)
+        assertEquals("0900", store.rows.keys.minOf { it.third })
+        assertEquals(1, store.rows.getValue(Triple("005930", "20260804", "0900")).value)
+        assertEquals("1029", store.latestTime("005930", "20260804"))
+    }
+
+    @Test
+    fun `KIS 조회가 실패해도 당일 저장분은 그대로 남는다`() {
+        val store = InMemoryMinuteStore()
+        store.upsert(
+            listOf(
+                MinuteCandle("005930", "20260804", "0900", 1, 1, 1, 1, 1, 1),
+                MinuteCandle("005930", "20260804", "0901", 1, 1, 1, 1, 1, 1),
+            ),
+        )
+        val marketDivs = InMemoryMarketDivs()
+        val fetcher = MinuteCandleFetcher { _, _, _ -> throw IllegalStateException("kis down") }
+        val service = service(fetcher, store, marketDivs = marketDivs)
+
+        runCatching { service.refresh("005930") }
+
+        assertEquals(2, store.rows.size)
+        assertNull(marketDivs.get("005930"))
+    }
+
+    @Test
+    fun `당일 저장분이 있으면 캐시가 없어도 0봉 페이지에 시장 구분을 바꾸지 않는다`() {
+        val store = InMemoryMinuteStore()
+        store.upsert(listOf(MinuteCandle("005930", "20260804", "1000", 16000, 16000, 16000, 16000, 10, 100)))
+        val marketDivs = InMemoryMarketDivs()
+        val watermarks = InMemoryWatermarks()
+        watermarks.record("005930", "20260804", "1000")
+        val calls = mutableListOf<String>()
+        val fetcher = MinuteCandleFetcher { _, _, div ->
+            calls += div
+            KisMinuteChart(1_000_000, zeroCandles())
+        }
+        val at = ZonedDateTime.of(2026, 8, 4, 14, 0, 30, 0, seoul)
+        val service = service(fetcher, store, at = at, marketDivs = marketDivs, watermarks = watermarks)
+
+        assertEquals(0, service.refresh("005930"))
+
+        assertNull(marketDivs.get("005930"))
+        assertEquals(listOf("UN"), calls)
+        assertEquals(1, store.rows.size)
+        assertEquals("1000", watermarks.fetchedThrough("005930", "20260804"))
+    }
+
+    @Test
+    fun `KRX 폴백은 통합 조회가 써버린 데드라인을 이어받아 새 예산으로 시작하지 않는다`() {
+        val store = InMemoryMinuteStore()
+        val calls = mutableListOf<String>()
+        val krx = PagingFetcher(firstBar = LocalTime.of(9, 0), lastBar = LocalTime.of(15, 30))
+        val marketDivs = InMemoryMarketDivs()
+        val fetcher = MinuteCandleFetcher { code, to, div ->
+            calls += div
+            if (div == "UN") KisMinuteChart(1_000_000, zeroCandles()) else krx.fetch(code, to, div)
+        }
+        val afterClose = ZonedDateTime.of(2026, 8, 4, 20, 10, 0, 0, seoul)
+        val service = service(
+            fetcher,
+            store,
+            at = afterClose,
+            fetchDeadlineMillis = 0,
+            freshSeconds = 0,
+            marketDivs = marketDivs,
+        )
+
+        assertEquals(0, service.refresh("005930"))
+
+        assertEquals(listOf("UN"), calls)
+        assertTrue(store.rows.isEmpty())
+        assertEquals("J", marketDivs.get("005930"))
+        assertFalse(service.isDayComplete("005930", "20260804"))
+
+        assertTrue(service.refresh("005930") > 0)
+        assertEquals(listOf("UN", "J"), calls)
     }
 
     @Test

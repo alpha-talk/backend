@@ -113,30 +113,22 @@ class MinuteCandleRefreshService(
             if (last != null && Duration.between(last, at.toInstant()).seconds < freshSeconds) return 0
         }
         var probing = div == null
-        if (probing && store.latestTime(code, date) != null) {
-            log.warn(
-                "minute candle 시장 구분 캐시가 없는데 당일 저장분이 있다 - 앵커 혼입을 막기 위해 지우고 재적재한다: code={} date={}",
-                code,
-                date,
-            )
-            wipeDay(code, date)
-        }
-        val startedAt = System.nanoTime()
+        val budget = FetchBudget(deadlineMillis)
         var total = 0
         repeat(MAX_DIV_PASSES) {
-            val outcome = fetchPass(code, date, at, div ?: DIV_UNIFIED, probing, deadlineMillis, startedAt)
+            val outcome = fetchPass(code, date, at, div ?: DIV_UNIFIED, probing, budget)
             total += outcome.upserted
             if (probing && outcome.resolvedUnified) {
                 marketDivs.put(code, DIV_UNIFIED)
                 meters.counter("minute.candle.market.div", "div", DIV_UNIFIED).increment()
             }
-            if (!outcome.retryAsKrx) {
+            if (!outcome.resolvedKrx) {
                 lastFetchedAt[code] = at.toInstant()
                 return total
             }
             marketDivs.put(code, DIV_KRX)
             meters.counter("minute.candle.market.div", "div", DIV_KRX).increment()
-            wipeDay(code, date)
+            watermarks.clear(code, date)
             div = DIV_KRX
             probing = false
         }
@@ -144,16 +136,24 @@ class MinuteCandleRefreshService(
         return total
     }
 
-    private fun wipeDay(code: String, date: String) {
-        store.deleteDay(code, date)
-        watermarks.clear(code, date)
-    }
-
     private data class PassOutcome(
         val upserted: Int,
-        val retryAsKrx: Boolean = false,
+        val resolvedKrx: Boolean = false,
         val resolvedUnified: Boolean = false,
     )
+
+    private class FetchBudget(private val deadlineMillis: Long) {
+        private val startedAt = System.nanoTime()
+        private var calls = 0
+
+        fun tryConsume(): Boolean {
+            if (calls > 0 && elapsedMillis() >= deadlineMillis) return false
+            calls += 1
+            return true
+        }
+
+        private fun elapsedMillis(): Long = (System.nanoTime() - startedAt) / 1_000_000
+    }
 
     private fun fetchPass(
         code: String,
@@ -161,8 +161,7 @@ class MinuteCandleRefreshService(
         at: ZonedDateTime,
         div: String,
         probing: Boolean,
-        deadlineMillis: Long,
-        startedAt: Long,
+        budget: FetchBudget,
     ): PassOutcome {
         val openTime = openTimeOf(div)
         val closeTime = closeTimeOf(div)
@@ -183,7 +182,7 @@ class MinuteCandleRefreshService(
         var resolvedUnified = false
         var page = 0
         while (page < MAX_PAGES) {
-            if (page > 0 && elapsedMillis(startedAt) >= deadlineMillis) {
+            if (!budget.tryConsume()) {
                 log.warn("minute candle fetch deadline: code={} gapStart={} fetched={}", code, gapStart, byTime.size)
                 break
             }
@@ -199,7 +198,7 @@ class MinuteCandleRefreshService(
                         date,
                         chart.dailyVolume,
                     )
-                    return PassOutcome(0, retryAsKrx = true)
+                    return PassOutcome(0, resolvedKrx = true)
                 }
                 log.warn(
                     "minute candle 0봉 페이지 - 적재·완주 기록 없이 중단한다: code={} date={} div={} to={} dailyVolume={}",
@@ -290,8 +289,6 @@ class MinuteCandleRefreshService(
     private fun openTimeOf(div: String): LocalTime = if (div == DIV_KRX) KRX_OPEN_TIME else OPEN_TIME
 
     private fun closeTimeOf(div: String?): LocalTime = if (div == DIV_KRX) KRX_CLOSE_TIME else CLOSE_TIME
-
-    private fun elapsedMillis(startedAtNanos: Long): Long = (System.nanoTime() - startedAtNanos) / 1_000_000
 
     private fun nextMinute(time: String): String = LocalTime.parse(time, HHMM).plusMinutes(1).format(HHMM)
 

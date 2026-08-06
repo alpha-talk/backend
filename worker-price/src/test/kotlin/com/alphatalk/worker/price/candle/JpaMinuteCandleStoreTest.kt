@@ -110,17 +110,6 @@ class JpaMinuteCandleStoreTest {
     }
 
     @Test
-    fun `deleteDay는 그 종목 그 날짜의 행만 지운다`() {
-        store.upsert(listOf(candle("0900"), candle("0901"), candle("0900", date = "20260803")))
-        readBack()
-
-        assertEquals(2, store.deleteDay("005930", "20260804"))
-        readBack()
-        assertEquals(1, repository.count())
-        assertEquals(0, store.deleteDay("000660", "20260804"))
-    }
-
-    @Test
     fun `purgeBatchBefore는 기준일 이전 행을 배치 크기만큼 지운다`() {
         store.upsert(
             listOf(candle("0900", date = "20260701"), candle("0900", date = "20260702"), candle("0900")),
