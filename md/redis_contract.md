@@ -1,4 +1,6 @@
-# Alpha Talk — Redis 계약 (`:contracts`) v0.13
+# Alpha Talk — Redis 계약 (`:contracts`) v0.14
+
+> v0.14 (2026-08-06): 일일 다이제스트 잡 적재를 Redis 단일 실행으로 직렬화한다. `seen:ingest:digest:{code}:{date}`가 없을 때 `XADD queue:ingest`를 먼저 성공시키고 마커를 기록한다. XADD 전 마커를 남겨 프로세스 종료 시 잡을 유실하는 순서는 금지하고, 마커 기록 실패로 생길 수 있는 중복은 llm-worker의 `sourceId` 멱등과 DB 유니크 인덱스가 흡수한다. 기동 보충이 Redis 장애로 불완전하면 최신 예정 실행을 주기적으로 재조정한다(뉴스 워커 명세 §4.1).
 
 > v0.13 (2026-08-04): worker-price 내부 키 2종 추가 — 분봉 신선화의 종목별 인스턴스 간 single-flight 락 `lock:minute-refresh:{code}`(SET NX PX)와 완주 워터마크 `minute:through:{code}:{date}`(TTL 2일). 둘 다 [KIS 워커 명세](alphatalk_kis_worker_spec.md) §2.6이 소유하고 worker-price 전용이며 다른 서버는 접근하지 않는다. `:contracts`의 `Keys.minuteRefreshLock`·`Keys.minuteRefreshWatermark` 생성 함수 사용. 아울러 §1.3의 `rate:kis-rest:{keyId}` 토큰 버킷이 구현됐다 — 시각은 Lua 안에서 Redis `TIME`으로 읽어 인스턴스 시계 오차가 합산 한도를 깨지 않게 한다(**Redis 5+ effects replication 전제**).
 
@@ -138,6 +140,8 @@ Streams 필드는 문자열이다. 한 엔트리 = "가공해야 할 원본 소�
 
 ingest-worker 스케줄러(싱글턴)가 매일 18:00 KST에 적재하고 같은 그룹 `g:llm`이 경쟁 소비한다 — 스케줄은 싱글턴, 실행은 ×N(리더 선출 불요).
 
+적재는 `seen:ingest:{sourceId}` 확인 → `XADD queue:ingest` → 마커 기록을 Redis 단일 실행으로 직렬화한다. XADD보다 마커를 먼저 기록하지 않는다. XADD 실패에는 마커가 남지 않아 재조정할 수 있고, 마커 기록 실패 뒤 중복 XADD는 소비 측 멱등으로 흡수한다. 이 단일 실행은 `seen:ingest:*`와 `queue:ingest` 두 키를 한 스크립트에서 만지므로 **단일 Redis(비클러스터) 전제**다 — 클러스터 전환 시 CROSSSLOT으로 깨지며, 해시 태그로 같은 슬롯을 보장하거나 2단계 적재로 되돌리고 유실 창을 다시 검토해야 한다.
+
 | 필드 | 값 |
 |---|---|
 | `type` | `"digest"` |
@@ -162,7 +166,7 @@ ingest-worker 스케줄러(싱글턴)가 매일 18:00 KST에 적재하고 같은
 | `cursor:{userId}:{code}` | String | 마지막 읽은 `eventId`(읽음 위치) — **fast path 미러**, 진실은 DB `read_cursor` | 메인서버(REST) | 메인서버 | **1일** — 쓰기·재적재 시 갱신. 미러 SET 실패로 stale해져도 TTL 만료 후 DB에서 재적재되어 자가 치유 |
 | `watchlist:{userId}` | Set | 관심목록 미러 — 게이트웨이 CONNECT 시 해소용 (진실은 메인서버 DB) | 메인서버 | 게이트웨이 | 없음 |
 | `watchlist:rev:{userId}` | String | 미러 최신성 판정 rev — 이보다 새 rev의 동기화만 미러를 교체·발행 (메인서버 전용) | 메인서버 | 메인서버 | 없음 |
-| `seen:ingest:{sourceId}` | String | 수집 중복 제거 마커 | ingest/llm-worker | ingest/llm-worker | 며칠 |
+| `seen:ingest:{sourceId}` | String | 적재 중복 제거 마커 — 기사 sourceId뿐 아니라 일일 다이제스트 잡(`digest:{code}:{date}`)도 같은 마커로 하루 1회를 고정한다(뉴스 워커 명세 §4.1) | ingest/llm-worker | ingest/llm-worker | 며칠 |
 | `lock:cluster:{code}` | String (`SET NX PX 3000`) | 뉴스 클러스터 판정 직렬화 락(뉴스 워커 명세 §3.3) | llm-worker | llm-worker | 3초 |
 | `rate:article-fetch:{host}` | String (`SET PX`) | robots.txt·원문 fetch의 호스트별 다음 요청 간격을 llm-worker 인스턴스 간 직렬화 | llm-worker | llm-worker | 요청 간격(기본 1초) |
 | `rate:kis-rest:{keyId}` | Hash(token bucket) | 같은 KIS 계정을 쓰는 price·batch 프로세스의 일반 REST 합산 유량 제한 | price/batch-worker | price/batch-worker | 마지막 소비 후 2분 |

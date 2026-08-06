@@ -30,6 +30,9 @@ data class IngestProperties(
 
     data class Digest(
         val enabled: Boolean = true,
+        val cron: String = "0 0 18 * * *",
         val zone: String = "Asia/Seoul",
+        val catchUpOnStartup: Boolean = true,
+        val catchUpReconcileDelay: Duration = Duration.ofMinutes(1),
     )
 }

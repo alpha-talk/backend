@@ -106,6 +106,8 @@ alphatalk:
       enabled: true
       cron: "0 0 18 * * *"                  # 매일 18:00 KST — 뉴스 워커 명세 §4.1
       zone: Asia/Seoul
+      catch-up-on-startup: true             # 예정 시각에 워커가 죽어 있었으면 기동 직후 보충 — 명세 §4.1
+      catch-up-reconcile-delay: 1m          # Redis 장애로 불완전한 보충을 다시 대조하는 주기
 
 management:
   endpoints:
