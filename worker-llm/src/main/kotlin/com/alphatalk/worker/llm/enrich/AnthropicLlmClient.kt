@@ -4,12 +4,21 @@ import com.alphatalk.worker.llm.config.LlmProperties
 import com.fasterxml.jackson.databind.JsonNode
 import io.micrometer.core.instrument.MeterRegistry
 import org.springframework.http.MediaType
+import org.springframework.http.client.SimpleClientHttpRequestFactory
 import org.springframework.web.client.RestClient
 
 class AnthropicLlmClient(
     private val props: LlmProperties,
     private val meters: MeterRegistry,
-    private val rest: RestClient = RestClient.builder().baseUrl(props.anthropic.baseUrl).build(),
+    private val rest: RestClient = RestClient.builder()
+        .baseUrl(props.anthropic.baseUrl)
+        .requestFactory(
+            SimpleClientHttpRequestFactory().apply {
+                setConnectTimeout(props.anthropic.connectTimeout)
+                setReadTimeout(props.anthropic.readTimeout)
+            },
+        )
+        .build(),
 ) : LlmClient {
 
     private val mapper = StructuredLlmCodec.mapper
@@ -38,7 +47,7 @@ class AnthropicLlmClient(
             tool = MARKET_DIGEST_TOOL,
             prompt = StructuredLlmCodec.marketDigestPrompt(input.copy(research = false)),
         )
-        return StructuredLlmCodec.parseMarketDigest(toolInput)
+        return StructuredLlmCodec.parseMarketDigest(toolInput, research = false)
     }
 
     private fun callTool(model: String, tool: Map<String, Any>, prompt: String): JsonNode {

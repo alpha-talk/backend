@@ -31,7 +31,7 @@ internal class ClaudeCliLlmClient(
             CallProfile()
         }
         val output = call(StructuredLlmCodec.marketDigestPrompt(input), StructuredLlmCodec.marketDigestSchema, profile)
-        return StructuredLlmCodec.parseMarketDigest(output)
+        return StructuredLlmCodec.parseMarketDigest(output, input.research)
     }
 
     override fun supportsMarketResearch(): Boolean = true

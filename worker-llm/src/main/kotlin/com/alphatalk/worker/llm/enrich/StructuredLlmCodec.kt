@@ -191,8 +191,8 @@ internal object StructuredLlmCodec {
             appendLine("- 상승 ${sheet.advancers} · 하락 ${sheet.decliners} · 보합 ${sheet.unchanged}")
             appendLine("- 업종 등락 상위: ${sheet.topSectors.joinToString { "${it.name} ${percent(it.avgChangePct)}(${it.stockCount}종목)" }}")
             appendLine("- 업종 등락 하위: ${sheet.bottomSectors.joinToString { "${it.name} ${percent(it.avgChangePct)}(${it.stockCount}종목)" }}")
-            appendLine("- 외국인 순매수 상위 업종: ${sheet.foreignNetBuyTop.joinToString { "${it.name} ${it.netBuy}" }}")
-            appendLine("- 기관 순매수 상위 업종: ${sheet.institutionNetBuyTop.joinToString { "${it.name} ${it.netBuy}" }}")
+            appendLine("- 외국인 순매수 상위 업종(백만원): ${sheet.foreignNetBuyTop.joinToString { "${it.name} ${it.netBuy}" }}")
+            appendLine("- 기관 순매수 상위 업종(백만원): ${sheet.institutionNetBuyTop.joinToString { "${it.name} ${it.netBuy}" }}")
         } ?: appendLine("국내 팩트시트: (없음)")
         appendLine("국내 시장 뉴스: ${input.marketClusters.joinToString(" | ") { "${it.title} — ${it.summary.lineSequence().first()}" }.ifEmpty { "(없음)" }}")
         appendLine("업종 주요 이슈: ${input.sectorClusters.joinToString(" | ") { it.title }.ifEmpty { "(없음)" }}")
@@ -206,7 +206,17 @@ internal object StructuredLlmCodec {
         }
     }
 
-    fun parseMarketDigest(node: JsonNode): MarketDigestOutput {
+    fun parseMarketDigest(node: JsonNode, research: Boolean = true): MarketDigestOutput {
+        if (!research) {
+            return MarketDigestOutput(
+                summary = node.path("summary").asText(),
+                domestic = node.path("domestic").map {
+                    MarketAnalysis.DomesticItem(title = it.path("title").asText(), line = it.path("line").asText())
+                },
+                global = emptyList(),
+                sources = emptyList(),
+            )
+        }
         val sources = node.path("sources").map { source ->
             MarketAnalysis.ResearchSource(
                 id = source.path("id").asText(),

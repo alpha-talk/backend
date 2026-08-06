@@ -150,6 +150,21 @@ class MarketDigestProcessorTest {
     }
 
     @Test
+    fun `무리서치 재호출이 지어낸 global은 버려지고 완성본으로 굳지 않는다`() {
+        facts.result = FactSheetLookup.Found(sheet)
+        seedMarketCluster()
+        llm.failWhenResearching = true
+        llm.output = researchedOutput()
+
+        processor().process(entry())
+
+        val saved = digests.saved.getValue("2026-07-16")
+        assertTrue(saved.degraded)
+        assertTrue(saved.global.isEmpty())
+        assertTrue(saved.sources.isEmpty())
+    }
+
+    @Test
     fun `완성본이 있으면 재처리해도 LLM을 부르지 않는다`() {
         digests.saved["2026-07-16"] = analysis(degraded = false)
 

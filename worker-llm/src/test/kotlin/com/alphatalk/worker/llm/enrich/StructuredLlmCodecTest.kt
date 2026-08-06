@@ -95,6 +95,24 @@ class StructuredLlmCodecTest {
     }
 
     @Test
+    fun `시장 다이제스트 파싱 - 무리서치 호출은 global·sources를 검증 없이 버린다`() {
+        val output = StructuredLlmCodec.parseMarketDigest(
+            StructuredLlmCodec.mapper.readTree(
+                """
+                {"summary":"s","domestic":[{"title":"순환매","line":"l"}],
+                 "global":[{"title":"환각","line":"l","sourceIds":["ghost"]}],
+                 "sources":[]}
+                """,
+            ),
+            research = false,
+        )
+
+        assertTrue(output.global.isEmpty())
+        assertTrue(output.sources.isEmpty())
+        assertEquals("순환매", output.domestic.single().title)
+    }
+
+    @Test
     fun `시장 다이제스트 프롬프트 - 리서치 여부에 따라 검색 지시가 갈린다`() {
         val input = MarketDigestInput(
             date = "2026-07-16",

@@ -26,7 +26,7 @@ data class LlmProperties(
     data class Market(
         val researchEnabled: Boolean = true,
         val researchMaxTurns: Int = 10,
-        val researchTimeout: Duration = Duration.ofMinutes(3),
+        val researchTimeout: Duration = Duration.ofMinutes(2),
         val factCoverageThreshold: Double = 0.9,
     )
 
@@ -56,6 +56,8 @@ data class LlmProperties(
         val apiKey: String = "",
         val version: String = "2023-06-01",
         val maxTokens: Int = 1024,
+        val connectTimeout: Duration = Duration.ofSeconds(5),
+        val readTimeout: Duration = Duration.ofSeconds(60),
     )
 
     data class ClaudeCli(

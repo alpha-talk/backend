@@ -42,13 +42,18 @@ class LlmConfig {
             check(props.anthropic.apiKey.isNotBlank()) {
                 "LLM provider=anthropic에는 ANTHROPIC_API_KEY가 필요하다"
             }
+            val boundedTimeouts = listOf(props.anthropic.connectTimeout, props.anthropic.readTimeout)
+                .all { !it.isZero && !it.isNegative }
+            check(boundedTimeouts) {
+                "anthropic connect/read timeout은 양수여야 한다 — 0은 무한 대기라 claim-idle을 넘길 수 있다"
+            }
             AnthropicLlmClient(props, meters)
         }
         "claude-cli" -> {
             check(props.claudeCli.executable.isNotBlank()) {
                 "LLM provider=claude-cli에는 실행 파일 경로가 필요하다"
             }
-            validateCliConsumer(props, props.claudeCli.timeout)
+            validateCliConsumer(props, props.claudeCli.timeout, researchCapable = true)
             log.info("using Claude CLI LLM client (subscription auth)")
             ClaudeCliLlmClient(props)
         }
@@ -72,19 +77,19 @@ class LlmConfig {
         )
     }
 
-    private fun validateCliConsumer(props: LlmProperties, timeout: Duration) {
+    private fun validateCliConsumer(props: LlmProperties, timeout: Duration, researchCapable: Boolean = false) {
         check(props.consumerBatch == 1) {
             "CLI LLM provider는 PEL 선점 충돌 방지를 위해 consumer-batch=1이어야 한다"
         }
         check(!timeout.isZero && !timeout.isNegative && timeout < props.claimIdle) {
             "CLI LLM timeout은 양수이고 claim-idle(${props.claimIdle})보다 짧아야 한다"
         }
-        if (props.market.researchEnabled) {
+        if (researchCapable && props.market.researchEnabled) {
             val batchWait = timeout.multipliedBy((props.consumerBatch - 1).toLong())
-            val worstCase = batchWait.plus(props.market.researchTimeout)
+            val worstCase = batchWait.plus(props.market.researchTimeout).plus(timeout)
             check(!props.market.researchTimeout.isZero && !props.market.researchTimeout.isNegative && worstCase < props.claimIdle) {
-                "시장 리서치 데드라인은 배치 대기 포함 claim-idle(${props.claimIdle})보다 짧아야 한다 — " +
-                    "(consumer-batch-1)×timeout + research-timeout = $worstCase"
+                "시장 리서치 데드라인은 배치 대기·무리서치 재호출 포함 claim-idle(${props.claimIdle})보다 짧아야 한다 — " +
+                    "(consumer-batch-1)×timeout + research-timeout + timeout = $worstCase"
             }
         }
     }
