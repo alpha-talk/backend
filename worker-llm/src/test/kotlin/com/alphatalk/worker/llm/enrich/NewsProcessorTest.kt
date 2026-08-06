@@ -323,21 +323,55 @@ class NewsProcessorTest {
     }
 
     @Test
-    fun `SECTOR - 하드 상한 억제는 섹터 fan-out만 막고 직접 관련 종목은 발행한다`() {
+    fun `SECTOR - 하드 상한 억제는 섹터 fan-out만 막고 소스 후보 종목은 발행한다`() {
         verdict = ClusterSummaryOutput(
             summary = "반도체 이슈",
             marketRelevant = true,
             scope = NewsScope.SECTOR,
-            stocks = listOf(StockVerdict("005930", true, Sentiment.POSITIVE, 0.9, "직접")),
+            stocks = listOf(StockVerdict("005930", true, Sentiment.POSITIVE, 0.9, "소스 후보")),
             sectors = listOf(SectorVerdict("27", Sentiment.NEGATIVE, Impact.HIGH, 0.9, "")),
         )
         val meters = SimpleMeterRegistry()
-        processor(fanoutCap = 2, fanoutHardCap = 2, meters = meters).process(entry("a1", "반도체 이슈"))
+        processor(fanoutCap = 2, fanoutHardCap = 2, meters = meters)
+            .process(entry("a1", "반도체 이슈", codes = listOf("005930")))
 
         assertEquals(listOf("005930"), events.inserted.map { it.code })
         assertEquals("POSITIVE", events.inserted.single().data.sentiment)
         assertEquals(1.0, meters.counter("sector.fanout.suppressed").count())
         assertEquals("SECTOR", store.clusters.values.single().scope)
+    }
+
+    @Test
+    fun `SECTOR - LLM이 후보 밖에서 발견한 종목은 상한 예외가 아니다`() {
+        verdict = ClusterSummaryOutput(
+            summary = "반도체 이슈",
+            marketRelevant = true,
+            scope = NewsScope.SECTOR,
+            stocks = listOf(StockVerdict("005930", true, Sentiment.POSITIVE, 0.9, "LLM 기억으로 추가")),
+            sectors = listOf(SectorVerdict("27", Sentiment.NEGATIVE, Impact.HIGH, 0.9, "")),
+        )
+        val meters = SimpleMeterRegistry()
+        processor(fanoutCap = 2, fanoutHardCap = 2, meters = meters)
+            .process(entry("a1", "반도체 이슈", codes = emptyList()))
+
+        assertTrue(events.inserted.isEmpty())
+        assertEquals(1.0, meters.counter("sector.fanout.suppressed").count())
+        assertEquals("SECTOR", store.clusters.values.single().scope)
+    }
+
+    @Test
+    fun `SECTOR - 발견 종목도 상한 계산에 포함된다`() {
+        verdict = ClusterSummaryOutput(
+            summary = "반도체 이슈",
+            marketRelevant = true,
+            scope = NewsScope.SECTOR,
+            stocks = listOf(StockVerdict("005930", true, Sentiment.POSITIVE, 0.9, "LLM 발견")),
+            sectors = listOf(SectorVerdict("33", Sentiment.NEGATIVE, Impact.HIGH, 0.9, "2종목")),
+        )
+        val meters = SimpleMeterRegistry()
+        processor(fanoutCap = 2, meters = meters).process(entry("a1", "반도체 이슈", codes = emptyList()))
+
+        assertEquals(1.0, meters.counter("sector.fanout.tier2").count())
     }
 
     @Test
