@@ -6,11 +6,12 @@ import java.time.Duration
 
 class RedisMinuteMarketDivStore(
     private val redis: StringRedisTemplate,
-    private val ttl: Duration = Duration.ofDays(7),
+    private val ttl: Duration = Duration.ofDays(2),
 ) : MinuteMarketDivStore {
-    override fun get(code: String): String? = redis.opsForValue().get(Keys.minuteMarketDiv(code))
+    override fun get(code: String, date: String): String? =
+        redis.opsForValue().get(Keys.minuteMarketDiv(code, date))
 
-    override fun put(code: String, div: String) {
-        redis.opsForValue().set(Keys.minuteMarketDiv(code), div, ttl)
+    override fun put(code: String, date: String, div: String) {
+        redis.opsForValue().set(Keys.minuteMarketDiv(code, date), div, ttl)
     }
 }

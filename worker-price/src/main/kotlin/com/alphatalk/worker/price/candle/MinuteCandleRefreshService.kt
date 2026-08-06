@@ -41,7 +41,7 @@ class MinuteCandleRefreshService(
         exclusive(code, dailySyncDeadlineMillis) { doRefresh(code, dailySyncDeadlineMillis, honorFreshness = false) }
 
     fun isDayComplete(code: String, date: String): Boolean =
-        isComplete(code, date, store.latestTime(code, date), marketDivs.get(code))
+        isComplete(code, date, store.latestTime(code, date), marketDivs.get(code, date))
 
     private fun isComplete(code: String, date: String, latest: String?, div: String?): Boolean {
         val closeBar = closeTimeOf(div).format(HHMM)
@@ -106,8 +106,19 @@ class MinuteCandleRefreshService(
         if (!calendar.isTradingDay()) return 0
         val at = now()
         val date = at.toLocalDate().format(DateTimeFormatter.BASIC_ISO_DATE)
-        var div = marketDivs.get(code)
-        if (isComplete(code, date, store.latestTime(code, date), div)) return 0
+        var div = marketDivs.get(code, date)
+        val storedLatest = store.latestTime(code, date)
+        if (isComplete(code, date, storedLatest, div)) return 0
+        if (div == null && storedLatest != null) {
+            log.warn(
+                "minute candle 그날 구분 기록이 없는데 적재분이 있다 - 구분 혼입을 막기 위해 그날은 갱신하지 않는다: code={} date={} latest={}",
+                code,
+                date,
+                storedLatest,
+            )
+            meters.counter("minute.candle.div.unknown").increment()
+            return 0
+        }
         if (honorFreshness) {
             val last = lastFetchedAt[code]
             if (last != null && Duration.between(last, at.toInstant()).seconds < freshSeconds) return 0
@@ -119,16 +130,16 @@ class MinuteCandleRefreshService(
             val outcome = fetchPass(code, date, at, div ?: DIV_UNIFIED, probing, budget)
             total += outcome.upserted
             if (probing && outcome.resolvedUnified) {
-                marketDivs.put(code, DIV_UNIFIED)
+                marketDivs.put(code, date, DIV_UNIFIED)
                 meters.counter("minute.candle.market.div", "div", DIV_UNIFIED).increment()
             }
             if (!outcome.resolvedKrx) {
                 lastFetchedAt[code] = at.toInstant()
                 return total
             }
-            marketDivs.put(code, DIV_KRX)
-            meters.counter("minute.candle.market.div", "div", DIV_KRX).increment()
             watermarks.clear(code, date)
+            marketDivs.put(code, date, DIV_KRX)
+            meters.counter("minute.candle.market.div", "div", DIV_KRX).increment()
             div = DIV_KRX
             probing = false
         }
@@ -191,6 +202,7 @@ class MinuteCandleRefreshService(
             val chart = fetcher.fetch(code, to, div)
             val zeroPage = chart.candles.isNotEmpty() && chart.candles.all { it.isZeroPriced() }
             if (zeroPage) {
+                meters.counter("minute.candle.zero.page").increment()
                 if (div == DIV_UNIFIED && chart.dailyVolume > 0 && latest == null && byTime.isEmpty()) {
                     log.warn(
                         "minute candle UN 조회가 0봉만 반환했다 - NXT 미지원으로 판정해 KRX로 전환한다: code={} date={} dailyVolume={}",
@@ -208,7 +220,6 @@ class MinuteCandleRefreshService(
                     to.format(HHMM),
                     chart.dailyVolume,
                 )
-                meters.counter("minute.candle.zero.page").increment()
                 sawZeroPage = true
                 break
             }
