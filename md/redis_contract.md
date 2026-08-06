@@ -174,7 +174,7 @@ ingest-worker 스케줄러(싱글턴)가 매일 18:00 KST에 적재하고 같은
 | `rate:kis-rest:{keyId}` | Hash(token bucket) | 같은 KIS 계정을 쓰는 price·batch 프로세스의 일반 REST 합산 유량 제한 | price/batch-worker | price/batch-worker | 마지막 소비 후 2분 |
 | `lock:minute-refresh:{code}` | String (`SET NX PX`) | 분봉 신선화의 종목별 인스턴스 간 single-flight 락(KIS 워커 명세 §2.6) — 미획득 인스턴스는 no-op | worker-price | worker-price | 페치 데드라인+여유 (기본 90s·일 확정 시 200s) |
 | `minute:through:{code}:{date}` | String (`HHmm`) | 그 종목·일자를 몇 시까지 조회 완료했는지(완주 워터마크, §2.6) — 인스턴스 간 공유해 재기동·리더 전환 후 전 구간 재조회를 막는다 | worker-price | worker-price | **2일** |
-| `minute:market-div:{code}` | String (`UN`\|`J`) | 그 종목의 분봉 시장 구분(KIS 워커 명세 §2.6) — NXT 지원이면 `UN`, 미지원이면 `J`. 캐시 히트면 폴백 없이 1콜로 조회하고, 미스에서만 판별 프로브가 돈다. 값이 바뀌면 그날 분봉과 `minute:through:{code}:{date}`를 함께 폐기한다(누적 거래대금 앵커 혼입 방지) | worker-price | worker-price | **7일** |
+| `minute:market-div:{code}` | String (`UN`\|`J`) | 그 종목의 분봉 시장 구분(KIS 워커 명세 §2.6) — NXT 지원이면 `UN`, 미지원이면 `J`. 캐시 히트면 그 구분으로 1콜만 조회한다. 판별·전환은 **그날 적재분이 0이고 `acml_vol > 0`일 때만** 일어나며(하루 안 구분 혼입 방지), 그때 `minute:through:{code}:{date}`를 함께 폐기한다 — 적재된 분봉은 어떤 경우에도 삭제하지 않는다 | worker-price | worker-price | **7일** |
 | `demand:quote:{gwId}` | Hash `{code: refCount}` | 접속 세션의 관심목록 기준 종목 참조 수(유저 단위) — 주기·전이 트리거마다 스냅샷 전체 재기록(v0.12) | 게이트웨이 | worker-price | **60s** — 재기록이 연장 |
 | `demand:room:{gwId}` | Hash `{code: refCount}` | 방 토픽 구독(입장) 기준 참조 수(구독 단위) — trade/depth·우선순위 판단 | 게이트웨이 | worker-price | **60s** — 재기록이 연장 |
 | `gw:alive:{gwId}` | String | 살아있는 게이트웨이 식별(하트비트 5s 주기 갱신). worker-price는 리컨실 때 alive gw의 수요만 합산 | 게이트웨이 | worker-price | **15s** |
