@@ -10,6 +10,7 @@ import com.alphatalk.worker.llm.cluster.ClusterContendedException
 import com.alphatalk.worker.llm.cluster.ClusterRecord
 import com.alphatalk.worker.llm.cluster.ClusterStatus
 import com.alphatalk.worker.llm.cluster.ClusterStore
+import com.alphatalk.worker.llm.cluster.StockLink
 import com.alphatalk.worker.llm.config.LlmProperties
 import com.alphatalk.worker.llm.persist.EventIdGenerator
 import com.alphatalk.worker.llm.persist.StreamEventStore
@@ -274,14 +275,16 @@ class NewsProcessor(
 
             val published = links.filter { it.streamEventId != null }.map { it.code }.toSet()
             val rejected = links.filter { it.rejected == true }.map { it.code }.toSet()
+            val linkByCode = links.associateBy(StockLink::code)
             val sectorScoped = cluster.scope == NewsScope.SECTOR.name
             entry.codes.filter { it !in published && it !in rejected }.forEach { code ->
+                val existing = linkByCode[code]
                 persistStockEvent(
                     cluster,
                     cluster.summary.orEmpty(),
                     code,
-                    null,
-                    null,
+                    existing?.sentiment,
+                    existing?.confidence,
                     if (sectorScoped) NewsScope.SECTOR else null,
                     if (sectorScoped) sectorRefOf(code) else null,
                 )?.let(publications::add)
