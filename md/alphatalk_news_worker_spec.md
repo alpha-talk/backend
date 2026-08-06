@@ -275,11 +275,14 @@ stream payload (ws_api_spec §4.3 확장 — ⚠️ §6 증보):
 
 - **ingest 스케줄러**가 매일 **18:00 KST**(장 마감 후)에 **시드 종목 전체**를 대상으로 `XADD queue:ingest type=digest codes={code} sourceId=digest:{code}:{yyyy-MM-dd}`를 실행한다. ingest는 DB를 보지 않아 어떤 종목에 클러스터가 쌓였는지 모르므로 잡을 전 종목에 적재하고, 윈도 `[전일 18:00, 당일 18:00)`에 소식(STOCK·SECTOR)이 없는 종목 잡은 llm-worker가 브리핑 없이 ACK한다(시장 이슈만으로는 브리핑을 만들지 않는다).
 - llm-worker가 같은 그룹(`g:llm`)으로 경쟁 소비한다 — 스케줄은 싱글턴(ingest), 실행은 ×N(llm)으로 갈라져 리더 선출이 필요 없다.
+- **기동 시 보충(catch-up)**: 크론은 예정 시각에 프로세스가 떠 있어야만 돈다. 배포·장애·개발 머신 종료로 18:00에 워커가 죽어 있으면 그날 브리핑이 통째로 빠지므로, ingest는 기동 직후(`ApplicationReadyEvent`) **이미 지나간 가장 최근 예정 실행**을 찾아 그 날짜 잡이 아직 적재되지 않았으면 그 자리에서 적재한다. 오전에 떠도 전일 18:00 실행이 보충 대상이 된다. 보충은 **한 건(가장 최근에 놓친 실행)**뿐이다 — 며칠 죽어 있었어도 밀린 날짜를 줄줄이 소급하지 않는다(지난 브리핑을 한꺼번에 스트림에 밀어 넣지 않기 위해서다). 늦게 실행돼도 내용은 맞는다: llm-worker가 윈도를 `now`가 아니라 **잡의 날짜**에서 계산하기 때문이다(§4.2). 보충은 기동 스레드가 아니라 전용 실행기에서 비동기로 돈다 — Redis가 죽은 채로 뜰 때 종목 수만큼의 타임아웃이 readiness 전환을 막지 않게 하기 위해서다. `alphatalk.ingest.digest.catch-up-on-startup=false`로 끈다.
+- 적재 멱등은 뉴스와 같은 `seen:ingest:{sourceId}` 마커가 담당한다 — sourceId가 `digest:{code}:{date}`라 하루 1회로 고정되고, 크론이 이미 돈 날 재기동·롤링 배포로 catch-up이 여러 번 돌아도 잡은 다시 쌓이지 않는다. 인스턴스 ×N 동시 기동도 `SETNX`가 한 번만 통과시킨다. XADD가 실패한 종목은 마커를 되돌려 다음 트리거에서 재시도된다.
 - 멱등 키 `digest:{code}:{date}` → `stream_event` upsert. 재처리·중복 적재에도 브리핑은 하루 1건이고, 동시 처리 경쟁은 `stream_event (code, digest date)` 부분 유니크 인덱스(V3)가 최종 차단한다.
 
 ### 4.2 생성
 
 **입력**: 윈도 내 해당 종목 클러스터들의 (요약 3줄, sentiment, confidence, 기사 수) 목록 — 원문 재조회 없음(이미 요약된 것의 취합).
+**윈도**는 실행 시각이 아니라 **잡의 sourceId에 박힌 날짜**에서 뽑는다 — `windowTo = {date} 18:00 KST`, `windowFrom = windowTo - 24h`. 그래서 지연 소비·재시도·기동 보충(§4.1)으로 늦게 실행돼도 그 날짜의 브리핑이 그대로 나온다. 대신 이 18:00은 llm-worker에 고정돼 있어 **ingest의 digest 크론을 다른 시각으로 옮기면 윈도가 따라가지 않는다** — 시각을 바꿀 땐 양쪽을 함께 고쳐야 한다(장전 브리핑 안건은 §7 항목 3).
 **출력** (`type=AI`, `category="ai"`):
 
 ```json
