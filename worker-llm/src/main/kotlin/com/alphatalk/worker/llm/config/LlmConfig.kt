@@ -115,12 +115,13 @@ class LlmConfig {
             val robotsColdMiss = RedisArticleRequestGate.MAX_TOTAL_WAIT.plus(RobotsPolicy.FETCH_BUDGET)
             JsoupArticleFetcher.FETCH_DEADLINE.plus(maxOf(JsoupArticleFetcher.FETCH_TIMEOUT, robotsColdMiss))
         }
-        val perRecord = llmPerCall.plus(embedPerCall).plus(fetchCeiling)
+        val lockWait = props.cluster.lockTtl.multipliedBy(2)
+        val perRecord = llmPerCall.plus(embedPerCall).plus(fetchCeiling).plus(lockWait)
         val batchWorstCase = perRecord.multipliedBy(props.consumerBatch.toLong())
         check(batchWorstCase < props.claimIdle) {
             "$providerLabel 배치 최악 지연이 claim-idle(${props.claimIdle})을 넘는다 — " +
-                "consumer-batch × (LLM+임베딩+원문 fetch 상한) = $batchWorstCase. 배치는 PEL에 먼저 들어가 " +
-                "순차 처리되므로 마지막 레코드가 선점 임계를 넘겨 중복 처리·조기 DLQ가 생긴다. " +
+                "consumer-batch × (LLM+임베딩+원문 fetch+클러스터 락 대기 상한) = $batchWorstCase. 배치는 PEL에 " +
+                "먼저 들어가 순차 처리되므로 마지막 레코드가 선점 임계를 넘겨 중복 처리·조기 DLQ가 생긴다. " +
                 "batch 또는 timeout을 줄여라"
         }
     }

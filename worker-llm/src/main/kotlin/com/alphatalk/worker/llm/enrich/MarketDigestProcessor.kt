@@ -61,8 +61,10 @@ class MarketDigestProcessor(
             return
         }
 
+        val asOf = clock.instant().atZone(zone).format(DateTimeFormatter.ISO_OFFSET_DATE_TIME)
         val input = MarketDigestInput(
             date = date,
+            asOf = asOf,
             factSheet = factSheet,
             marketClusters = marketClusters.map(::toDigestCluster),
             sectorClusters = sectorClusters.map(::toDigestCluster),
@@ -97,7 +99,7 @@ class MarketDigestProcessor(
             domestic = output.domestic,
             global = output.global,
             sources = output.sources,
-            asOf = clock.instant().atZone(zone).format(DateTimeFormatter.ISO_OFFSET_DATE_TIME),
+            asOf = asOf,
             factDate = factSheet?.factDate,
             degraded = degraded,
         )

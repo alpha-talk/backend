@@ -185,7 +185,8 @@ internal object StructuredLlmCodec {
         )
 
     fun marketDigestPrompt(input: MarketDigestInput): String = buildString {
-        appendLine("${input.date} 한국 증시 시장 데일리 브리핑을 작성하라. 투자 조언이 아니라 정보 요약이며, summary는 종합 3줄이다.")
+        appendLine("한국 증시 시장 데일리 브리핑을 작성하라. 투자 조언이 아니라 정보 요약이며, summary는 종합 3줄이다.")
+        appendLine("현재 시각: ${input.asOf} — 조사와 서술은 이 시각 기준 최신 상황을 따른다. ${input.date}는 브리핑 식별용 날짜 라벨일 뿐 조사 컷오프가 아니다.")
         input.factSheet?.let { sheet ->
             appendLine("국내 팩트시트(기준일 ${sheet.factDate}):")
             appendLine("- 상승 ${sheet.advancers} · 하락 ${sheet.decliners} · 보합 ${sheet.unchanged}")
