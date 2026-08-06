@@ -141,7 +141,8 @@ class NewsProcessor(
     ): NewsScope? {
         if (relevantStocks.isEmpty() && sectorVerdicts.isEmpty()) return null
         val (sourced, discovered) = relevantStocks.partition { it.code in sourceCandidates }
-        val plan = resolveFanout(cluster.id, sectorVerdicts, discovered.size)
+        val discoveredCodes = discovered.mapTo(mutableSetOf(), StockVerdict::code)
+        val plan = resolveFanout(cluster.id, sectorVerdicts, discoveredCodes, sourceCandidates)
 
         val published = mutableSetOf<String>()
         val capExempt = sourced + if (plan.includeDiscovered) discovered else emptyList()
@@ -168,31 +169,43 @@ class NewsProcessor(
     private fun normalizeSectors(verdicts: List<SectorVerdict>): List<SectorVerdict> =
         verdicts.sortedBy { it.impact.ordinal }.distinctBy(SectorVerdict::sectorCode)
 
-    private fun resolveFanout(clusterId: String, verdicts: List<SectorVerdict>, discovered: Int): FanoutPlan {
+    private fun resolveFanout(
+        clusterId: String,
+        verdicts: List<SectorVerdict>,
+        discovered: Set<String>,
+        sourceCandidates: Set<String>,
+    ): FanoutPlan {
         val all = memberFanout(verdicts)
-        if (all.size + discovered <= fanoutCap) return FanoutPlan(all, includeDiscovered = true)
+        val allCount = cappedCount(all, discovered, sourceCandidates)
+        if (allCount <= fanoutCap) return FanoutPlan(all, includeDiscovered = true)
 
         meters.counter("sector.fanout.tier2").increment()
         val material = all.filterValues { it.first.impact != Impact.LOW }
-        val materialTotal = material.size + discovered
-        if (materialTotal == 0 || materialTotal > fanoutHardCap) {
+        val materialCount = cappedCount(material, discovered, sourceCandidates)
+        if (materialCount == 0 || materialCount > fanoutHardCap) {
             meters.counter("sector.fanout.suppressed").increment()
             log.warn(
                 "sector fan-out suppressed: clusterId={} sectors={} all={} material={} discovered={} " +
                     "cap={} hardCap={}",
-                clusterId, sectorCodesOf(verdicts), all.size, material.size, discovered, fanoutCap, fanoutHardCap,
+                clusterId, sectorCodesOf(verdicts), allCount, materialCount, discovered.size, fanoutCap, fanoutHardCap,
             )
             return FanoutPlan(emptyMap(), includeDiscovered = false)
         }
-        if (material.size < all.size) {
+        if (materialCount < allCount) {
             meters.counter("sector.fanout.degraded").increment()
             log.info(
                 "sector fan-out degraded to material impact: clusterId={} sectors={} all={} material={} discovered={}",
-                clusterId, sectorCodesOf(verdicts), all.size, material.size, discovered,
+                clusterId, sectorCodesOf(verdicts), allCount, materialCount, discovered.size,
             )
         }
         return FanoutPlan(material, includeDiscovered = true)
     }
+
+    private fun cappedCount(
+        members: Map<String, Pair<SectorVerdict, SectorRef>>,
+        discovered: Set<String>,
+        sourceCandidates: Set<String>,
+    ): Int = ((members.keys - sourceCandidates) + discovered).size
 
     private data class FanoutPlan(
         val members: Map<String, Pair<SectorVerdict, SectorRef>>,
