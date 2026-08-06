@@ -14,6 +14,7 @@ class LocalProfileConfigTest {
         val defaults = localProperties()
 
         assertEquals("claude-cli", defaults.provider)
+        assertEquals("sonnet", defaults.claudeCli.model)
         assertEquals(1, defaults.consumerBatch)
         assertEquals("rest", defaults.embedding.provider)
         assertEquals("http://localhost:11434", defaults.embedding.baseUrl)
@@ -22,10 +23,12 @@ class LocalProfileConfigTest {
         assertEquals(1024, defaults.embedding.dimension)
 
         val overrides = localEnvironment().withProperty("LLM_PROVIDER", "codex-cli")
+            .withProperty("alphatalk.llm.claude-cli.model", "opus")
             .withProperty("EMBEDDING_PROVIDER", "fake")
             .let(::bind)
 
         assertEquals("codex-cli", overrides.provider)
+        assertEquals("opus", overrides.claudeCli.model)
         assertEquals("fake", overrides.embedding.provider)
     }
 
@@ -38,9 +41,11 @@ class LocalProfileConfigTest {
 
     private fun localEnvironment(): MockEnvironment {
         val environment = MockEnvironment()
-        YamlPropertySourceLoader()
-            .load("application-local", ClassPathResource("application-local.yml"))
+        val loader = YamlPropertySourceLoader()
+        loader.load("application", ClassPathResource("application.yml"))
             .forEach(environment.propertySources::addLast)
+        loader.load("application-local", ClassPathResource("application-local.yml"))
+            .forEach(environment.propertySources::addFirst)
         return environment
     }
 }
