@@ -360,18 +360,51 @@ class NewsProcessorTest {
     }
 
     @Test
-    fun `SECTOR - 발견 종목도 상한 계산에 포함된다`() {
+    fun `SECTOR - 섹터 밖 발견 종목은 상한 계산에 더해진다`() {
         verdict = ClusterSummaryOutput(
             summary = "반도체 이슈",
             marketRelevant = true,
             scope = NewsScope.SECTOR,
-            stocks = listOf(StockVerdict("005930", true, Sentiment.POSITIVE, 0.9, "LLM 발견")),
+            stocks = listOf(StockVerdict("105560", true, Sentiment.POSITIVE, 0.9, "섹터 밖 발견")),
             sectors = listOf(SectorVerdict("33", Sentiment.NEGATIVE, Impact.HIGH, 0.9, "2종목")),
         )
         val meters = SimpleMeterRegistry()
         processor(fanoutCap = 2, meters = meters).process(entry("a1", "반도체 이슈", codes = emptyList()))
 
         assertEquals(1.0, meters.counter("sector.fanout.tier2").count())
+    }
+
+    @Test
+    fun `SECTOR - 발견 종목이 섹터 구성원이면 상한에 한 번만 센다`() {
+        verdict = ClusterSummaryOutput(
+            summary = "반도체 이슈",
+            marketRelevant = true,
+            scope = NewsScope.SECTOR,
+            stocks = listOf(StockVerdict("005930", true, Sentiment.POSITIVE, 0.9, "섹터 구성원과 겹침")),
+            sectors = listOf(SectorVerdict("33", Sentiment.NEGATIVE, Impact.LOW, 0.9, "2종목")),
+        )
+        val meters = SimpleMeterRegistry()
+        processor(fanoutCap = 2, meters = meters).process(entry("a1", "반도체 이슈", codes = emptyList()))
+
+        assertEquals(0.0, meters.counter("sector.fanout.tier2").count())
+        assertEquals(listOf("005930", "000660"), events.inserted.map { it.code })
+    }
+
+    @Test
+    fun `SECTOR - 상한 예외인 소스 후보는 섹터 구성원이어도 상한 계산에서 빠진다`() {
+        verdict = ClusterSummaryOutput(
+            summary = "반도체 이슈",
+            marketRelevant = true,
+            scope = NewsScope.SECTOR,
+            stocks = listOf(StockVerdict("005930", true, Sentiment.POSITIVE, 0.9, "소스 후보")),
+            sectors = listOf(SectorVerdict("33", Sentiment.NEGATIVE, Impact.LOW, 0.9, "2종목")),
+        )
+        val meters = SimpleMeterRegistry()
+        processor(fanoutCap = 1, meters = meters)
+            .process(entry("a1", "반도체 이슈", codes = listOf("005930")))
+
+        assertEquals(0.0, meters.counter("sector.fanout.tier2").count())
+        assertEquals(listOf("005930", "000660"), events.inserted.map { it.code })
     }
 
     @Test
