@@ -376,6 +376,23 @@ class NewsProcessorTest {
     }
 
     @Test
+    fun `SECTOR - LOW 강등 후에도 하드 상한 이내의 발견 종목은 발행한다`() {
+        verdict = ClusterSummaryOutput(
+            summary = "은행 이슈",
+            marketRelevant = true,
+            scope = NewsScope.SECTOR,
+            stocks = listOf(StockVerdict("005930", true, Sentiment.POSITIVE, 0.9, "섹터 밖 발견")),
+            sectors = listOf(SectorVerdict("27", Sentiment.NEUTRAL, Impact.LOW, 0.5, "3종목")),
+        )
+        val meters = SimpleMeterRegistry()
+        processor(fanoutCap = 3, meters = meters).process(entry("a1", "은행 이슈", codes = emptyList()))
+
+        assertEquals(listOf("005930"), events.inserted.map { it.code })
+        assertEquals(1.0, meters.counter("sector.fanout.degraded").count())
+        assertEquals(0.0, meters.counter("sector.fanout.suppressed").count())
+    }
+
+    @Test
     fun `SECTOR - material 구성원이 전부 예외 종목이면 억제가 아니라 강등이다`() {
         verdict = ClusterSummaryOutput(
             summary = "반도체 이슈",
@@ -433,6 +450,10 @@ class NewsProcessorTest {
         p.process(entry("a2", "[속보] 반도체 이슈", codes = listOf("105560")))
 
         assertEquals(1, store.clusters.size, "링크가 없어 새 클러스터가 생겼다")
+        val event = events.inserted.single()
+        assertEquals("105560", event.code)
+        assertEquals("SECTOR", event.data.scope)
+        assertEquals("27", event.data.sector?.code)
     }
 
     @Test
