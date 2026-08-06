@@ -17,4 +17,8 @@ class RedisMinuteRefreshWatermarkStore(
         if (previous != null && previous >= time) return
         redis.opsForValue().set(key, time, ttl)
     }
+
+    override fun clear(code: String, date: String) {
+        redis.delete(Keys.minuteRefreshWatermark(code, date))
+    }
 }

@@ -69,6 +69,7 @@ interface MinuteCandleJpaRepository : JpaRepository<MinuteCandleEntity, MinuteCa
     @Modifying
     @Query("delete from MinuteCandleEntity c where c.id in :ids")
     fun deleteByIds(@Param("ids") ids: List<MinuteCandleId>): Int
+
 }
 
 @Repository
