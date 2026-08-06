@@ -108,6 +108,8 @@ alphatalk:
       zone: Asia/Seoul
       catch-up-on-startup: true             # 예정 시각에 워커가 죽어 있었으면 기동 직후 보충 — 명세 §4.1
       catch-up-reconcile-delay: 1m          # Redis 장애로 불완전한 보충을 다시 대조하는 주기
+      market-enabled: false                 # 시장 다이제스트 잡 — 소비자(N7 llm-worker) 전체 배포 후 켠다(명세 §4.3)
+      market-cron: "0 40 17 * * *"          # 17:40 KST — 종목 잡보다 20분 앞선 헤드룸
 
 management:
   endpoints:

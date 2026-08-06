@@ -1,11 +1,14 @@
 package com.alphatalk.worker.llm.enrich
 
+import com.alphatalk.contracts.envelope.MarketAnalysis
 import com.alphatalk.contracts.envelope.NewsScope
 import com.alphatalk.contracts.envelope.Sentiment
 
 interface LlmClient {
     fun summarize(input: ClusterSummaryInput): ClusterSummaryOutput
     fun digest(input: DigestInput): DigestOutput
+    fun marketDigest(input: MarketDigestInput): MarketDigestOutput
+    fun supportsMarketResearch(): Boolean = false
 }
 
 data class StockCandidate(val code: String, val name: String)
@@ -66,4 +69,19 @@ data class DigestCluster(
 data class DigestOutput(
     val title: String,
     val summary: String,
+)
+
+data class MarketDigestInput(
+    val date: String,
+    val factSheet: MarketFactSheet?,
+    val marketClusters: List<DigestCluster>,
+    val sectorClusters: List<DigestCluster>,
+    val research: Boolean,
+)
+
+data class MarketDigestOutput(
+    val summary: String,
+    val domestic: List<MarketAnalysis.DomesticItem>,
+    val global: List<MarketAnalysis.GlobalItem>,
+    val sources: List<MarketAnalysis.ResearchSource>,
 )

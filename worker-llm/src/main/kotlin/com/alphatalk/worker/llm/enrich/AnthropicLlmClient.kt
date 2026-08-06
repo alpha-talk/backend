@@ -32,6 +32,15 @@ class AnthropicLlmClient(
         return StructuredLlmCodec.parseDigest(toolInput)
     }
 
+    override fun marketDigest(input: MarketDigestInput): MarketDigestOutput {
+        val toolInput = callTool(
+            model = props.models.digest,
+            tool = MARKET_DIGEST_TOOL,
+            prompt = StructuredLlmCodec.marketDigestPrompt(input.copy(research = false)),
+        )
+        return StructuredLlmCodec.parseMarketDigest(toolInput)
+    }
+
     private fun callTool(model: String, tool: Map<String, Any>, prompt: String): JsonNode {
         val body = mapOf(
             "model" to model,
@@ -72,6 +81,12 @@ class AnthropicLlmClient(
             "name" to "submit_daily_digest",
             "description" to "종목 데일리 브리핑 제출",
             "input_schema" to StructuredLlmCodec.digestSchema,
+        )
+
+        private val MARKET_DIGEST_TOOL = mapOf(
+            "name" to "submit_market_digest",
+            "description" to "시장 데일리 브리핑 제출",
+            "input_schema" to StructuredLlmCodec.marketDigestSchema,
         )
     }
 }

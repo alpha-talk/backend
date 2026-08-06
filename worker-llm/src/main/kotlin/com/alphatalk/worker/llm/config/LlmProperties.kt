@@ -21,7 +21,15 @@ data class LlmProperties(
     val codexCli: CodexCli = CodexCli(),
     val embedding: Embedding = Embedding(),
     val article: Article = Article(),
+    val market: Market = Market(),
 ) {
+    data class Market(
+        val researchEnabled: Boolean = true,
+        val researchMaxTurns: Int = 10,
+        val researchTimeout: Duration = Duration.ofMinutes(3),
+        val factCoverageThreshold: Double = 0.9,
+    )
+
     data class Article(
         val allowedHostSuffixes: List<String> = emptyList(),
         val minHostInterval: Duration = Duration.ofSeconds(1),

@@ -354,6 +354,20 @@ class JdbcClusterStore(
             ::digestRow,
         )
 
+    override fun highImpactSectorClustersInWindow(from: Instant, to: Instant): List<DigestClusterRow> =
+        jdbc.query(
+            """
+            SELECT DISTINCT c.id, c.rep_title, c.summary, NULL AS sentiment, c.article_count,
+                   NULL AS stream_event_id, c.last_article_at
+            FROM news_cluster c JOIN news_cluster_sector s ON s.cluster_id = c.id
+            WHERE s.impact = 'HIGH' AND c.scope = 'SECTOR' AND c.status = 'SUMMARIZED'
+              AND c.last_article_at >= :from AND c.last_article_at < :to
+            ORDER BY c.last_article_at DESC
+            """,
+            mapOf("from" to Timestamp.from(from), "to" to Timestamp.from(to)),
+            ::digestRow,
+        )
+
     private fun clusterRow(rs: ResultSet, @Suppress("UNUSED_PARAMETER") rowNum: Int) = ClusterRecord(
         id = rs.getString("id"),
         repTitle = rs.getString("rep_title"),

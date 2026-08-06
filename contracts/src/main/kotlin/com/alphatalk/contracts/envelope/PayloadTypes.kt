@@ -42,6 +42,7 @@ data class DigestData(
     val negatives: List<Item> = emptyList(),
     val sectorIssues: List<SectorIssue> = emptyList(),
     val marketIssues: List<MarketIssue> = emptyList(),
+    val marketAnalysis: MarketAnalysis? = null,
     val neutralCount: Int = 0,
     val newsCount: Int = 0,
 ) {
@@ -52,6 +53,24 @@ data class DigestData(
     data class SectorIssue(val title: String, val line: String, val sentiment: String, val eventId: String? = null)
 
     data class MarketIssue(val title: String, val line: String)
+}
+
+@JsonInclude(JsonInclude.Include.NON_NULL)
+data class MarketAnalysis(
+    val summary: String,
+    val domestic: List<DomesticItem> = emptyList(),
+    val global: List<GlobalItem> = emptyList(),
+    val sources: List<ResearchSource> = emptyList(),
+    val asOf: String,
+    val factDate: String? = null,
+    val degraded: Boolean = false,
+) {
+    data class DomesticItem(val title: String, val line: String)
+
+    data class GlobalItem(val title: String, val line: String, val sourceIds: List<String>)
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    data class ResearchSource(val id: String, val title: String, val url: String, val publisher: String? = null)
 }
 
 data class PostData(
