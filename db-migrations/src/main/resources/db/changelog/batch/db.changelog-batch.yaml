@@ -13,3 +13,31 @@ databaseChangeLog:
         - sqlFile:
             path: sql/0002_stockinfo.sql
             relativeToChangelogFile: true
+  - changeSet:
+      id: 0003-dart-industry
+      author: worker-batch
+      changes:
+        - sqlFile:
+            path: sql/0003_dart_industry.sql
+            relativeToChangelogFile: true
+  - changeSet:
+      id: 0004-sector-ksic
+      author: worker-batch
+      changes:
+        - sqlFile:
+            path: sql/0004_sector_ksic.sql
+            relativeToChangelogFile: true
+  - changeSet:
+      id: 0005-sector-version-origin
+      author: worker-batch
+      changes:
+        - sqlFile:
+            path: sql/0005_sector_version_origin.sql
+            relativeToChangelogFile: true
+  - changeSet:
+      id: 0006-sector-version-ksic-restore
+      author: worker-batch
+      changes:
+        - sqlFile:
+            path: sql/0006_sector_version_ksic_restore.sql
+            relativeToChangelogFile: true

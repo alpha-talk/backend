@@ -48,7 +48,11 @@ internal object StructuredLlmCodec {
                             "type" to "string",
                             "enum" to listOf("POSITIVE", "NEGATIVE", "NEUTRAL"),
                         ),
-                        "impact" to mapOf("type" to "string", "enum" to listOf("HIGH", "MEDIUM", "LOW")),
+                        "impact" to mapOf(
+                            "type" to "string",
+                            "enum" to listOf("HIGH", "MEDIUM", "LOW"),
+                            "description" to IMPACT_CRITERIA,
+                        ),
                         "confidence" to mapOf("type" to "number"),
                         "reason" to mapOf("type" to "string"),
                     ),
@@ -79,6 +83,7 @@ internal object StructuredLlmCodec {
         appendLine("먼저 한국 증시나 상장사에 실질적 영향이 있는 기사인지 marketRelevant로 판정하라. 단순 생활·사건·연예·스포츠 등 증시와 무관하면 false다.")
         appendLine("marketRelevant=true이면 후보 각각의 실제 관련 여부를 판정하고, 후보에 없어도 이 뉴스의 실질적 영향(정책·규제·수혜 포함)을 받는 상장사가 확실하면 stocks에 6자리 종목코드로 추가하라. 코드가 불확실한 종목은 넣지 않는다.")
         appendLine("scope는 특정 기업 뉴스면 STOCK, 업종 전반이면 SECTOR, 시장 전체면 MARKET이다. marketRelevant=false이면 모든 종목 후보도 relevant=false로 기각하라.")
+        appendLine("섹터마다 impact를 판정하라 — $IMPACT_CRITERIA")
     }
 
     fun digestPrompt(input: DigestInput): String = buildString {
@@ -127,6 +132,11 @@ internal object StructuredLlmCodec {
 
     private fun sentimentOf(node: JsonNode): Sentiment =
         runCatching { Sentiment.valueOf(node.path("sentiment").asText()) }.getOrDefault(Sentiment.NEUTRAL)
+
+    const val IMPACT_CRITERIA: String =
+        "HIGH는 그 업종의 실적·비용·수요에 직접적이고 단기적인 영향, " +
+            "MEDIUM은 영향 경로가 명확하지만 간접적이거나 중기적인 영향, " +
+            "LOW는 관련성은 있으나 영향 경로가 약하거나 일반적인 업계 언급이다."
 
     private val STOCK_CODE = Regex("\\d{6}")
 }

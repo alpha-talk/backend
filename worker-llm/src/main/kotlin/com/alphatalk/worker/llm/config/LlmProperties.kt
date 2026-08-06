@@ -35,7 +35,7 @@ data class LlmProperties(
 
     data class Sector(
         val fanoutCap: Int = 100,
-        val coverageStocks: List<String> = emptyList(),
+        val fanoutHardCap: Int = 500,
     )
 
     data class Models(
@@ -52,7 +52,7 @@ data class LlmProperties(
 
     data class ClaudeCli(
         val executable: String = "claude",
-        val model: String = "",
+        val model: String = "sonnet",
         val timeout: Duration = Duration.ofMinutes(2),
     )
 

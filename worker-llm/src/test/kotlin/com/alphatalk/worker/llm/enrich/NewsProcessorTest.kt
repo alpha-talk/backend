@@ -18,6 +18,7 @@ import com.alphatalk.worker.llm.publish.StreamPublisher
 import com.alphatalk.worker.llm.sector.SectorDirectory
 import com.alphatalk.worker.llm.sector.SectorInfo
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
+import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import org.junit.jupiter.api.Test
 import java.time.Clock
@@ -61,8 +62,9 @@ class NewsProcessorTest {
 
     private fun processor(
         fanoutCap: Int = 100,
-        coverage: List<String> = emptyList(),
+        fanoutHardCap: Int = 500,
         llm: LlmClient = defaultLlm(),
+        meters: MeterRegistry = SimpleMeterRegistry(),
     ) = NewsProcessor(
         store = store,
         assigner = ClusterAssigner(
@@ -77,10 +79,10 @@ class NewsProcessorTest {
         publisher = publisher,
         eventIds = { "ev-${ids.incrementAndGet()}".padEnd(26, '0') },
         mapper = jacksonObjectMapper(),
-        meters = SimpleMeterRegistry(),
+        meters = meters,
         transactions = TransactionRunner { it() },
         props = LlmProperties(
-            sector = LlmProperties.Sector(fanoutCap = fanoutCap, coverageStocks = coverage),
+            sector = LlmProperties.Sector(fanoutCap = fanoutCap, fanoutHardCap = fanoutHardCap),
         ),
         clock = clock,
     )
@@ -213,8 +215,6 @@ class NewsProcessorTest {
         assertEquals(true, store.stockLinks(store.clusters.keys.single()).single { it.code == "000660" }.rejected)
     }
 
-    private val bankCoverage = listOf("105560", "055550", "086790")
-
     @Test
     fun `SECTOR - 구성 종목 fan-out에 섹터·감성 표기`() {
         verdict = ClusterSummaryOutput(
@@ -224,7 +224,7 @@ class NewsProcessorTest {
             stocks = emptyList(),
             sectors = listOf(SectorVerdict("27", Sentiment.POSITIVE, Impact.HIGH, 0.9, "이자이익")),
         )
-        processor(coverage = bankCoverage).process(entry("a1", "기준금리 인상", codes = emptyList(), macroHint = "금리"))
+        processor().process(entry("a1", "기준금리 인상", codes = emptyList(), macroHint = "금리"))
         assertEquals(3, events.inserted.size)
         events.inserted.forEach {
             assertEquals("SECTOR", it.data.scope)
@@ -243,41 +243,14 @@ class NewsProcessorTest {
             stocks = listOf(StockVerdict("005930", true, Sentiment.POSITIVE, 0.9, "직접")),
             sectors = listOf(SectorVerdict("33", Sentiment.POSITIVE, Impact.HIGH, 0.9, "")),
         )
-        processor(coverage = listOf("005930", "000660")).process(entry("a1", "반도체 업황"))
+        processor().process(entry("a1", "반도체 업황"))
         val direct = events.inserted.single { it.code == "005930" }
         assertEquals("SECTOR", direct.data.scope)
         assertEquals("반도체", direct.data.sector?.name)
     }
 
     @Test
-    fun `SECTOR - 커버리지 교집합만 배달`() {
-        verdict = ClusterSummaryOutput(
-            summary = "금리 인상",
-            marketRelevant = true,
-            scope = NewsScope.SECTOR,
-            stocks = emptyList(),
-            sectors = listOf(SectorVerdict("27", Sentiment.POSITIVE, Impact.HIGH, 0.9, "")),
-        )
-        processor(coverage = listOf("105560")).process(entry("a1", "기준금리 인상", codes = emptyList(), macroHint = "금리"))
-        assertEquals(listOf("105560"), events.inserted.map { it.code })
-    }
-
-    @Test
-    fun `SECTOR - fan-out 상한 초과면 MARKET 강등`() {
-        verdict = ClusterSummaryOutput(
-            summary = "금리 인상",
-            marketRelevant = true,
-            scope = NewsScope.SECTOR,
-            stocks = emptyList(),
-            sectors = listOf(SectorVerdict("27", Sentiment.POSITIVE, Impact.HIGH, 0.9, "")),
-        )
-        processor(fanoutCap = 2, coverage = bankCoverage).process(entry("a1", "기준금리 인상", codes = emptyList(), macroHint = "금리"))
-        assertEquals(0, events.inserted.size)
-        assertEquals("MARKET", store.clusters.values.single().scope)
-    }
-
-    @Test
-    fun `SECTOR - impact LOW는 실시간 fan-out 없이 링크만`() {
+    fun `SECTOR - impact LOW도 상한 이내면 실시간 배달한다`() {
         verdict = ClusterSummaryOutput(
             summary = "소폭 영향",
             marketRelevant = true,
@@ -286,6 +259,285 @@ class NewsProcessorTest {
             sectors = listOf(SectorVerdict("27", Sentiment.NEUTRAL, Impact.LOW, 0.9, "")),
         )
         processor().process(entry("a1", "업계 소식", codes = emptyList(), macroHint = "금리"))
+        assertEquals(listOf("105560", "055550", "086790"), events.inserted.map { it.code })
+        assertTrue(store.sectorLinkRows.containsKey(store.clusters.keys.single() to "27"))
+        assertEquals("SECTOR", store.clusters.values.single().scope)
+    }
+
+    @Test
+    fun `SECTOR - 상한을 넘으면 LOW를 덜어내고 다시 배달한다`() {
+        verdict = ClusterSummaryOutput(
+            summary = "금리 인상",
+            marketRelevant = true,
+            scope = NewsScope.SECTOR,
+            stocks = emptyList(),
+            sectors = listOf(
+                SectorVerdict("27", Sentiment.NEUTRAL, Impact.LOW, 0.9, "은행 3종목"),
+                SectorVerdict("33", Sentiment.POSITIVE, Impact.HIGH, 0.9, "반도체 2종목"),
+            ),
+        )
+        val meters = SimpleMeterRegistry()
+        processor(fanoutCap = 4, meters = meters)
+            .process(entry("a1", "기준금리 인상", codes = emptyList(), macroHint = "금리"))
+        assertEquals(listOf("005930", "000660"), events.inserted.map { it.code })
+        assertEquals(1.0, meters.counter("sector.fanout.degraded").count())
+        assertEquals("SECTOR", store.clusters.values.single().scope)
+    }
+
+    @Test
+    fun `SECTOR - 같은 섹터를 impact 다르게 두 번 판정하면 LOW가 먼저 와도 높은 쪽을 쓴다`() {
+        assertHighestSectorVerdictWins(
+            listOf(
+                SectorVerdict("33", Sentiment.NEUTRAL, Impact.LOW, 0.5, "중복 판정"),
+                SectorVerdict("33", Sentiment.POSITIVE, Impact.HIGH, 0.9, ""),
+            ),
+        )
+    }
+
+    @Test
+    fun `SECTOR - 같은 섹터 중복 판정은 HIGH가 먼저 와도 저장 행까지 높은 쪽으로 남는다`() {
+        assertHighestSectorVerdictWins(
+            listOf(
+                SectorVerdict("33", Sentiment.POSITIVE, Impact.HIGH, 0.9, ""),
+                SectorVerdict("33", Sentiment.NEUTRAL, Impact.LOW, 0.5, "중복 판정"),
+            ),
+        )
+    }
+
+    private fun assertHighestSectorVerdictWins(sectors: List<SectorVerdict>) {
+        verdict = ClusterSummaryOutput(
+            summary = "반도체 영향",
+            marketRelevant = true,
+            scope = NewsScope.SECTOR,
+            stocks = emptyList(),
+            sectors = sectors,
+        )
+        processor(fanoutCap = 1).process(entry("a1", "반도체 이슈", codes = emptyList()))
+
+        assertEquals(listOf("005930", "000660"), events.inserted.map { it.code })
+        assertTrue(events.inserted.all { it.data.sentiment == "POSITIVE" })
+        assertEquals(
+            Triple("POSITIVE", 0.9, "HIGH"),
+            store.sectorLinkRows.getValue(store.clusters.keys.single() to "33"),
+        )
+    }
+
+    @Test
+    fun `SECTOR - 하드 상한 억제는 섹터 fan-out만 막고 소스 후보 종목은 발행한다`() {
+        verdict = ClusterSummaryOutput(
+            summary = "반도체 이슈",
+            marketRelevant = true,
+            scope = NewsScope.SECTOR,
+            stocks = listOf(StockVerdict("005930", true, Sentiment.POSITIVE, 0.9, "소스 후보")),
+            sectors = listOf(SectorVerdict("27", Sentiment.NEGATIVE, Impact.HIGH, 0.9, "")),
+        )
+        val meters = SimpleMeterRegistry()
+        processor(fanoutCap = 2, fanoutHardCap = 2, meters = meters)
+            .process(entry("a1", "반도체 이슈", codes = listOf("005930")))
+
+        assertEquals(listOf("005930"), events.inserted.map { it.code })
+        assertEquals("POSITIVE", events.inserted.single().data.sentiment)
+        assertEquals(1.0, meters.counter("sector.fanout.suppressed").count())
+        assertEquals("SECTOR", store.clusters.values.single().scope)
+    }
+
+    @Test
+    fun `SECTOR - LLM이 후보 밖에서 발견한 종목은 상한 예외가 아니다`() {
+        verdict = ClusterSummaryOutput(
+            summary = "반도체 이슈",
+            marketRelevant = true,
+            scope = NewsScope.SECTOR,
+            stocks = listOf(StockVerdict("005930", true, Sentiment.POSITIVE, 0.9, "LLM 기억으로 추가")),
+            sectors = listOf(SectorVerdict("27", Sentiment.NEGATIVE, Impact.HIGH, 0.9, "")),
+        )
+        val meters = SimpleMeterRegistry()
+        processor(fanoutCap = 2, fanoutHardCap = 2, meters = meters)
+            .process(entry("a1", "반도체 이슈", codes = emptyList()))
+
+        assertTrue(events.inserted.isEmpty())
+        assertEquals(1.0, meters.counter("sector.fanout.suppressed").count())
+        assertEquals("SECTOR", store.clusters.values.single().scope)
+    }
+
+    @Test
+    fun `SECTOR - 섹터 밖 발견 종목은 상한 계산에 더해진다`() {
+        verdict = ClusterSummaryOutput(
+            summary = "반도체 이슈",
+            marketRelevant = true,
+            scope = NewsScope.SECTOR,
+            stocks = listOf(StockVerdict("105560", true, Sentiment.POSITIVE, 0.9, "섹터 밖 발견")),
+            sectors = listOf(SectorVerdict("33", Sentiment.NEGATIVE, Impact.HIGH, 0.9, "2종목")),
+        )
+        val meters = SimpleMeterRegistry()
+        processor(fanoutCap = 2, meters = meters).process(entry("a1", "반도체 이슈", codes = emptyList()))
+
+        assertEquals(1.0, meters.counter("sector.fanout.tier2").count())
+        assertEquals(listOf("105560", "005930", "000660"), events.inserted.map { it.code })
+    }
+
+    @Test
+    fun `SECTOR - LOW 강등 후에도 하드 상한 이내의 발견 종목은 발행한다`() {
+        verdict = ClusterSummaryOutput(
+            summary = "은행 이슈",
+            marketRelevant = true,
+            scope = NewsScope.SECTOR,
+            stocks = listOf(StockVerdict("005930", true, Sentiment.POSITIVE, 0.9, "섹터 밖 발견")),
+            sectors = listOf(SectorVerdict("27", Sentiment.NEUTRAL, Impact.LOW, 0.5, "3종목")),
+        )
+        val meters = SimpleMeterRegistry()
+        processor(fanoutCap = 3, meters = meters).process(entry("a1", "은행 이슈", codes = emptyList()))
+
+        assertEquals(listOf("005930"), events.inserted.map { it.code })
+        assertEquals(1.0, meters.counter("sector.fanout.degraded").count())
+        assertEquals(0.0, meters.counter("sector.fanout.suppressed").count())
+    }
+
+    @Test
+    fun `SECTOR - material 구성원이 전부 예외 종목이면 억제가 아니라 강등이다`() {
+        verdict = ClusterSummaryOutput(
+            summary = "반도체 이슈",
+            marketRelevant = true,
+            scope = NewsScope.SECTOR,
+            stocks = listOf(
+                StockVerdict("005930", true, Sentiment.POSITIVE, 0.9, "소스 후보"),
+                StockVerdict("000660", true, Sentiment.POSITIVE, 0.9, "소스 후보"),
+            ),
+            sectors = listOf(
+                SectorVerdict("33", Sentiment.NEGATIVE, Impact.HIGH, 0.9, "구성원이 전부 소스 후보"),
+                SectorVerdict("27", Sentiment.NEUTRAL, Impact.LOW, 0.5, "3종목"),
+            ),
+        )
+        val meters = SimpleMeterRegistry()
+        processor(fanoutCap = 2, meters = meters)
+            .process(entry("a1", "반도체 이슈", codes = listOf("005930", "000660")))
+
+        assertEquals(1.0, meters.counter("sector.fanout.degraded").count())
+        assertEquals(0.0, meters.counter("sector.fanout.suppressed").count())
+        assertEquals(listOf("005930", "000660"), events.inserted.map { it.code })
+    }
+
+    @Test
+    fun `SECTOR - 기각된 소스 후보가 섹터 구성원이면 상한에 포함한다`() {
+        verdict = ClusterSummaryOutput(
+            summary = "반도체 이슈",
+            marketRelevant = true,
+            scope = NewsScope.SECTOR,
+            stocks = listOf(StockVerdict("005930", false, Sentiment.NEUTRAL, 0.5, "기각")),
+            sectors = listOf(SectorVerdict("33", Sentiment.NEGATIVE, Impact.HIGH, 0.9, "2종목")),
+        )
+        val meters = SimpleMeterRegistry()
+        processor(fanoutCap = 1, meters = meters)
+            .process(entry("a1", "반도체 이슈", codes = listOf("005930")))
+
+        assertEquals(1.0, meters.counter("sector.fanout.tier2").count())
+    }
+
+    @Test
+    fun `SECTOR - 억제된 발견 종목도 클러스터 링크는 남겨 후속 기사가 합류한다`() {
+        verdict = ClusterSummaryOutput(
+            summary = "반도체 이슈",
+            marketRelevant = true,
+            scope = NewsScope.SECTOR,
+            stocks = listOf(StockVerdict("105560", true, Sentiment.POSITIVE, 0.9, "LLM 발견")),
+            sectors = listOf(SectorVerdict("27", Sentiment.NEGATIVE, Impact.HIGH, 0.9, "3종목")),
+        )
+        val p = processor(fanoutCap = 1, fanoutHardCap = 1)
+        p.process(entry("a1", "반도체 이슈", codes = emptyList()))
+
+        assertTrue(events.inserted.isEmpty())
+        assertEquals(1, store.clusters.size)
+
+        p.process(entry("a2", "[속보] 반도체 이슈", codes = listOf("105560")))
+
+        assertEquals(1, store.clusters.size, "링크가 없어 새 클러스터가 생겼다")
+        val event = events.inserted.single()
+        assertEquals("105560", event.code)
+        assertEquals("SECTOR", event.data.scope)
+        assertEquals("27", event.data.sector?.code)
+        assertEquals("POSITIVE", event.data.sentiment)
+        val link = store.stockLinks(store.clusters.keys.single()).single { it.code == "105560" }
+        assertEquals("POSITIVE", link.sentiment)
+        assertEquals(0.9, link.confidence)
+    }
+
+    @Test
+    fun `SECTOR - 발견 종목이 섹터 구성원이면 상한에 한 번만 센다`() {
+        verdict = ClusterSummaryOutput(
+            summary = "반도체 이슈",
+            marketRelevant = true,
+            scope = NewsScope.SECTOR,
+            stocks = listOf(StockVerdict("005930", true, Sentiment.POSITIVE, 0.9, "섹터 구성원과 겹침")),
+            sectors = listOf(SectorVerdict("33", Sentiment.NEGATIVE, Impact.LOW, 0.9, "2종목")),
+        )
+        val meters = SimpleMeterRegistry()
+        processor(fanoutCap = 2, meters = meters).process(entry("a1", "반도체 이슈", codes = emptyList()))
+
+        assertEquals(0.0, meters.counter("sector.fanout.tier2").count())
+        assertEquals(listOf("005930", "000660"), events.inserted.map { it.code })
+    }
+
+    @Test
+    fun `SECTOR - 상한 예외인 소스 후보는 섹터 구성원이어도 상한 계산에서 빠진다`() {
+        verdict = ClusterSummaryOutput(
+            summary = "반도체 이슈",
+            marketRelevant = true,
+            scope = NewsScope.SECTOR,
+            stocks = listOf(StockVerdict("005930", true, Sentiment.POSITIVE, 0.9, "소스 후보")),
+            sectors = listOf(SectorVerdict("33", Sentiment.NEGATIVE, Impact.LOW, 0.9, "2종목")),
+        )
+        val meters = SimpleMeterRegistry()
+        processor(fanoutCap = 1, meters = meters)
+            .process(entry("a1", "반도체 이슈", codes = listOf("005930")))
+
+        assertEquals(0.0, meters.counter("sector.fanout.tier2").count())
+        assertEquals(listOf("005930", "000660"), events.inserted.map { it.code })
+    }
+
+    @Test
+    fun `SECTOR - LOW뿐인데 상한을 넘으면 강등이 아니라 억제로 집계한다`() {
+        verdict = ClusterSummaryOutput(
+            summary = "업계 소식",
+            marketRelevant = true,
+            scope = NewsScope.SECTOR,
+            stocks = emptyList(),
+            sectors = listOf(SectorVerdict("27", Sentiment.NEUTRAL, Impact.LOW, 0.9, "")),
+        )
+        val meters = SimpleMeterRegistry()
+        processor(fanoutCap = 2, meters = meters).process(entry("a1", "업계 소식", codes = emptyList()))
+
+        assertEquals(0, events.inserted.size)
+        assertEquals(1.0, meters.counter("sector.fanout.suppressed").count())
+        assertEquals(0.0, meters.counter("sector.fanout.degraded").count())
+    }
+
+    @Test
+    fun `SECTOR - LOW를 덜어낸 게 없으면 degraded로 집계하지 않는다`() {
+        verdict = ClusterSummaryOutput(
+            summary = "금리 인상",
+            marketRelevant = true,
+            scope = NewsScope.SECTOR,
+            stocks = emptyList(),
+            sectors = listOf(SectorVerdict("27", Sentiment.POSITIVE, Impact.HIGH, 0.9, "")),
+        )
+        val meters = SimpleMeterRegistry()
+        processor(fanoutCap = 2, meters = meters).process(entry("a1", "기준금리 인상", codes = emptyList()))
+
+        assertEquals(3, events.inserted.size)
+        assertEquals(0.0, meters.counter("sector.fanout.degraded").count())
+        assertEquals(0.0, meters.counter("sector.fanout.suppressed").count())
+    }
+
+    @Test
+    fun `SECTOR - MEDIUM 이상만으로도 하드 상한을 넘으면 실시간 발행을 억제한다`() {
+        verdict = ClusterSummaryOutput(
+            summary = "금리 인상",
+            marketRelevant = true,
+            scope = NewsScope.SECTOR,
+            stocks = emptyList(),
+            sectors = listOf(SectorVerdict("27", Sentiment.POSITIVE, Impact.HIGH, 0.9, "")),
+        )
+        processor(fanoutCap = 2, fanoutHardCap = 2)
+            .process(entry("a1", "기준금리 인상", codes = emptyList(), macroHint = "금리"))
         assertEquals(0, events.inserted.size)
         assertTrue(store.sectorLinkRows.containsKey(store.clusters.keys.single() to "27"))
         assertEquals("SECTOR", store.clusters.values.single().scope)

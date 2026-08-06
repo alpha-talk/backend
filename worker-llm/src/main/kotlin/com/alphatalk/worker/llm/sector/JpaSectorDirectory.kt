@@ -7,6 +7,8 @@ import jakarta.persistence.Table
 import org.hibernate.annotations.JdbcTypeCode
 import org.hibernate.type.SqlTypes
 import org.springframework.data.jpa.repository.JpaRepository
+import org.springframework.data.jpa.repository.Query
+import org.springframework.data.repository.query.Param
 import org.springframework.stereotype.Repository
 
 @Entity
@@ -35,11 +37,28 @@ class StockMasterEntity(
 )
 
 interface SectorJpaRepository : JpaRepository<SectorEntity, String> {
-    fun findAllByOrderByCodeAsc(): List<SectorEntity>
+    @Query(
+        """
+        select s from SectorEntity s
+        where s.code in (
+            select distinct m.sectorCode from StockMasterEntity m
+            where m.isActive = true and m.sectorCode is not null
+        )
+        order by s.code asc
+        """,
+    )
+    fun findAllInUse(): List<SectorEntity>
 }
 
 interface StockMasterJpaRepository : JpaRepository<StockMasterEntity, String> {
-    fun findByIsActiveTrueAndSectorCodeOrderByCodeAsc(sectorCode: String): List<StockMasterEntity>
+    @Query(
+        """
+        select trim(m.code) from StockMasterEntity m
+        where m.isActive = true and m.sectorCode = :sectorCode
+        order by m.code asc
+        """,
+    )
+    fun findActiveMemberCodes(@Param("sectorCode") sectorCode: String): List<String>
 }
 
 @Repository
@@ -49,16 +68,22 @@ class JpaSectorDirectory(
 ) : SectorDirectory {
 
     override fun allSectors(): List<SectorInfo> =
-        sectors.findAllByOrderByCodeAsc().map { SectorInfo(code = it.code, name = it.name) }
+        sectors.findAllInUse()
+            .map { SectorInfo(code = it.code, name = it.name) }
+            .also {
+                check(it.isNotEmpty()) {
+                    "업종 축이 비어 있다 — worker-batch industry_sync가 sector·stock_master.sector_code를 적재해야 한다"
+                }
+            }
 
     override fun sectorName(sectorCode: String): String? =
         sectors.findById(sectorCode).orElse(null)?.name
 
     override fun memberCodes(sectorCode: String): List<String> =
-        stocks.findByIsActiveTrueAndSectorCodeOrderByCodeAsc(sectorCode).map { it.code.trim() }
+        stocks.findActiveMemberCodes(sectorCode)
 
     override fun stockName(stockCode: String): String? =
-        stocks.findById(stockCode).orElse(null)?.name
+        stocks.findById(stockCode).orElse(null)?.takeIf { it.isActive }?.name
 
     override fun sectorOf(stockCode: String): String? =
         stocks.findById(stockCode).orElse(null)?.sectorCode

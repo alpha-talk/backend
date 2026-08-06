@@ -2,7 +2,6 @@ package com.alphatalk.worker.batch.master
 
 import com.alphatalk.kis.KisClientException
 import com.alphatalk.kis.master.KisMarket
-import com.alphatalk.kis.master.KisSector
 import com.alphatalk.kis.master.KisStockMaster
 import com.alphatalk.worker.batch.job.BatchJobRunStore
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
@@ -22,10 +21,8 @@ class StockMasterSyncJobTest {
         private val failing: Set<KisMarket> = emptySet(),
         private val failuresBeforeSuccess: MutableMap<KisMarket, Int> = mutableMapOf(),
         private val corrupt: Set<KisMarket> = emptySet(),
-        private var corruptSectorTimes: Int = 0,
     ) : MasterFileFetcher {
         val requested = mutableListOf<KisMarket>()
-        var sectorRequests = 0
 
         override fun fetch(market: KisMarket): ByteArray {
             requested += market
@@ -40,27 +37,16 @@ class StockMasterSyncJobTest {
             return if (market in corrupt) bytes + "짧은 줄\n".toByteArray() else bytes
         }
 
-        override fun fetchSectors(): ByteArray {
-            sectorRequests += 1
-            val bytes = javaClass.getResourceAsStream("/fixtures/idxcode_sample.mst")!!.readBytes()
-            if (corruptSectorTimes > 0) {
-                corruptSectorTimes -= 1
-                return bytes + "짧은 줄\n".toByteArray()
-            }
-            return bytes
-        }
     }
 
     private class RecordingStockStore(
         private val onDeactivate: (() -> Unit)? = null,
-        private val callOrder: MutableList<String>? = null,
     ) : StockMasterStore {
         val upserted = mutableListOf<KisStockMaster>()
         var deactivateCalls = 0
         var deactivatedWith: List<String> = emptyList()
 
         override fun upsertAll(stocks: List<KisStockMaster>): Int {
-            callOrder?.add("stocks")
             upserted += stocks
             return stocks.size
         }
@@ -73,17 +59,6 @@ class StockMasterSyncJobTest {
         }
     }
 
-    private class RecordingSectorStore(
-        private val callOrder: MutableList<String>? = null,
-    ) : SectorStore {
-        val upserted = mutableListOf<KisSector>()
-
-        override fun upsertAll(sectors: List<KisSector>): Int {
-            callOrder?.add("sectors")
-            upserted += sectors
-            return sectors.size
-        }
-    }
 
     private class RecordingRuns(private val startResult: Long?) : BatchJobRunStore {
         var succeeded: Triple<Long, Int, Int>? = null
@@ -104,12 +79,10 @@ class StockMasterSyncJobTest {
         files: MasterFileFetcher,
         stocks: StockMasterStore,
         runs: BatchJobRunStore,
-        sectors: SectorStore = RecordingSectorStore(),
         meters: SimpleMeterRegistry = SimpleMeterRegistry(),
     ) = StockMasterSyncJob(
         files,
         stocks,
-        sectors,
         runs,
         meters,
         clock = { startedAt },
@@ -130,104 +103,6 @@ class StockMasterSyncJobTest {
     }
 
     @Test
-    fun `업종 마스터를 함께 적재한다`() {
-        val sectors = RecordingSectorStore()
-
-        job(RecordingFetcher(), RecordingStockStore(), RecordingRuns(startResult = 1L), sectors).syncOnce()
-
-        assertTrue(sectors.upserted.isNotEmpty())
-        assertEquals("제조", sectors.upserted.single { it.code == "00027" }.name)
-        assertEquals("제조", sectors.upserted.single { it.code == "11009" }.name)
-    }
-
-    @Test
-    fun `적재한 업종은 모두 구성 종목을 가진다`() {
-        val stocks = RecordingStockStore()
-        val sectors = RecordingSectorStore()
-
-        job(RecordingFetcher(), stocks, RecordingRuns(startResult = 1L), sectors).syncOnce()
-
-        val referenced = stocks.upserted.mapNotNull { it.sectorCode }.toSet()
-        val stored = sectors.upserted.map { it.code }.toSet()
-        assertTrue(stored.isNotEmpty())
-        assertEquals(referenced, stored, "구성 종목이 없는 업종이 섞였다: ${stored - referenced}")
-    }
-
-    @Test
-    fun `종목이 참조하지 않는 지수 항목은 적재하지 않는다`() {
-        val sectors = RecordingSectorStore()
-
-        job(RecordingFetcher(), RecordingStockStore(), RecordingRuns(startResult = 1L), sectors).syncOnce()
-
-        val stored = sectors.upserted.map { it.code }.toSet()
-        assertFalse("00001" in stored, "지수 '종합'이 업종으로 적재됐다")
-        assertFalse("11001" in stored, "지수 'KOSDAQ'이 업종으로 적재됐다")
-    }
-
-    @Test
-    fun `업종 파일에 읽지 못한 행이 있으면 한 번 더 받아 회복한다`() {
-        val files = RecordingFetcher(corruptSectorTimes = 1)
-        val sectors = RecordingSectorStore()
-
-        job(files, RecordingStockStore(), RecordingRuns(startResult = 1L), sectors).syncOnce()
-
-        assertEquals(2, files.sectorRequests)
-        assertTrue(sectors.upserted.isNotEmpty())
-    }
-
-    @Test
-    fun `업종 파일이 계속 불완전해도 종목 적재는 지킨다`() {
-        val files = RecordingFetcher(corruptSectorTimes = 2)
-        val store = RecordingStockStore()
-        val meters = SimpleMeterRegistry()
-
-        val ok = job(files, store, RecordingRuns(startResult = 1L), RecordingSectorStore(), meters).syncOnce()
-
-        assertEquals(6, ok)
-        assertTrue(store.upserted.isNotEmpty(), "업종 실패가 종목 적재를 막았다")
-        assertEquals(6.0, meters.counter("batch.stock.master.synced").count())
-        assertEquals(1.0, meters.counter("batch.sector.sync.failed").count())
-    }
-
-    @Test
-    fun `업종 동기화가 실패하면 잡을 성공으로 남기지 않아 당일 재시도가 열린다`() {
-        val runs = RecordingRuns(startResult = 1L)
-        val sectors = RecordingSectorStore()
-
-        job(RecordingFetcher(corruptSectorTimes = 2), RecordingStockStore(), runs, sectors).syncOnce()
-
-        assertEquals(null, runs.succeeded, "업종 실패를 성공으로 기록했다")
-        assertEquals(1L, runs.failed?.first)
-        assertTrue(runs.failed?.second?.contains("sector") == true)
-        assertTrue(sectors.upserted.isEmpty())
-    }
-
-    @Test
-    fun `업종 단계의 Error는 삼키지 않고 전파한다`() {
-        val exploding = object : SectorStore {
-            override fun upsertAll(sectors: List<KisSector>): Int = throw StackOverflowError("boom")
-        }
-
-        assertFailsWith<StackOverflowError> {
-            job(RecordingFetcher(), RecordingStockStore(), RecordingRuns(startResult = 1L), exploding).syncOnce()
-        }
-    }
-
-    @Test
-    fun `종목을 먼저 저장한 뒤 업종을 동기화한다`() {
-        val order = mutableListOf<String>()
-
-        job(
-            RecordingFetcher(),
-            RecordingStockStore(callOrder = order),
-            RecordingRuns(startResult = 1L),
-            RecordingSectorStore(callOrder = order),
-        ).syncOnce()
-
-        assertEquals(listOf("stocks", "sectors"), order)
-    }
-
-    @Test
     fun `이미 오늘 성공했으면 마스터를 내려받지 않는다`() {
         val files = RecordingFetcher()
         val store = RecordingStockStore()
@@ -236,7 +111,6 @@ class StockMasterSyncJobTest {
 
         assertEquals(0, ok)
         assertTrue(files.requested.isEmpty())
-        assertEquals(0, files.sectorRequests)
     }
 
     @Test

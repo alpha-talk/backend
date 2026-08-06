@@ -4,5 +4,4 @@ import com.alphatalk.kis.master.KisMarket
 
 interface MasterFileFetcher {
     fun fetch(market: KisMarket): ByteArray
-    fun fetchSectors(): ByteArray
 }

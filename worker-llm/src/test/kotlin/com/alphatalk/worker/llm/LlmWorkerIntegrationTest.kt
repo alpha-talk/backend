@@ -8,14 +8,22 @@ import com.alphatalk.contracts.envelope.StreamCategory
 import com.alphatalk.contracts.envelope.StreamData
 import com.alphatalk.contracts.queue.IngestQueueEntry
 import com.alphatalk.contracts.queue.IngestType
+import com.alphatalk.worker.llm.article.ArticleFetcher
 import com.alphatalk.worker.llm.article.ArticleRequestGate
+import com.alphatalk.worker.llm.cluster.ClusterAssigner
 import com.alphatalk.worker.llm.cluster.ClusterStore
 import com.alphatalk.worker.llm.config.LlmProperties
 import com.alphatalk.worker.llm.consume.IngestConsumer
+import com.alphatalk.worker.llm.enrich.ClusterSummarizer
 import com.alphatalk.worker.llm.enrich.DigestProcessor
 import com.alphatalk.worker.llm.enrich.NewsProcessor
 import com.alphatalk.worker.llm.enrich.TransactionRunner
+import com.alphatalk.worker.llm.persist.EventIdGenerator
 import com.alphatalk.worker.llm.persist.StreamEventStore
+import com.alphatalk.worker.llm.publish.StreamPublisher
+import com.alphatalk.worker.llm.sector.SectorDirectory
+import com.fasterxml.jackson.databind.ObjectMapper
+import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -48,7 +56,6 @@ import kotlin.test.assertTrue
     properties = [
         "alphatalk.llm.consumer-block=300ms",
         "alphatalk.llm.cluster.similarity-threshold=0.8",
-        "alphatalk.llm.sector.coverage-stocks=105560,055550,086790",
         "alphatalk.llm.article.min-host-interval=100ms",
     ],
 )
@@ -95,18 +102,64 @@ class LlmWorkerIntegrationTest {
     @Autowired
     private lateinit var transactions: TransactionRunner
 
+    @Autowired
+    private lateinit var clusterAssigner: ClusterAssigner
+
+    @Autowired
+    private lateinit var articleFetcher: ArticleFetcher
+
+    @Autowired
+    private lateinit var summarizer: ClusterSummarizer
+
+    @Autowired
+    private lateinit var sectorDirectory: SectorDirectory
+
+    @Autowired
+    private lateinit var streamPublisher: StreamPublisher
+
+    @Autowired
+    private lateinit var eventIdGenerator: EventIdGenerator
+
+    @Autowired
+    private lateinit var objectMapper: ObjectMapper
+
+    private fun newsProcessorWithFanoutCap(
+        cap: Int,
+        hardCap: Int = 500,
+        meters: MeterRegistry = SimpleMeterRegistry(),
+    ) = NewsProcessor(
+        store = clusterStore,
+        assigner = clusterAssigner,
+        fetcher = articleFetcher,
+        summarizer = summarizer,
+        sectors = sectorDirectory,
+        events = eventStore,
+        publisher = streamPublisher,
+        eventIds = eventIdGenerator,
+        mapper = objectMapper,
+        meters = meters,
+        transactions = transactions,
+        props = LlmProperties(sector = LlmProperties.Sector(fanoutCap = cap, fanoutHardCap = hardCap)),
+    )
+
     @BeforeEach
     fun reset() {
         redisTemplate.execute { it.serverCommands().flushAll() }
         jdbc.jdbcTemplate.execute(
-            "TRUNCATE news_article, news_cluster_stock, news_cluster_sector, news_cluster, stream_event, stock_alias, stock_master, sector CASCADE",
+            "TRUNCATE news_article, news_cluster_stock, news_cluster_sector, news_cluster, stream_event, " +
+                "stock_alias, stock_master, sector CASCADE",
         )
-        jdbc.jdbcTemplate.execute("INSERT INTO sector (code, name) VALUES ('33', '반도체'), ('27', '은행')")
+        jdbc.jdbcTemplate.execute(
+            "INSERT INTO sector (code, name, level) VALUES ('261', '반도체', 3), ('641', '은행', 3)",
+        )
         jdbc.jdbcTemplate.execute(
             """
-            INSERT INTO stock_master (code, name, market, sector_code) VALUES
-            ('005930', '삼성전자', 'KOSPI', '33'), ('000660', 'SK하이닉스', 'KOSPI', '33'),
-            ('105560', 'KB금융', 'KOSPI', '27')
+            INSERT INTO stock_master (code, name, market, sector_code, dart_induty_code) VALUES
+            ('005930', '삼성전자', 'KOSPI', '261', '26120'),
+            ('000660', 'SK하이닉스', 'KOSPI', '261', '26120'),
+            ('105560', 'KB금융', 'KOSPI', '641', '64110'),
+            ('055550', '신한지주', 'KOSPI', '641', '64110'),
+            ('086790', '하나금융지주', 'KOSPI', '641', '64110')
             """,
         )
         consumer.ensureGroup()
@@ -178,7 +231,7 @@ class LlmWorkerIntegrationTest {
             assertNotNull(message)
             assertTrue(message.contains("\"POSITIVE\""))
         } finally {
-            listener.stop()
+            listener.destroy()
         }
     }
 
@@ -307,18 +360,75 @@ class LlmWorkerIntegrationTest {
 
     @Test
     fun `N6 DoD - 매크로 기사 - 섹터 구성 종목 방으로 SECTOR 이벤트 fan-out`() {
-        xadd(newsEntry("hankyung:m1", "기준금리 인상에 은행 이자이익 개선 기대", codes = emptyList(), macroHint = "금리"))
-        drain()
+        val received = subscribe(Channels.stream("105560"), Channels.stream("055550"), Channels.stream("086790"))
+        try {
+            xadd(newsEntry("hankyung:m1", "기준금리 인상에 은행 이자이익 개선 기대", codes = emptyList(), macroHint = "금리"))
+            drain()
 
-        assertEquals(1, newsEventCount("105560"))
-        assertEquals(0, newsEventCount("005930"))
-        val payload = jdbc.queryForObject(
-            "SELECT payload::text FROM stream_event WHERE code = '105560'",
-            emptyMap<String, Any>(),
-            String::class.java,
-        )!!
-        assertTrue(payload.contains("\"SECTOR\""))
-        assertTrue(payload.contains("은행"))
+            assertEquals(listOf("055550", "086790", "105560"), sectorEventCodes())
+            assertEquals(0, newsEventCount("005930"))
+            val payload = jdbc.queryForObject(
+                "SELECT payload::text FROM stream_event WHERE code = '105560'",
+                emptyMap<String, Any>(),
+                String::class.java,
+            )!!
+            assertTrue(payload.contains("\"SECTOR\""))
+            assertTrue(payload.contains("은행"))
+            assertEquals(
+                setOf(Channels.stream("055550"), Channels.stream("086790"), Channels.stream("105560")),
+                received.awaitChannels(3),
+            )
+        } finally {
+            received.close()
+        }
+    }
+
+    @Test
+    fun `N6 - MEDIUM 이상만으로도 하드 상한을 넘으면 실시간 발행을 억제한다`() {
+        val meters = SimpleMeterRegistry()
+        val processor = newsProcessorWithFanoutCap(cap = 2, hardCap = 2, meters = meters)
+
+        processor.process(newsEntry("hankyung:cap1", "기준금리 인상에 은행 이자이익 개선 기대", codes = emptyList()))
+
+        assertTrue(sectorEventCodes().isEmpty())
+        assertEquals(1.0, meters.counter("sector.fanout.suppressed").count())
+        assertEquals(
+            "SECTOR",
+            jdbc.queryForObject("SELECT scope FROM news_cluster", emptyMap<String, Any>(), String::class.java),
+        )
+        assertEquals(
+            1,
+            jdbc.queryForObject("SELECT count(*) FROM news_cluster_sector", emptyMap<String, Any>(), Long::class.java),
+        )
+    }
+
+    private fun sectorEventCodes(): List<String> = jdbc.queryForList(
+        "SELECT code FROM stream_event WHERE type = 'NEWS' AND payload ->> 'scope' = 'SECTOR' ORDER BY code",
+        emptyMap<String, Any>(),
+        String::class.java,
+    ).map(String::trim)
+
+    private fun subscribe(vararg channels: String): Subscription {
+        val queue = LinkedBlockingQueue<String>()
+        val container = RedisMessageListenerContainer().apply {
+            setConnectionFactory(redisTemplate.connectionFactory!!)
+            channels.forEach { channel ->
+                addMessageListener({ message, _ -> queue.add(String(message.channel)) }, ChannelTopic(channel))
+            }
+            afterPropertiesSet()
+            start()
+        }
+        return Subscription(queue, container)
+    }
+
+    private class Subscription(
+        private val queue: LinkedBlockingQueue<String>,
+        private val container: RedisMessageListenerContainer,
+    ) {
+        fun awaitChannels(count: Int): Set<String> =
+            (0 until count).mapNotNull { queue.poll(5, TimeUnit.SECONDS) }.toSet()
+
+        fun close() = container.destroy()
     }
 
     @Test
