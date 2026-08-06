@@ -105,7 +105,7 @@ class NewsProcessor(
             val finalScope = when (verdict.scope) {
                 NewsScope.STOCK -> persistStockScope(cluster, verdict, relevantStocks, publications)
                 NewsScope.SECTOR ->
-                    persistSectorScope(cluster, verdict, sectorVerdicts, relevantStocks, publications)
+                    persistSectorScope(cluster, verdict, sectorVerdicts, relevantStocks, candidates, publications)
                 NewsScope.MARKET -> NewsScope.MARKET
             }
             if (finalScope == null) {
@@ -136,13 +136,17 @@ class NewsProcessor(
         verdict: ClusterSummaryOutput,
         sectorVerdicts: List<SectorVerdict>,
         relevantStocks: List<StockVerdict>,
+        sourceCandidates: Set<String>,
         publications: MutableList<PendingPublication>,
     ): NewsScope? {
         if (relevantStocks.isEmpty() && sectorVerdicts.isEmpty()) return null
-        val fanout = resolveFanout(cluster.id, sectorVerdicts)
+        val (sourced, discovered) = relevantStocks.partition { it.code in sourceCandidates }
+        val plan = resolveFanout(cluster.id, sectorVerdicts, discovered.size)
 
-        val direct = relevantStocks.map { it.code }.toSet()
-        relevantStocks.forEach { stock ->
+        val published = mutableSetOf<String>()
+        val capExempt = sourced + if (plan.includeDiscovered) discovered else emptyList()
+        capExempt.forEach { stock ->
+            published += stock.code
             persistStockEvent(
                 cluster,
                 verdict.summary,
@@ -153,7 +157,7 @@ class NewsProcessor(
                 sectorRefOf(stock.code),
             )?.let(publications::add)
         }
-        fanout.filterKeys { it !in direct }.forEach { (code, ctx) ->
+        plan.members.filterKeys { it !in published }.forEach { (code, ctx) ->
             val (sv, ref) = ctx
             persistStockEvent(cluster, verdict.summary, code, sv.sentiment.name, sv.confidence, NewsScope.SECTOR, ref)
                 ?.let(publications::add)
@@ -164,32 +168,36 @@ class NewsProcessor(
     private fun normalizeSectors(verdicts: List<SectorVerdict>): List<SectorVerdict> =
         verdicts.sortedBy { it.impact.ordinal }.distinctBy(SectorVerdict::sectorCode)
 
-    private fun resolveFanout(
-        clusterId: String,
-        verdicts: List<SectorVerdict>,
-    ): Map<String, Pair<SectorVerdict, SectorRef>> {
+    private fun resolveFanout(clusterId: String, verdicts: List<SectorVerdict>, discovered: Int): FanoutPlan {
         val all = memberFanout(verdicts)
-        if (all.size <= fanoutCap) return all
+        if (all.size + discovered <= fanoutCap) return FanoutPlan(all, includeDiscovered = true)
 
         meters.counter("sector.fanout.tier2").increment()
         val material = all.filterValues { it.first.impact != Impact.LOW }
-        if (material.isEmpty() || material.size > fanoutHardCap) {
+        val materialTotal = material.size + discovered
+        if (materialTotal == 0 || materialTotal > fanoutHardCap) {
             meters.counter("sector.fanout.suppressed").increment()
             log.warn(
-                "sector fan-out suppressed: clusterId={} sectors={} all={} material={} cap={} hardCap={}",
-                clusterId, sectorCodesOf(verdicts), all.size, material.size, fanoutCap, fanoutHardCap,
+                "sector fan-out suppressed: clusterId={} sectors={} all={} material={} discovered={} " +
+                    "cap={} hardCap={}",
+                clusterId, sectorCodesOf(verdicts), all.size, material.size, discovered, fanoutCap, fanoutHardCap,
             )
-            return emptyMap()
+            return FanoutPlan(emptyMap(), includeDiscovered = false)
         }
         if (material.size < all.size) {
             meters.counter("sector.fanout.degraded").increment()
             log.info(
-                "sector fan-out degraded to material impact: clusterId={} sectors={} all={} material={}",
-                clusterId, sectorCodesOf(verdicts), all.size, material.size,
+                "sector fan-out degraded to material impact: clusterId={} sectors={} all={} material={} discovered={}",
+                clusterId, sectorCodesOf(verdicts), all.size, material.size, discovered,
             )
         }
-        return material
+        return FanoutPlan(material, includeDiscovered = true)
     }
+
+    private data class FanoutPlan(
+        val members: Map<String, Pair<SectorVerdict, SectorRef>>,
+        val includeDiscovered: Boolean,
+    )
 
     private fun sectorCodesOf(verdicts: List<SectorVerdict>): String =
         verdicts.take(LOGGED_SECTORS).joinToString(",") { "${it.sectorCode}:${it.impact}" } +
