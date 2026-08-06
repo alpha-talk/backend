@@ -162,7 +162,7 @@ ingest-worker 스케줄러(싱글턴)가 매일 18:00 KST에 적재하고 같은
 | `cursor:{userId}:{code}` | String | 마지막 읽은 `eventId`(읽음 위치) — **fast path 미러**, 진실은 DB `read_cursor` | 메인서버(REST) | 메인서버 | **1일** — 쓰기·재적재 시 갱신. 미러 SET 실패로 stale해져도 TTL 만료 후 DB에서 재적재되어 자가 치유 |
 | `watchlist:{userId}` | Set | 관심목록 미러 — 게이트웨이 CONNECT 시 해소용 (진실은 메인서버 DB) | 메인서버 | 게이트웨이 | 없음 |
 | `watchlist:rev:{userId}` | String | 미러 최신성 판정 rev — 이보다 새 rev의 동기화만 미러를 교체·발행 (메인서버 전용) | 메인서버 | 메인서버 | 없음 |
-| `seen:ingest:{sourceId}` | String | 수집 중복 제거 마커 | ingest/llm-worker | ingest/llm-worker | 며칠 |
+| `seen:ingest:{sourceId}` | String | 적재 중복 제거 마커 — 기사 sourceId뿐 아니라 일일 다이제스트 잡(`digest:{code}:{date}`)도 같은 마커로 하루 1회를 고정한다(뉴스 워커 명세 §4.1) | ingest/llm-worker | ingest/llm-worker | 며칠 |
 | `lock:cluster:{code}` | String (`SET NX PX 3000`) | 뉴스 클러스터 판정 직렬화 락(뉴스 워커 명세 §3.3) | llm-worker | llm-worker | 3초 |
 | `rate:article-fetch:{host}` | String (`SET PX`) | robots.txt·원문 fetch의 호스트별 다음 요청 간격을 llm-worker 인스턴스 간 직렬화 | llm-worker | llm-worker | 요청 간격(기본 1초) |
 | `rate:kis-rest:{keyId}` | Hash(token bucket) | 같은 KIS 계정을 쓰는 price·batch 프로세스의 일반 REST 합산 유량 제한 | price/batch-worker | price/batch-worker | 마지막 소비 후 2분 |
