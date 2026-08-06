@@ -60,7 +60,7 @@ alphatalk:
       max-tokens: 1024
     claude-cli:
       executable: ${CLAUDE_CLI_EXECUTABLE:claude}
-      model: ${CLAUDE_CLI_MODEL:}
+      model: ${CLAUDE_CLI_MODEL:sonnet}
       timeout: ${LLM_CLI_TIMEOUT:2m}
     codex-cli:
       executable: ${CODEX_CLI_EXECUTABLE:codex}
