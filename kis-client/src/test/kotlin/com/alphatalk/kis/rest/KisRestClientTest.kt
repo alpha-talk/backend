@@ -159,7 +159,7 @@ class KisRestClientTest {
             "/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice",
             200,
             """
-            {"rt_cd":"0","output2":[
+            {"rt_cd":"0","output1":{"acml_vol":"12345678"},"output2":[
               {"stck_bsop_date":"20260804","stck_cntg_hour":"130400","stck_oprc":"230000","stck_hgpr":"230500",
                "stck_lwpr":"229500","stck_prpr":"230500","cntg_vol":"120000","acml_tr_pbmn":"4700000000000"},
               {"stck_bsop_date":"20260804","stck_cntg_hour":"130300","stck_oprc":"229500","stck_hgpr":"230000",
@@ -168,13 +168,15 @@ class KisRestClientTest {
             """.trimIndent(),
         )
 
-        val candles = client.minuteCandles(
+        val chart = client.minuteCandles(
             account,
             "005930",
             java.time.LocalTime.of(13, 4),
             KisRestClient.MARKET_DIV_UNIFIED,
         )
 
+        val candles = chart.candles
+        assertEquals(12345678, chart.dailyVolume)
         assertEquals(2, candles.size)
         assertEquals("1304", candles[0].time)
         assertEquals("20260804", candles[0].date)
@@ -215,10 +217,11 @@ class KisRestClientTest {
             """{"rt_cd":"0","output2":[]}""",
         )
 
-        client.minuteCandles(account, "005930", java.time.LocalTime.of(13, 4), KisRestClient.MARKET_DIV_KRX)
+        val chart = client.minuteCandles(account, "005930", java.time.LocalTime.of(13, 4), KisRestClient.MARKET_DIV_KRX)
 
         val call = server.received.single { it.path.endsWith("inquire-time-itemchartprice") }
         assertTrue("FID_COND_MRKT_DIV_CODE=J" in call.query)
+        assertEquals(0, chart.dailyVolume)
     }
 
     @Test

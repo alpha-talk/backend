@@ -21,9 +21,11 @@ import com.alphatalk.worker.price.candle.MinuteCandleFetcher
 import com.alphatalk.worker.price.candle.MinuteCandlePurgeJob
 import com.alphatalk.worker.price.candle.MinuteCandleRefreshService
 import com.alphatalk.worker.price.candle.MinuteCandleStore
+import com.alphatalk.worker.price.candle.MinuteMarketDivStore
 import com.alphatalk.worker.price.candle.MinuteRefreshLock
 import com.alphatalk.worker.price.candle.MinuteRefreshUniverse
 import com.alphatalk.worker.price.candle.MinuteRefreshWatermarkStore
+import com.alphatalk.worker.price.candle.RedisMinuteMarketDivStore
 import com.alphatalk.worker.price.candle.RedisMinuteRefreshLock
 import com.alphatalk.worker.price.candle.RedisMinuteRefreshWatermarkStore
 import com.alphatalk.worker.price.candle.StockMasterCodeRepository
@@ -269,10 +271,18 @@ class PriceConfig {
         }
         val account = accounts.first()
         val rest = KisRestClient(KisApi.REST_BASE_URL, tokens, candleRestLimiters, gate)
-        return MinuteCandleFetcher { code, to ->
-            rest.minuteCandles(account, code, to, KisRestClient.MARKET_DIV_UNIFIED)
+        return MinuteCandleFetcher { code, to, marketDiv ->
+            rest.minuteCandles(account, code, to, marketDiv)
         }
     }
+
+    @Bean
+    @ConditionalOnProperty(
+        name = ["alphatalk.price.enabled", "alphatalk.price.minute-candle-enabled"],
+        havingValue = "true",
+    )
+    fun minuteMarketDivStore(redis: StringRedisTemplate, props: PriceProperties): MinuteMarketDivStore =
+        RedisMinuteMarketDivStore(redis, ttl = Duration.ofDays(props.minuteCandleMarketDivTtlDays))
 
     @Bean
     @ConditionalOnProperty(
@@ -309,6 +319,7 @@ class PriceConfig {
         calendar: MarketCalendar,
         refreshLock: MinuteRefreshLock,
         watermarks: MinuteRefreshWatermarkStore,
+        marketDivs: MinuteMarketDivStore,
         props: PriceProperties,
         meters: MeterRegistry,
     ): MinuteCandleRefreshService = MinuteCandleRefreshService(
@@ -317,6 +328,7 @@ class PriceConfig {
         calendar = calendar,
         refreshLock = refreshLock,
         watermarks = watermarks,
+        marketDivs = marketDivs,
         freshSeconds = props.minuteCandleFreshSec,
         meters = meters,
     )

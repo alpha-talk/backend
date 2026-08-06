@@ -22,6 +22,7 @@ class MinuteCandleDailySyncJobTest {
         override fun latestTime(code: String, date: String): String? = latestByCode[code]
         override fun sumValueBefore(code: String, date: String, timeExclusive: String): Long = 0
         override fun codesOn(date: String): Set<String> = latestByCode.keys.toSet()
+        override fun deleteDay(code: String, date: String): Int = 0
         override fun purgeBatchBefore(dateExclusive: String, batchSize: Int): Int = 0
     }
 
