@@ -171,6 +171,7 @@ class NewsProcessor(
         val all = memberFanout(verdicts)
         if (all.size <= fanoutCap) return all
 
+        meters.counter("sector.fanout.tier2").increment()
         val material = all.filterValues { it.first.impact != Impact.LOW }
         if (material.isEmpty() || material.size > fanoutHardCap) {
             meters.counter("sector.fanout.suppressed").increment()

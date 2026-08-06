@@ -323,6 +323,42 @@ class NewsProcessorTest {
     }
 
     @Test
+    fun `SECTOR - 하드 상한 억제는 섹터 fan-out만 막고 직접 관련 종목은 발행한다`() {
+        verdict = ClusterSummaryOutput(
+            summary = "반도체 이슈",
+            marketRelevant = true,
+            scope = NewsScope.SECTOR,
+            stocks = listOf(StockVerdict("005930", true, Sentiment.POSITIVE, 0.9, "직접")),
+            sectors = listOf(SectorVerdict("27", Sentiment.NEGATIVE, Impact.HIGH, 0.9, "")),
+        )
+        val meters = SimpleMeterRegistry()
+        processor(fanoutCap = 2, fanoutHardCap = 2, meters = meters).process(entry("a1", "반도체 이슈"))
+
+        assertEquals(listOf("005930"), events.inserted.map { it.code })
+        assertEquals("POSITIVE", events.inserted.single().data.sentiment)
+        assertEquals(1.0, meters.counter("sector.fanout.suppressed").count())
+        assertEquals("SECTOR", store.clusters.values.single().scope)
+    }
+
+    @Test
+    fun `SECTOR - 1차 상한을 넘으면 결과와 무관하게 tier2를 집계한다`() {
+        verdict = ClusterSummaryOutput(
+            summary = "금리 인상",
+            marketRelevant = true,
+            scope = NewsScope.SECTOR,
+            stocks = emptyList(),
+            sectors = listOf(SectorVerdict("27", Sentiment.POSITIVE, Impact.HIGH, 0.9, "")),
+        )
+        val meters = SimpleMeterRegistry()
+        processor(fanoutCap = 2, meters = meters).process(entry("a1", "기준금리 인상", codes = emptyList()))
+
+        assertEquals(3, events.inserted.size)
+        assertEquals(1.0, meters.counter("sector.fanout.tier2").count())
+        assertEquals(0.0, meters.counter("sector.fanout.degraded").count())
+        assertEquals(0.0, meters.counter("sector.fanout.suppressed").count())
+    }
+
+    @Test
     fun `SECTOR - LOW뿐인데 상한을 넘으면 강등이 아니라 억제로 집계한다`() {
         verdict = ClusterSummaryOutput(
             summary = "업계 소식",
