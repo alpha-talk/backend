@@ -1,5 +1,8 @@
 package com.alphatalk.worker.llm.config
 
+import com.alphatalk.worker.llm.article.JsoupArticleFetcher
+import com.alphatalk.worker.llm.article.RedisArticleRequestGate
+import com.alphatalk.worker.llm.article.RobotsPolicy
 import com.alphatalk.worker.llm.cluster.EmbeddingClient
 import com.alphatalk.worker.llm.cluster.FakeEmbeddingClient
 import com.alphatalk.worker.llm.cluster.RestEmbeddingClient
@@ -25,6 +28,9 @@ class LlmConfig {
             check(e.baseUrl.isNotBlank() && e.apiKey.isNotBlank() && e.model.isNotBlank()) {
                 "embedding provider=rest에는 base-url·api-key·model이 모두 필요하다"
             }
+            check(listOf(e.connectTimeout, e.readTimeout).all { !it.isZero && !it.isNegative }) {
+                "embedding connect/read timeout은 양수여야 한다 — 0은 무한 대기라 claim-idle을 넘길 수 있다"
+            }
             RestEmbeddingClient(e)
         }
         props.allowFake -> {
@@ -47,6 +53,8 @@ class LlmConfig {
             check(boundedTimeouts) {
                 "anthropic connect/read timeout은 양수여야 한다 — 0은 무한 대기라 claim-idle을 넘길 수 있다"
             }
+            val llmPerCall = props.anthropic.connectTimeout.plus(props.anthropic.readTimeout)
+            validateBatchDeadline(props, "anthropic", llmPerCall)
             AnthropicLlmClient(props, meters)
         }
         "claude-cli" -> {
@@ -84,6 +92,7 @@ class LlmConfig {
         check(!timeout.isZero && !timeout.isNegative && timeout < props.claimIdle) {
             "CLI LLM timeout은 양수이고 claim-idle(${props.claimIdle})보다 짧아야 한다"
         }
+        validateBatchDeadline(props, "CLI", timeout)
         if (researchCapable && props.market.researchEnabled) {
             val batchWait = timeout.multipliedBy((props.consumerBatch - 1).toLong())
             val worstCase = batchWait.plus(props.market.researchTimeout).plus(timeout)
@@ -91,6 +100,28 @@ class LlmConfig {
                 "시장 리서치 데드라인은 배치 대기·무리서치 재호출 포함 claim-idle(${props.claimIdle})보다 짧아야 한다 — " +
                     "(consumer-batch-1)×timeout + research-timeout + timeout = $worstCase"
             }
+        }
+    }
+
+    private fun validateBatchDeadline(props: LlmProperties, providerLabel: String, llmPerCall: Duration) {
+        val embedPerCall = if (props.embedding.provider == "rest") {
+            props.embedding.connectTimeout.plus(props.embedding.readTimeout)
+        } else {
+            Duration.ZERO
+        }
+        val fetchCeiling = if (props.article.allowedHostSuffixes.isEmpty()) {
+            Duration.ZERO
+        } else {
+            val robotsColdMiss = RedisArticleRequestGate.MAX_TOTAL_WAIT.plus(RobotsPolicy.FETCH_BUDGET)
+            JsoupArticleFetcher.FETCH_DEADLINE.plus(maxOf(JsoupArticleFetcher.FETCH_TIMEOUT, robotsColdMiss))
+        }
+        val perRecord = llmPerCall.plus(embedPerCall).plus(fetchCeiling)
+        val batchWorstCase = perRecord.multipliedBy(props.consumerBatch.toLong())
+        check(batchWorstCase < props.claimIdle) {
+            "$providerLabel 배치 최악 지연이 claim-idle(${props.claimIdle})을 넘는다 — " +
+                "consumer-batch × (LLM+임베딩+원문 fetch 상한) = $batchWorstCase. 배치는 PEL에 먼저 들어가 " +
+                "순차 처리되므로 마지막 레코드가 선점 임계를 넘겨 중복 처리·조기 DLQ가 생긴다. " +
+                "batch 또는 timeout을 줄여라"
         }
     }
 }

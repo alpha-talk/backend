@@ -49,10 +49,13 @@ class MarketDigestProcessor(
         val factSheet = (factsResult.getOrNull() as? FactSheetLookup.Found)?.sheet
         val (marketClusters, sectorClusters) = clustersResult.getOrDefault(emptyList<DigestClusterRow>() to emptyList())
         val researchExpected = props.market.researchEnabled && llm.supportsMarketResearch()
+        val factsUnavailable = factsResult.isFailure ||
+            factsResult.getOrNull() is FactSheetLookup.Insufficient
 
         if (factSheet == null && marketClusters.isEmpty() && sectorClusters.isEmpty() && !researchExpected) {
-            val failed = factsResult.isFailure || clustersResult.isFailure
-            check(!failed) { "시장 다이제스트 입력 전 층 조회 실패 — 재시도 대상" }
+            check(!factsUnavailable && !clustersResult.isFailure) {
+                "시장 다이제스트 입력 전 층이 실패·불완전한데 남은 내용이 없다 — 재시도 대상"
+            }
             meters.counter("market.digest.skipped.empty").increment()
             log.info("market digest skipped: no input date={}", date)
             return
@@ -69,14 +72,16 @@ class MarketDigestProcessor(
         val rawOutput = runCatching { llm.marketDigest(input) }.getOrElse { failure ->
             if (!researchExpected) throw failure
             recordLayerFailure("research", failure)
+            if (factSheet == null && marketClusters.isEmpty() && sectorClusters.isEmpty()) throw failure
             usedResearch = false
             llm.marketDigest(input.copy(research = false))
         }
         val output = if (usedResearch) rawOutput else rawOutput.copy(global = emptyList(), sources = emptyList())
 
         if (factSheet == null && marketClusters.isEmpty() && sectorClusters.isEmpty() && output.global.isEmpty()) {
-            check(!factsResult.isFailure && !clustersResult.isFailure) {
-                "시장 다이제스트 입력 조회 실패에 리서치도 비었다 — 재시도 대상"
+            val researchFailed = researchExpected && !usedResearch
+            check(!factsUnavailable && !clustersResult.isFailure && !researchFailed) {
+                "시장 다이제스트 층 실패에 남은 내용이 없다 — ACK하면 멱등 마커가 그 날짜를 봉인하므로 재시도 대상"
             }
             meters.counter("market.digest.skipped.empty").increment()
             log.info("market digest skipped: research returned nothing and no other input date={}", date)

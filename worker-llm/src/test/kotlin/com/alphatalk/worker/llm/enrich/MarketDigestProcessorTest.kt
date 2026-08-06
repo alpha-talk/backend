@@ -137,6 +137,25 @@ class MarketDigestProcessorTest {
     }
 
     @Test
+    fun `리서치가 실패하고 남은 내용도 없으면 ACK가 아니라 잡 실패다`() {
+        facts.result = FactSheetLookup.Missing
+        llm.failWhenResearching = true
+        llm.output = MarketDigestOutput("빈", emptyList(), emptyList(), emptyList())
+
+        assertThrows<IllegalStateException> { processor().process(entry()) }
+        assertTrue(digests.saved.isEmpty())
+    }
+
+    @Test
+    fun `팩트시트 부분 적재만 있고 다른 내용이 없으면 잡 실패로 재시도한다`() {
+        facts.result = FactSheetLookup.Insufficient
+        llm.researchSupported = false
+
+        assertThrows<IllegalStateException> { processor().process(entry()) }
+        assertTrue(digests.saved.isEmpty())
+    }
+
+    @Test
     fun `리서치 호출이 실패하면 리서치 없이 재호출해 degraded로 생성한다`() {
         facts.result = FactSheetLookup.Found(sheet)
         seedMarketCluster()

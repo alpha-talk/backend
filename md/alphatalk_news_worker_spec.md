@@ -365,7 +365,7 @@ stream payload (ws_api_spec §4.3 확장 — ⚠️ §6 증보):
 
 - 층 일부가 **실패**해도 남은 층에 내용이 있으면 `degraded=true`로 낮춰 생성한다(해외 섹션이 빠진 브리핑이 브리핑 없음보다 낫다).
 - 세 층을 **전부 성공적으로 조회했는데 모두 비어 있으면** 브리핑 없이 ACK한다 — 조용한 휴장일이 여기 해당하며, 결정적으로 빈 입력을 실패로 다루면 PEL 재시도만 소진하고 DLQ에 쌓인다(종목 잡의 "소식 없으면 ACK"와 동일 기조).
-- **내용이 하나도 없는데 실패한 층이 있으면** 잡 실패다 — DB 장애로 ①·②를 못 읽고 리서치도 죽은 상태를 ACK해 버리면 멱등 마커 때문에 그 날짜는 영영 복구되지 않는다. LLM 호출 자체의 실패도 잡 실패다. 둘 다 PEL 재시도 → DLQ, 기존 규칙 그대로.
+- **내용이 하나도 없는데 실패·불완전한 층이 있으면** 잡 실패다 — ACK하면 멱등 마커 때문에 그 날짜는 영영 복구되지 않으므로, 일시 장애를 영구 유실로 바꾸지 않기 위해 PEL에 남긴다. 여기서 "실패"는 ①·② 조회 예외뿐 아니라 **①층 커버리지 미달(부분 적재 — 적재 잡 재시도로 회복되는 일시 상태)과 리서치 호출 실패(무리서치 폴백까지 갔는데 남은 내용이 없는 경우)**를 포함한다. "빈 것"과 구분되는 기준은 회복 가능성이다 — Missing(데이터 자체 없음)·조용한 날은 재시도해도 같으니 ACK, 위 상태들은 재시도가 결과를 바꿀 수 있으니 실패. LLM 호출 자체의 실패도 잡 실패다. 모두 PEL 재시도 → DLQ, 기존 규칙 그대로.
 
 메트릭·알람은 §8.
 
@@ -503,7 +503,7 @@ provider는 명시 설정이고 자동 fallback이 없다. 엉뚱한 경로로 �
 
 - LLM provider는 `anthropic|claude-cli|codex-cli|fake` 중 하나를 명시한다. 기본 프로파일은 `anthropic`, local 프로파일은 `claude-cli`이며 `LLM_PROVIDER=codex-cli`로 전환한다. `claude-cli`의 기본 모델은 최신 Sonnet을 가리키는 `sonnet` 별칭이고 `CLAUDE_CLI_MODEL`로 재정의한다. provider 사이 자동 fallback은 없다.
 - 로컬 무료 임베딩은 Ollama+BGE-M3를 기본으로 쓴다. 설치·환경변수·Docker 연결·문제 해결은 [로컬 임베딩 설정](local_embedding_setup.md)을 따른다.
-- `anthropic`은 `ANTHROPIC_API_KEY`가 없으면 기동에 실패한다. `claude-cli`·`codex-cli`는 각각 로그인된 로컬 CLI가 필요하고, 실행 실패·타임아웃은 PEL 재처리 경로로 전파한다. `fake`는 `alphatalk.llm.allow-fake=true`일 때만 허용한다.
+- `anthropic`은 `ANTHROPIC_API_KEY`가 없으면 기동에 실패한다. LLM·임베딩(rest)의 HTTP connect/read 타임아웃은 양수 필수(0=무한 대기 거부)이고, **배치 최악 지연 `consumer-batch × (LLM + 임베딩 + 원문 fetch 상한)`이 `claim-idle`보다 짧아야 기동한다** — 배치는 PEL에 먼저 들어가 순차 처리되므로 마지막 레코드의 선점 임계 초과가 중복 처리·조기 DLQ를 만든다. 원문 fetch는 요청 단위 타임아웃(8s)만으로는 리다이렉트×robots×게이트 대기가 합산돼 무계가 되므로, **fetcher가 종단 데드라인(20s)을, 호스트 게이트가 벽시계 기준 총 대기 상한(10s — 다중 레플리카 경합에서 획득 경쟁을 계속 지면 무한 대기이며, 잔여 예산을 넘는 sleep은 예산까지로 자른다)을 런타임에 강제**하고, 검증은 `데드라인 + 최장 블로킹 구간`을 상한으로 쓴다 — 최장 블로킹 구간은 robots 콜드 미스(게이트 10s + robots HTTP 8s, 중간에 데드라인 확인 없이 직렬 실행)다. 상한 초과 fetch는 본문 없이 진행한다(발췌 폴백 — best-effort). 원문 fetch 비활성 구성(`allowed-host-suffixes` 공란)은 이 항을 0으로 친다. 같은 검증을 CLI provider에도 적용한다(batch=1이라 레코드 1건 상한 검사). 기본값: batch 3 × (LLM 30s + 임베딩 25s + fetch 38s) = 279s < 5m. **수용 한계**: HTTP read timeout은 블로킹 read 단위 상한이라 응답을 계속 흘려보내는(드립피드) 서버는 이론상 회피할 수 있다 — 호출 대상이 신뢰된 엔드포인트(Anthropic·설정된 임베딩 제공자)이고, 스레드 격리로 완전한 종단 데드라인을 강제하는 비용 대비 이득이 없어 수용한다. claim-idle 초과의 결말은 중복 처리이고 파이프라인 전체가 sourceId 멱등·DB 유니크로 이를 흡수하도록 설계되어 있다(§2.2·§4.1) — 이 검증은 실시간 보장이 아니라 구성 오류를 기동에서 잡는 안전장치다. `claude-cli`·`codex-cli`는 각각 로그인된 로컬 CLI가 필요하고, 실행 실패·타임아웃은 PEL 재처리 경로로 전파한다. `fake`는 `alphatalk.llm.allow-fake=true`일 때만 허용한다.
 - CLI provider는 개인 구독 로컬 단일 인스턴스 전용이다. `consumer-batch=1`이 아니거나 CLI timeout이 `claim-idle` 이상이면 기동에 실패해, 긴 CLI 호출 중 다른 consumer가 아직 처리하지 않은 배치 레코드를 회수하는 구성을 막는다.
 - 시크릿(환경변수): `ANTHROPIC_API_KEY` · `NAVER_CLIENT_ID/SECRET` · 임베딩 API 키. 로그 출력 금지. 임베딩 키는 `provider=rest`에서 fail-closed한다.
 - 설정: 시드 종목 목록, 소스별 폴링 주기, 유사도 임계값(0.85), 클러스터 창(72h), 원문 허용 호스트·호스트별 요청 간격(기본 1초), digest 시각(18:00) — 임계값 튜닝에 대비해 전부 프로퍼티로 외부화한다.

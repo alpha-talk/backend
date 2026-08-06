@@ -9,7 +9,7 @@ data class LlmProperties(
     val consumeEnabled: Boolean = true,
     val allowFake: Boolean = false,
     val consumerBlock: Duration = Duration.ofSeconds(5),
-    val consumerBatch: Int = 8,
+    val consumerBatch: Int = 3,
     val poisonMaxDeliveries: Long = 5,
     val claimIdle: Duration = Duration.ofMinutes(5),
     val claimInterval: Duration = Duration.ofMinutes(1),
@@ -57,7 +57,7 @@ data class LlmProperties(
         val version: String = "2023-06-01",
         val maxTokens: Int = 1024,
         val connectTimeout: Duration = Duration.ofSeconds(5),
-        val readTimeout: Duration = Duration.ofSeconds(60),
+        val readTimeout: Duration = Duration.ofSeconds(25),
     )
 
     data class ClaudeCli(
@@ -78,5 +78,7 @@ data class LlmProperties(
         val apiKey: String = "",
         val model: String = "",
         val dimension: Int = 1024,
+        val connectTimeout: Duration = Duration.ofSeconds(5),
+        val readTimeout: Duration = Duration.ofSeconds(20),
     )
 }
