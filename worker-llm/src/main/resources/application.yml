@@ -36,7 +36,8 @@ alphatalk:
       similarity-threshold: 0.85
       lock-ttl: 3s
     sector:
-      fanout-cap: 100             # 초과 시 실시간 fan-out 억제 — 다이제스트로만 반영 (명세 §3.6)
+      fanout-cap: 100             # 1차 상한 — 초과 시 impact=LOW 섹터를 덜어내고 재시도 (명세 §3.6)
+      fanout-hard-cap: 500        # 2차 상한 — MEDIUM 이상만으로도 넘으면 LLM 오판정으로 보고 실시간 억제
     article:
       allowed-host-suffixes:     # 비우면 본문 fetch 전면 차단 — worker-ingest 피드 언론사와 짝을 맞춘다
         - yna.co.kr

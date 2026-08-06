@@ -17,6 +17,7 @@ import com.alphatalk.worker.llm.publish.StreamPublisher
 import com.alphatalk.worker.llm.sector.SectorDirectory
 import com.fasterxml.jackson.databind.ObjectMapper
 import io.micrometer.core.instrument.MeterRegistry
+import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
 import java.time.Clock
 import java.time.Duration
@@ -39,7 +40,16 @@ class NewsProcessor(
     private val summarizeLease: Duration = Duration.ofMinutes(2),
     private val clock: Clock = Clock.systemUTC(),
 ) {
+    private val log = LoggerFactory.getLogger(javaClass)
     private val fanoutCap: Int = props.sector.fanoutCap
+    private val fanoutHardCap: Int = props.sector.fanoutHardCap
+
+    init {
+        require(fanoutCap > 0 && fanoutHardCap >= fanoutCap) {
+            "fan-out 상한은 fanout-cap > 0 이고 fanout-hard-cap >= fanout-cap 이어야 한다: " +
+                "cap=$fanoutCap hardCap=$fanoutHardCap"
+        }
+    }
 
     fun process(entry: IngestQueueEntry) {
         val assignment = assigner.assign(entry)
@@ -126,16 +136,7 @@ class NewsProcessor(
         publications: MutableList<PendingPublication>,
     ): NewsScope? {
         if (relevantStocks.isEmpty() && verdict.sectors.isEmpty()) return null
-        val fanout = linkedMapOf<String, Pair<SectorVerdict, SectorRef>>()
-        verdict.sectors.filter { it.impact != Impact.LOW }.forEach { sv ->
-            val ref = SectorRef(code = sv.sectorCode, name = sectors.sectorName(sv.sectorCode) ?: sv.sectorCode)
-            sectors.memberCodes(sv.sectorCode)
-                .forEach { code -> fanout.putIfAbsent(code, sv to ref) }
-        }
-        if (fanout.size > fanoutCap) {
-            meters.counter("sector.fanout.suppressed").increment()
-            fanout.clear()
-        }
+        val fanout = resolveFanout(verdict.sectors)
 
         val direct = relevantStocks.map { it.code }.toSet()
         relevantStocks.forEach { stock ->
@@ -155,6 +156,35 @@ class NewsProcessor(
                 ?.let(publications::add)
         }
         return NewsScope.SECTOR
+    }
+
+    private fun resolveFanout(verdicts: List<SectorVerdict>): Map<String, Pair<SectorVerdict, SectorRef>> {
+        val all = memberFanout(verdicts.sortedBy { it.impact.ordinal })
+        if (all.size <= fanoutCap) return all
+
+        val material = all.filterValues { it.first.impact != Impact.LOW }
+        if (material.isEmpty() || material.size > fanoutHardCap) {
+            meters.counter("sector.fanout.suppressed").increment()
+            log.warn(
+                "sector fan-out suppressed: all={} material={} cap={} hardCap={}",
+                all.size, material.size, fanoutCap, fanoutHardCap,
+            )
+            return emptyMap()
+        }
+        if (material.size < all.size) {
+            meters.counter("sector.fanout.degraded").increment()
+            log.info("sector fan-out degraded to material impact: all={} material={}", all.size, material.size)
+        }
+        return material
+    }
+
+    private fun memberFanout(verdicts: List<SectorVerdict>): Map<String, Pair<SectorVerdict, SectorRef>> {
+        val fanout = linkedMapOf<String, Pair<SectorVerdict, SectorRef>>()
+        verdicts.forEach { sv ->
+            val ref = SectorRef(code = sv.sectorCode, name = sectors.sectorName(sv.sectorCode) ?: sv.sectorCode)
+            sectors.memberCodes(sv.sectorCode).forEach { code -> fanout.putIfAbsent(code, sv to ref) }
+        }
+        return fanout
     }
 
     private fun sectorRefOf(code: String): SectorRef? =
