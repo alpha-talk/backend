@@ -27,7 +27,7 @@ alphatalk:
     consume-enabled: true
     allow-fake: false
     consumer-block: 5s
-    consumer-batch: 3              # 배치 전체가 PEL 선진입 후 순차 처리 — batch×레코드 상한 < claim-idle 기동 검증(명세 §8)
+    consumer-batch: 2              # 배치 전체가 PEL 선진입 후 순차 처리 — batch×레코드 상한 < claim-idle 기동 검증(명세 §8)
     poison-max-deliveries: 5      # 초과 시 queue:ingest:dlq 격리 (Redis 계약 v0.3 §2)
     claim-idle: 5m                # PEL 유휴 회수 임계 (죽은 워커 인계)
     claim-interval: 1m

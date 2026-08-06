@@ -9,7 +9,7 @@ data class LlmProperties(
     val consumeEnabled: Boolean = true,
     val allowFake: Boolean = false,
     val consumerBlock: Duration = Duration.ofSeconds(5),
-    val consumerBatch: Int = 3,
+    val consumerBatch: Int = 2,
     val poisonMaxDeliveries: Long = 5,
     val claimIdle: Duration = Duration.ofMinutes(5),
     val claimInterval: Duration = Duration.ofMinutes(1),

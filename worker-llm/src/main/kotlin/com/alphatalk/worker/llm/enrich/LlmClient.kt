@@ -73,6 +73,7 @@ data class DigestOutput(
 
 data class MarketDigestInput(
     val date: String,
+    val asOf: String,
     val factSheet: MarketFactSheet?,
     val marketClusters: List<DigestCluster>,
     val sectorClusters: List<DigestCluster>,

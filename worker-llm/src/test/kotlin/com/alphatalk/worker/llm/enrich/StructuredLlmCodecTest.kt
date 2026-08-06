@@ -116,6 +116,7 @@ class StructuredLlmCodecTest {
     fun `시장 다이제스트 프롬프트 - 리서치 여부에 따라 검색 지시가 갈린다`() {
         val input = MarketDigestInput(
             date = "2026-07-16",
+            asOf = "2026-07-17T09:10:00+09:00",
             factSheet = null,
             marketClusters = emptyList(),
             sectorClusters = emptyList(),
@@ -124,6 +125,8 @@ class StructuredLlmCodecTest {
 
         assertTrue(StructuredLlmCodec.marketDigestPrompt(input).contains("웹 검색으로"))
         assertTrue(StructuredLlmCodec.marketDigestPrompt(input.copy(research = false)).contains("웹 검색 없이"))
+        assertTrue(StructuredLlmCodec.marketDigestPrompt(input).contains("현재 시각: 2026-07-17T09:10:00+09:00"))
+        assertTrue(StructuredLlmCodec.marketDigestPrompt(input).contains("조사 컷오프가 아니다"))
     }
 
     private fun Map<String, Any>.properties(name: String): Map<*, *> =
