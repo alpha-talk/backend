@@ -1,9 +1,13 @@
 package com.alphatalk.worker.ingest
 
+import com.alphatalk.contracts.Keys
 import com.alphatalk.contracts.Queues
 import com.alphatalk.contracts.queue.IngestQueueEntry
+import com.alphatalk.contracts.queue.IngestType
 import com.alphatalk.worker.ingest.config.IngestProperties
 import com.alphatalk.worker.ingest.dedup.RedisSeenMarker
+import com.alphatalk.worker.ingest.queue.DigestEnqueueResult
+import com.alphatalk.worker.ingest.queue.RedisDigestJobQueue
 import com.alphatalk.worker.ingest.queue.RedisIngestQueue
 import com.alphatalk.worker.ingest.scheduler.IngestPoller
 import com.alphatalk.worker.ingest.source.FetchedArticle
@@ -18,7 +22,10 @@ import org.testcontainers.containers.GenericContainer
 import org.testcontainers.junit.jupiter.Container
 import org.testcontainers.junit.jupiter.Testcontainers
 import java.time.Duration
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.Executors
 import kotlin.test.assertEquals
+import kotlin.test.assertFails
 import kotlin.test.assertTrue
 
 @Testcontainers
@@ -99,5 +106,51 @@ class IngestPipelineIntegrationTest {
 
         val size = template.opsForStream<String, String>().size(Queues.INGEST)
         assertEquals(1L, size)
+    }
+
+    @Test
+    fun `다이제스트 원자 적재 - 동시 요청에도 큐와 마커는 한 건`() {
+        val queue = RedisDigestJobQueue(template, props)
+        val entry = IngestQueueEntry(
+            source = IngestQueueEntry.DIGEST_SOURCE,
+            sourceId = IngestQueueEntry.digestSourceId("005930", "2026-08-06"),
+            type = IngestType.DIGEST,
+            codes = listOf("005930"),
+            title = "",
+            url = "",
+            fetchedAt = 1775466000000,
+        )
+
+        val results = Executors.newFixedThreadPool(8).use { executor ->
+            (1..32)
+                .map { CompletableFuture.supplyAsync({ queue.enqueueIfNew(entry) }, executor) }
+                .map { it.join() }
+        }
+
+        assertEquals(1, results.count { it == DigestEnqueueResult.ENQUEUED })
+        assertEquals(31, results.count { it == DigestEnqueueResult.ALREADY_ENQUEUED })
+        assertEquals(1L, template.opsForStream<String, String>().size(Queues.INGEST))
+        assertTrue(template.hasKey(Keys.seenIngest(entry.sourceId)))
+    }
+
+    @Test
+    fun `다이제스트 원자 적재 - XADD 실패에는 마커를 남기지 않는다`() {
+        val queue = RedisDigestJobQueue(template, props)
+        val entry = IngestQueueEntry(
+            source = IngestQueueEntry.DIGEST_SOURCE,
+            sourceId = IngestQueueEntry.digestSourceId("005930", "2026-08-06"),
+            type = IngestType.DIGEST,
+            codes = listOf("005930"),
+            title = "",
+            url = "",
+            fetchedAt = 1775466000000,
+        )
+        template.opsForValue().set(Queues.INGEST, "wrong-type")
+
+        assertFails { queue.enqueueIfNew(entry) }
+
+        assertEquals(false, template.hasKey(Keys.seenIngest(entry.sourceId)))
+        template.delete(Queues.INGEST)
+        assertEquals(DigestEnqueueResult.ENQUEUED, queue.enqueueIfNew(entry))
     }
 }

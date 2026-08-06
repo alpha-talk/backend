@@ -4,8 +4,9 @@ import com.alphatalk.contracts.queue.IngestQueueEntry
 import com.alphatalk.contracts.queue.IngestType
 import com.alphatalk.worker.ingest.config.IngestConfig
 import com.alphatalk.worker.ingest.config.IngestProperties
-import com.alphatalk.worker.ingest.dedup.SeenMarker
-import com.alphatalk.worker.ingest.queue.IngestQueue
+import com.alphatalk.worker.ingest.queue.DigestEnqueueResult
+import com.alphatalk.worker.ingest.queue.DigestJobQueue
+import io.micrometer.core.instrument.MeterRegistry
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Qualifier
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
@@ -19,14 +20,16 @@ import java.time.LocalDate
 import java.time.ZoneId
 import java.time.ZonedDateTime
 import java.util.concurrent.Executor
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
 @Component
 @ConditionalOnProperty("alphatalk.ingest.digest.enabled", havingValue = "true", matchIfMissing = true)
 class DigestTrigger(
-    private val queue: IngestQueue,
-    private val seen: SeenMarker,
+    private val queue: DigestJobQueue,
     private val props: IngestProperties,
-    @Qualifier(IngestConfig.CATCH_UP_EXECUTOR_BEAN)
+    private val meters: MeterRegistry,
+    @param:Qualifier(IngestConfig.CATCH_UP_EXECUTOR_BEAN)
     private val catchUpExecutor: Executor,
     private val clock: Clock = Clock.systemUTC(),
 ) {
@@ -35,16 +38,51 @@ class DigestTrigger(
     private val cron = props.digest.cron
         .takeIf { it != Scheduled.CRON_DISABLED }
         ?.let(CronExpression::parse)
+    private val catchUpRunning = AtomicBoolean()
+    private val reconciledThrough = AtomicReference<LocalDate?>()
 
     @Scheduled(cron = "\${alphatalk.ingest.digest.cron:0 0 18 * * *}", zone = "\${alphatalk.ingest.digest.zone:Asia/Seoul}")
     fun trigger() {
-        triggerFor(LocalDate.now(clock.withZone(zone)))
+        val now = ZonedDateTime.now(clock.withZone(zone))
+        val date = lastFireAtOrBefore(now)?.toLocalDate() ?: now.toLocalDate()
+        val result = triggerForResult(date)
+        record(result)
+        if (result.complete) markReconciled(date)
     }
 
     @EventListener(ApplicationReadyEvent::class)
     fun catchUpOnStartup() {
         if (!props.digest.catchUpOnStartup) return
-        catchUpExecutor.execute(::catchUp)
+        submitCatchUp()
+    }
+
+    @Scheduled(
+        fixedDelayString = "\${alphatalk.ingest.digest.catch-up-reconcile-delay:1m}",
+        initialDelayString = "\${alphatalk.ingest.digest.catch-up-reconcile-delay:1m}",
+    )
+    fun reconcileCatchUp() {
+        if (!props.digest.catchUpOnStartup || cron == null) return
+        submitCatchUp()
+    }
+
+    private fun submitCatchUp() {
+        if (!catchUpRunning.compareAndSet(false, true)) return
+        runCatching {
+            catchUpExecutor.execute {
+                try {
+                    catchUp()
+                } catch (failure: Exception) {
+                    meters.counter("ingest.digest.catchup.errors").increment()
+                    log.warn("digest catch-up failed", failure)
+                } finally {
+                    catchUpRunning.set(false)
+                }
+            }
+        }.onFailure {
+            catchUpRunning.set(false)
+            meters.counter("ingest.digest.catchup.errors").increment()
+            log.warn("digest catch-up submission failed", it)
+        }
     }
 
     private fun catchUp() {
@@ -54,36 +92,57 @@ class DigestTrigger(
             log.info("digest catch-up skipped: no elapsed schedule now={}", now)
             return
         }
+        val date = missed.toLocalDate()
+        if (reconciledThrough.get()?.let { !it.isBefore(date) } == true) return
+        meters.counter("ingest.digest.catchup.attempts").increment()
         log.info("digest catch-up start: firedAt={} now={}", missed, now)
-        runCatching { triggerFor(missed.toLocalDate()) }
-            .onFailure { log.warn("digest catch-up failed: firedAt={}", missed, it) }
+        val result = triggerForResult(date)
+        record(result)
+        if (result.complete) {
+            markReconciled(date)
+            meters.counter("ingest.digest.catchup.completed").increment()
+        } else {
+            meters.counter("ingest.digest.catchup.incomplete").increment()
+        }
     }
 
-    fun triggerFor(date: LocalDate): Int {
+    fun triggerFor(date: LocalDate): Int = triggerForResult(date).enqueued
+
+    private fun triggerForResult(date: LocalDate): DigestTriggerResult {
         var enqueued = 0
         var skipped = 0
+        var errors = 0
         props.stocks.forEach { stock ->
             val sourceId = IngestQueueEntry.digestSourceId(stock.code, date.toString())
-            runCatching {
-                if (!seen.markIfNew(sourceId)) {
-                    skipped++
-                    return@runCatching
-                }
-                runCatching { queue.enqueue(entryOf(stock.code, sourceId)) }
-                    .onFailure {
-                        seen.clear(sourceId)
-                        throw it
+            runCatching { queue.enqueueIfNew(entryOf(stock.code, sourceId)) }
+                .onSuccess { result ->
+                    when (result) {
+                        DigestEnqueueResult.ENQUEUED -> enqueued++
+                        DigestEnqueueResult.ALREADY_ENQUEUED -> skipped++
                     }
-                enqueued++
-            }.onFailure {
-                log.warn("digest job enqueue failed: code={}", stock.code, it)
-            }
+                }
+                .onFailure {
+                    errors++
+                    log.warn("digest job enqueue failed: code={}", stock.code, it)
+                }
         }
         log.info(
-            "digest jobs enqueued: {}/{} skipped={} date={}",
-            enqueued, props.stocks.size, skipped, date,
+            "digest jobs enqueued: {}/{} skipped={} errors={} date={}",
+            enqueued, props.stocks.size, skipped, errors, date,
         )
-        return enqueued
+        return DigestTriggerResult(enqueued, skipped, errors)
+    }
+
+    private fun record(result: DigestTriggerResult) {
+        meters.counter("ingest.digest.enqueued").increment(result.enqueued.toDouble())
+        meters.counter("ingest.digest.duplicate.skipped").increment(result.skipped.toDouble())
+        meters.counter("ingest.digest.enqueue.errors").increment(result.errors.toDouble())
+    }
+
+    private fun markReconciled(date: LocalDate) {
+        reconciledThrough.updateAndGet { current ->
+            if (current == null || date.isAfter(current)) date else current
+        }
     }
 
     private fun entryOf(code: String, sourceId: String) =
@@ -114,5 +173,13 @@ class DigestTrigger(
 
     private companion object {
         const val CATCH_UP_LOOKBACK_DAYS = 7
+    }
+
+    private data class DigestTriggerResult(
+        val enqueued: Int,
+        val skipped: Int,
+        val errors: Int,
+    ) {
+        val complete = errors == 0
     }
 }
