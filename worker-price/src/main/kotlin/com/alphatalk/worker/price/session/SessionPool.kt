@@ -163,7 +163,6 @@ class SessionPool(
         seenTicks.remove(symbol)
         subscribedAt.remove(symbol)
         lastTickAt.remove(symbol)
-        silenceDegraded.remove(symbol)
     }
 
     private fun forgetSymbol(symbol: String) {
