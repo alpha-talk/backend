@@ -2,6 +2,7 @@ package com.alphatalk.worker.ingest
 
 import com.alphatalk.worker.ingest.config.IngestProperties
 import com.alphatalk.worker.ingest.scheduler.IngestPoller
+import com.alphatalk.worker.ingest.scheduler.MarketDigestTrigger
 import com.alphatalk.worker.ingest.source.NewsSource
 import org.junit.jupiter.api.Test
 import org.springframework.beans.factory.annotation.Autowired
@@ -10,7 +11,12 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 
-@SpringBootTest(properties = ["alphatalk.ingest.poll-enabled=false"])
+@SpringBootTest(
+    properties = [
+        "alphatalk.ingest.poll-enabled=false",
+        "alphatalk.ingest.digest.catch-up-on-startup=false",
+    ],
+)
 class IngestWorkerApplicationTest {
     @Autowired
     private lateinit var properties: IngestProperties
@@ -21,6 +27,9 @@ class IngestWorkerApplicationTest {
     @Autowired
     private lateinit var newsSources: List<NewsSource>
 
+    @Autowired
+    private lateinit var marketDigestTrigger: MarketDigestTrigger
+
     @Test
     fun `컨텍스트 로드`() {
     }
@@ -30,6 +39,12 @@ class IngestWorkerApplicationTest {
         assertNotNull(poller)
         assertEquals(properties.feeds.size, newsSources.size)
         assertEquals(properties.feeds.map { it.id }, newsSources.map { it.id })
+    }
+
+    @Test
+    fun `시장 다이제스트 트리거는 기본 프로필에서 활성화된다`() {
+        assertNotNull(marketDigestTrigger)
+        assertEquals(true, properties.digest.marketEnabled)
     }
 
     @Test
