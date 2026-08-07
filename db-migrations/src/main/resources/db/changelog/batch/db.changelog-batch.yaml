@@ -41,3 +41,10 @@ databaseChangeLog:
         - sqlFile:
             path: sql/0006_sector_version_ksic_restore.sql
             relativeToChangelogFile: true
+  - changeSet:
+      id: 0007-invest-opinion
+      author: worker-batch
+      changes:
+        - sqlFile:
+            path: sql/0007_invest_opinion.sql
+            relativeToChangelogFile: true

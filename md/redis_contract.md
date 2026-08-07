@@ -1,5 +1,6 @@
-# Alpha Talk — Redis 계약 (`:contracts`) v0.15
+# Alpha Talk — Redis 계약 (`:contracts`) v0.16
 
+> v0.16 (2026-08-07): **KIS 토큰 공유 키 3종을 계약으로 승격** — `kis:token:{keyId}`(액세스 토큰 캐시) · `kis:token:lock:{keyId}`(발급 직렬화 락) · `kis:token:issued:{keyId}`(마지막 발급 시각). 지금까지 worker-price 단독 키였지만 worker-batch `invest_opinion_sync`([KIS 워커 명세](alphatalk_kis_worker_spec.md) §3.3)가 같은 KIS 계정의 토큰을 공유하는 두 번째 주체가 되면서 서비스 간 계약이 됐다 — KIS는 토큰 재발급 시 직전 토큰을 무효화하므로, 두 서버가 각자 발급하면 서로의 토큰을 계속 끊는다. 캐시를 공유하고 발급을 락으로 직렬화해 계정당 유효 토큰을 하나로 유지한다. `:contracts`의 `Keys.kisToken`·`Keys.kisTokenLock`·`Keys.kisTokenIssued` 생성 함수 사용(worker-price 하드코딩도 이관). 아울러 worker-batch ShedLock 잡 락 키(`job-lock:alphatalk:{job}` — 라이브러리 규칙 키)를 batch 전용으로 명시한다.
 > v0.15 (2026-08-06): worker-price 내부 키 1종 추가 — 분봉 조회의 **날짜별** 시장 구분 기록 `minute:market-div:{code}:{date}`(값 `UN`|`J`, TTL 2일). KIS `FHKST03010200`은 NXT 미상장 종목에 `UN`으로 물으면 `rt_cd=0`에 전 행이 0인 봉을 주는데 KIS가 NXT 상장 명단을 제공하지 않아, 지원 여부를 프로브로 판별해 이 키에 기록하고 그날의 이후 조회는 그 구분으로 나간다. **종목별 장기 캐시가 아니라 날짜별 기록인 이유**는 `minute_candle`에 시장 차원이 없기 때문이다 — 키가 장중에 만료되면 "적재분은 있는데 구분을 모르는" 상태가 되고, 거기에 다른 구분의 누적 거래대금을 이어 붙이면 앵커가 깨진다. 키를 `(code, date)`로 좁혀 **한 날짜의 행은 한 구분에서만 나온다**를 구조적으로 보장한다([KIS 워커 명세](alphatalk_kis_worker_spec.md) §2.6 소유, worker-price 전용). `:contracts`의 `Keys.minuteMarketDiv` 생성 함수 사용.
 
 > v0.14 (2026-08-06): 일일 다이제스트 잡 적재를 Redis 단일 실행으로 직렬화한다. `seen:ingest:digest:{code}:{date}`가 없을 때 `XADD queue:ingest`를 먼저 성공시키고 마커를 기록한다. XADD 전 마커를 남겨 프로세스 종료 시 잡을 유실하는 순서는 금지하고, 마커 기록 실패로 생길 수 있는 중복은 llm-worker의 `sourceId` 멱등과 DB 유니크 인덱스가 흡수한다. 기동 보충이 Redis 장애로 불완전하면 최신 예정 실행을 주기적으로 재조정한다(뉴스 워커 명세 §4.1).
@@ -172,6 +173,10 @@ ingest-worker 스케줄러(싱글턴)가 매일 18:00 KST에 적재하고 같은
 | `lock:cluster:{code}` | String (`SET NX PX 3000`) | 뉴스 클러스터 판정 직렬화 락(뉴스 워커 명세 §3.3) | llm-worker | llm-worker | 3초 |
 | `rate:article-fetch:{host}` | String (`SET PX`) | robots.txt·원문 fetch의 호스트별 다음 요청 간격을 llm-worker 인스턴스 간 직렬화 | llm-worker | llm-worker | 요청 간격(기본 1초) |
 | `rate:kis-rest:{keyId}` | Hash(token bucket) | 같은 KIS 계정을 쓰는 price·batch 프로세스의 일반 REST 합산 유량 제한 | price/batch-worker | price/batch-worker | 마지막 소비 후 2분 |
+| `kis:token:{keyId}` | String | KIS 액세스 토큰 공유 캐시 — 재발급이 직전 토큰을 무효화하므로 같은 계정을 쓰는 프로세스는 반드시 이 캐시를 공유한다(v0.16) | price/batch-worker | price/batch-worker | 토큰 만료(≈24h, 발급 응답 기준) |
+| `kis:token:lock:{keyId}` | String (`SET NX PX`) | 토큰 발급 직렬화 락 — 동시 발급으로 서로의 토큰을 무효화하는 것을 방지 | price/batch-worker | price/batch-worker | 발급 시도 시간 상한 |
+| `kis:token:issued:{keyId}` | String (epoch ms) | 마지막 발급 시각 — KIS 재발급 최소 간격(1분) 준수 판정 | price/batch-worker | price/batch-worker | 없음 |
+| `job-lock:alphatalk:{job}` | String | worker-batch ShedLock 잡 락(라이브러리 규칙 키 — `Keys` 생성 함수 없음). 다중 기동 시 같은 잡의 동시 실행 방지 | batch-worker | batch-worker | 잡별 `lockAtMostFor` |
 | `lock:minute-refresh:{code}` | String (`SET NX PX`) | 분봉 신선화의 종목별 인스턴스 간 single-flight 락(KIS 워커 명세 §2.6) — 미획득 인스턴스는 no-op | worker-price | worker-price | 페치 데드라인+여유 (기본 90s·일 확정 시 200s) |
 | `minute:through:{code}:{date}` | String (`HHmm`) | 그 종목·일자를 몇 시까지 조회 완료했는지(완주 워터마크, §2.6) — 인스턴스 간 공유해 재기동·리더 전환 후 전 구간 재조회를 막는다 | worker-price | worker-price | **2일** |
 | `minute:market-div:{code}:{date}` | String (`UN`\|`J`) | 그 종목·일자의 분봉을 어느 시장 구분으로 적재했는지(KIS 워커 명세 §2.6) — NXT 지원이면 `UN`, 미지원이면 `J`. 기록이 있으면 그 구분으로 1콜만 조회한다. 판별·전환은 **그날 적재분이 0이고 `acml_vol > 0`일 때만** 일어나며(하루 안 구분 혼입 방지), 전환 시 `minute:through:{code}:{date}`를 **먼저** 지운 뒤 이 키를 기록한다(크래시가 "둘 다 없음"으로 수렴해 재판정이 멱등). 적재된 분봉은 어떤 경우에도 삭제하지 않는다 | worker-price | worker-price | **2일** |
@@ -206,6 +211,8 @@ ingest-worker 스케줄러(싱글턴)가 매일 18:00 KST에 적재하고 같은
 | `lock:cluster:{code}` | — | — | — | **WRITE/READ** | — | — |
 | `rate:article-fetch:{host}` | — | — | — | **WRITE/READ** | — | — |
 | `rate:kis-rest:{keyId}` | **WRITE/READ** | **WRITE/READ** | — | — | — | — |
+| `kis:token:*:{keyId}` | **WRITE/READ** | **WRITE/READ** | — | — | — | — |
+| `job-lock:alphatalk:{job}` | — | **WRITE/READ** | — | — | — | — |
 | `demand:updated` (P/S) | **SUBSCRIBE** | — | — | — | — | **PUBLISH** |
 | `demand:quote/room:{gwId}` (자료구조) | READ | — | — | — | — | **WRITE** |
 | `gw:alive:{gwId}` (자료구조) | READ | — | — | — | — | **WRITE** |
