@@ -15,6 +15,8 @@ import kotlin.test.assertNotNull
     properties = [
         "alphatalk.ingest.poll-enabled=false",
         "alphatalk.ingest.digest.catch-up-on-startup=false",
+        "alphatalk.ingest.digest.cron=-",
+        "alphatalk.ingest.digest.market-cron=-",
     ],
 )
 class IngestWorkerApplicationTest {
