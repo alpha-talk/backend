@@ -144,6 +144,8 @@ class MinuteCandleRefreshServiceTest {
         lock: MinuteRefreshLock = FakeRefreshLock(),
         watermarks: MinuteRefreshWatermarkStore = InMemoryWatermarks(),
         marketDivs: MinuteMarketDivStore = InMemoryMarketDivs(),
+        knownDivs: com.alphatalk.worker.price.market.MarketDivStore =
+            com.alphatalk.worker.price.market.InMemoryMarketDivStore(),
         meters: SimpleMeterRegistry = SimpleMeterRegistry(),
     ) = MinuteCandleRefreshService(
         fetcher = fetcher,
@@ -152,6 +154,7 @@ class MinuteCandleRefreshServiceTest {
         refreshLock = lock,
         watermarks = watermarks,
         marketDivs = marketDivs,
+        knownDivs = knownDivs,
         freshSeconds = freshSeconds,
         meters = meters,
         waitTimeoutMillis = waitTimeoutMillis,
@@ -348,6 +351,7 @@ class MinuteCandleRefreshServiceTest {
             refreshLock = FakeRefreshLock(),
             watermarks = InMemoryWatermarks(),
             marketDivs = InMemoryMarketDivs(),
+            knownDivs = com.alphatalk.worker.price.market.InMemoryMarketDivStore(),
             freshSeconds = 60,
             meters = SimpleMeterRegistry(),
             fetchDeadlineMillis = 0,
@@ -636,6 +640,60 @@ class MinuteCandleRefreshServiceTest {
         assertEquals(2, store.rows.size)
         assertNull(marketDivs.get("005930", "20260804"))
         assertEquals(1.0, meters.counter("minute.candle.div.unknown").count())
+    }
+
+    @Test
+    fun `공유 사실이 KRX면 통합 프로브 없이 바로 KRX로 조회한다`() {
+        val store = InMemoryMinuteStore()
+        val known = com.alphatalk.worker.price.market.InMemoryMarketDivStore(mapOf("005930" to "J"))
+        val calls = mutableListOf<String>()
+        val krx = PagingFetcher(firstBar = LocalTime.of(9, 0), lastBar = LocalTime.of(15, 30))
+        val fetcher = MinuteCandleFetcher { code, to, div ->
+            calls += div
+            krx.fetch(code, to, div)
+        }
+        val marketDivs = InMemoryMarketDivs()
+        val service = service(fetcher, store, marketDivs = marketDivs, knownDivs = known)
+
+        assertTrue(service.refresh("005930") > 0)
+
+        assertTrue(calls.all { it == "J" })
+        assertEquals("J", marketDivs.get("005930", "20260804"))
+        assertEquals("0900", store.rows.keys.minOf { it.third })
+    }
+
+    @Test
+    fun `분봉이 KRX로 판정하면 공유 사실에도 확정 기록한다`() {
+        val store = InMemoryMinuteStore()
+        val known = com.alphatalk.worker.price.market.InMemoryMarketDivStore()
+        val krx = PagingFetcher(firstBar = LocalTime.of(9, 0), lastBar = LocalTime.of(15, 30))
+        val fetcher = MinuteCandleFetcher { code, to, div ->
+            if (div == "UN") KisMinuteChart(1_000_000, zeroCandles()) else krx.fetch(code, to, div)
+        }
+        val at = ZonedDateTime.of(2026, 8, 4, 14, 0, 30, 0, seoul)
+        val service = service(fetcher, store, at = at, knownDivs = known)
+
+        assertTrue(service.refresh("005930") > 0)
+
+        assertEquals("J", known.get("005930"))
+    }
+
+    @Test
+    fun `KRX 조회 성공만으로는 공유 사실을 기록하지 않는다`() {
+        val store = InMemoryMinuteStore()
+        val known = com.alphatalk.worker.price.market.InMemoryMarketDivStore(mapOf("005930" to "J"))
+        known.confirmed.clear()
+        known.confirm("005930", "J")
+        val krx = PagingFetcher(firstBar = LocalTime.of(9, 0), lastBar = LocalTime.of(15, 30))
+        val service = service(
+            MinuteCandleFetcher { code, to, div -> krx.fetch(code, to, div) },
+            store,
+            knownDivs = known,
+        )
+
+        assertTrue(service.refresh("005930") > 0)
+
+        assertEquals(setOf("005930"), known.confirmed.keys)
     }
 
     @Test
