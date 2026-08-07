@@ -139,13 +139,18 @@ class SessionPool(
             unifiedTrId -> MarketDivStore.UNIFIED
             else -> return
         }
-        if (div != (tickDivs[symbol] ?: MarketDivStore.UNIFIED)) return
-        val first = lastTickAt.put(symbol, now) == null
-        if (!first) return
-        silenceDegraded.remove(symbol)
-        if (div != MarketDivStore.UNIFIED) return
+        if (lastTickAt.containsKey(symbol)) return
+        if (!claimFirstTick(div, symbol, now)) return
         marketDivs.confirm(symbol, div)
         meters.counter("tick.market.div", "div", div).increment()
+    }
+
+    @Synchronized
+    private fun claimFirstTick(div: String, symbol: String, now: Long): Boolean {
+        if (div != (tickDivs[symbol] ?: MarketDivStore.UNIFIED)) return false
+        if (lastTickAt.putIfAbsent(symbol, now) != null) return false
+        silenceDegraded.remove(symbol)
+        return div == MarketDivStore.UNIFIED
     }
 
     private fun rearmSilence(symbol: String) {

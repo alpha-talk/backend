@@ -9,6 +9,9 @@ import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import org.awaitility.Awaitility.await
 import java.time.Duration
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import kotlin.concurrent.thread
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
@@ -142,6 +145,50 @@ class SessionPoolTest {
         pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
 
         assertTrue(pool.degradedSymbols().isEmpty())
+    }
+
+    @Test
+    fun `구분 전환 중 도착한 이전 채널 틱은 침묵 감시를 끄지 못한다`() {
+        val backing = InMemoryMarketDivStore()
+        val entered = CountDownLatch(1)
+        val gate = CountDownLatch(1)
+        val divs = object : MarketDivStore {
+            override fun get(code: String): String? {
+                val value = backing.get(code)
+                if (value == "J") {
+                    entered.countDown()
+                    gate.await(5, TimeUnit.SECONDS)
+                }
+                return value
+            }
+
+            override fun confirm(code: String, div: String) = backing.confirm(code, div)
+        }
+        val meters = SimpleMeterRegistry()
+        val pool = pool(trIds = listOf("H0UNCNT0"), marketDivs = divs, silenceMillis = 1_000, meters = meters)
+
+        pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
+        server.awaitMessages(1)
+        server.broadcastText(ackFrame("047040", success = true, trId = "H0UNCNT0"))
+        awaitConfirmed(meters, 1)
+        now += 2_000
+        pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
+        assertEquals(setOf("047040"), pool.degradedSymbols())
+
+        backing.confirm("047040", "J")
+        val switching = thread { pool.maintain(linkedSetOf("047040"), subscribeAllowed = true) }
+        assertTrue(entered.await(5, TimeUnit.SECONDS))
+        server.broadcastText(tickFrame("H0UNCNT0", "047040"))
+        Thread.sleep(200)
+        gate.countDown()
+        switching.join(5_000)
+
+        await().atMost(Duration.ofSeconds(5)).until { meters.counter("tick.in").count() > 0 }
+        now += 2_000
+        pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
+
+        assertEquals(setOf("047040"), pool.degradedSymbols())
+        assertEquals("J", backing.get("047040"))
     }
 
     @Test
