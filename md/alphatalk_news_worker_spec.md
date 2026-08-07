@@ -317,7 +317,7 @@ stream payload (ws_api_spec §4.3 확장 — ⚠️ §6 증보):
 **트리거와 멱등** — 종목 다이제스트와 같은 장치를 그대로 쓴다:
 
 - ingest 스케줄러가 매일 **17:40 KST**에 `XADD queue:ingest type=digest codes=MARKET sourceId=digest:MARKET:{yyyy-MM-dd}` 1건을 적재한다(redis_contract v0.16 §2.3 — `MARKET`은 의사코드). 종목 잡(18:00)보다 20분 앞서는 이유는 종목 브리핑이 삽입할 시장 분석이 그때까지 완성돼 있을 확률을 높이기 위해서다 — 보장이 아니라 헤드룸이고, 못 맞추면 §4.2의 생략 규칙이 흡수한다.
-- **적재는 설정 게이트 뒤에 있고 기본 off다** — `MARKET` 분기를 모르는 구버전 llm-worker(`DigestProcessor`)가 이 잡을 받으면 클러스터 0건 종목처럼 브리핑 없이 ACK해 버리고, 멱등 마커 때문에 재적재도 안 된다(조용한 유실). 따라서 배포 순서는 **소비자 먼저**다: N7 분기가 모든 llm-worker 인스턴스에 배포된 뒤 ingest의 시장 잡 트리거를 켠다.
+- **적재는 설정 게이트(`market-enabled`) 뒤에 있고 기본 on이다.** 게이트를 남겨 둔 이유는 배포 순서 때문이다 — `MARKET` 분기를 모르는 구버전 llm-worker(`DigestProcessor`)가 이 잡을 받으면 클러스터 0건 종목처럼 브리핑 없이 ACK해 버리고, 멱등 마커 때문에 재적재도 안 된다(그날치 조용한 유실). **N7을 처음 올리는 배포에서는 llm-worker를 먼저 올리거나, 그 창에서 ingest의 게이트를 잠시 off로 둔다.** 유실은 하루치에 그치고 다음 날 정상화되므로 롤백 사유는 아니다.
 - 원자 적재(§4.1의 마커 확인→XADD→마커 기록 단일 실행)·기동 보충·재조정 규칙은 시장 잡에도 동일 적용된다. 멱등 키는 `digest:MARKET:{date}` → `market_digest(date)`.
 - **재실행의 교체 규칙**: LLM·검색 결과는 비결정적이라 재처리(중복 XADD·persist 후 XACK 전 종료)가 같은 날짜에 다른 결과를 만들 수 있다. `market_digest` 쓰기는 **기존 행이 `degraded=true`이고 새 결과가 `degraded=false`일 때만 교체**하고, 그 외에는 no-op(먼저 쓴 결과 유지)다 — 완성본이 나중에 온 낮은 품질본으로 덮이지 않고, 종목 브리핑 간 삽입 편차는 최대 한 번의 상향 전환뿐이다.
 - llm-worker가 같은 그룹 `g:llm`으로 소비한다. `codes=MARKET`이면 `MarketDigestProcessor`로 분기한다.
@@ -519,7 +519,7 @@ SPRING_PROFILES_ACTIVE=local LLM_PROVIDER=fake ./gradlew :worker-llm:bootRun
 
 ## 9. 구현 단계 & DoD
 
-> **상태(2026-08-07): N0~N7 전 단계 구현 완료.** LLM·임베딩은 포트 뒤에 있고 기본 프로파일은 API 키 미설정 시 fail-closed한다. local은 Claude/Codex CLI 구독을 고르고 test는 명시적 fake를 쓴다. N7 시장 잡 트리거는 게이트 기본 off — 소비자 전체 배포 후 `alphatalk.ingest.digest.market-enabled=true`로 켠다(§4.3). 실서비스 투입 전 남은 것: 키 주입, RSS 소스 목록·시드 종목 설정(§10-5·§2.2), 임베딩 제공자 확정(§10-1), CLI 검색 권한 확정(§10-11).
+> **상태(2026-08-07): N0~N7 전 단계 구현 완료.** LLM·임베딩은 포트 뒤에 있고 기본 프로파일은 API 키 미설정 시 fail-closed한다. local은 Claude/Codex CLI 구독을 고르고 test는 명시적 fake를 쓴다. N7 시장 잡 트리거는 게이트 기본 on(`alphatalk.ingest.digest.market-enabled`)이며, 첫 배포에서만 llm-worker를 먼저 올린다(§4.3). 실서비스 투입 전 남은 것: 키 주입, RSS 소스 목록·시드 종목 설정(§10-5·§2.2), 임베딩 제공자 확정(§10-1), CLI 검색 권한 확정(§10-11).
 
 | 단계 | 범위 | DoD |
 |---|---|---|
@@ -530,7 +530,7 @@ SPRING_PROFILES_ACTIVE=local LLM_PROVIDER=fake ./gradlew :worker-llm:bootRun
 | **N4** | 일일 다이제스트 | `digest:{code}:{date}` 멱등 — 잡 2회 적재에도 브리핑 1건 · 호재/악재 리스트 노출 |
 | **N5** | 운영: DLQ·XPENDING/XCLAIM·메트릭·알람 | poison 5회 초과 → DLQ 격리 · PEL 알람 동작 |
 | **N6** | 섹터·매크로(§3.6): scope 판정 · 섹터 fan-out · 다이제스트 sectorIssues/marketIssues — **선행: `sector`·`stock_master.sector_code` 적재(worker-batch `industry_sync`)** | 금리 인상 기사 1건 → 은행 섹터 커버 종목 각 방에 `scope=SECTOR` 이벤트 1건씩 · MARKET 기사는 방 이벤트 0건 + 다이제스트 반영 |
-| **N7** | 시장 다이제스트(§4.3): `MARKET` 잡 트리거(게이트 기본 off) · 3층 입력(팩트시트·MARKET 클러스터·웹 리서치) · `market_digest` 쓰기(교체 규칙 §4.3) · 종목 브리핑 `marketAnalysis` 삽입 — **선행: `daily_candle` 적재(worker-price `daily_candle_sync`)·`investor_flow_daily` 적재(worker-batch), 소비자 먼저 배포 후 트리거 on** | `digest:MARKET:{date}` 멱등 — 잡 2회 적재에도 1건 · 검색 차단 상태에서 `degraded=true`로 생성 · 완성본이 degraded 재실행으로 덮이지 않음 · 3층 전부 빈 잡(휴장일)은 DLQ가 아니라 무브리핑 ACK · `market_digest` 존재 시 종목 브리핑에 `marketAnalysis` 포함, 부재 시 필드 생략(브리핑은 정상 생성) |
+| **N7** | 시장 다이제스트(§4.3): `MARKET` 잡 트리거(게이트 기본 on) · 3층 입력(팩트시트·MARKET 클러스터·웹 리서치) · `market_digest` 쓰기(교체 규칙 §4.3) · 종목 브리핑 `marketAnalysis` 삽입 — **선행: `daily_candle` 적재(worker-price `daily_candle_sync`)·`investor_flow_daily` 적재(worker-batch), 첫 배포는 소비자 먼저** | `digest:MARKET:{date}` 멱등 — 잡 2회 적재에도 1건 · 검색 차단 상태에서 `degraded=true`로 생성 · 완성본이 degraded 재실행으로 덮이지 않음 · 3층 전부 빈 잡(휴장일)은 DLQ가 아니라 무브리핑 ACK · `market_digest` 존재 시 종목 브리핑에 `marketAnalysis` 포함, 부재 시 필드 생략(브리핑은 정상 생성) |
 
 각 단계 = PR 1개(git_convention: scope=worker-ingest/worker-llm). `ClusterAssigner` 판정 로직은 refcount 규칙과 동급이다 — 단위 테스트 없는 변경 금지.
 
