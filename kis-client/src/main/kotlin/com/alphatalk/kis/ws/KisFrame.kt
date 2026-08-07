@@ -1,7 +1,7 @@
 package com.alphatalk.kis.ws
 
 sealed interface KisFrame {
-    data class Ticks(val ticks: List<KisTick>) : KisFrame
+    data class Ticks(val trId: String, val ticks: List<KisTick>) : KisFrame
 
     data class PingPong(val raw: String) : KisFrame
 

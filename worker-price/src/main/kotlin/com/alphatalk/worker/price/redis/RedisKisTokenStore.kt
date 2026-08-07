@@ -1,5 +1,6 @@
 package com.alphatalk.worker.price.redis
 
+import com.alphatalk.contracts.Keys
 import com.alphatalk.kis.auth.KisTokenStore
 import org.springframework.data.redis.core.StringRedisTemplate
 import org.springframework.data.redis.core.script.DefaultRedisScript
@@ -39,11 +40,11 @@ class RedisKisTokenStore(
         redis.opsForValue().set(issuedKey(keyId), at.toEpochMilli().toString())
     }
 
-    private fun tokenKey(keyId: String) = "kis:token:$keyId"
+    private fun tokenKey(keyId: String) = Keys.kisToken(keyId)
 
-    private fun lockKey(keyId: String) = "kis:token:lock:$keyId"
+    private fun lockKey(keyId: String) = Keys.kisTokenLock(keyId)
 
-    private fun issuedKey(keyId: String) = "kis:token:issued:$keyId"
+    private fun issuedKey(keyId: String) = Keys.kisTokenIssued(keyId)
 
     companion object {
         private val COMPARE_DELETE = DefaultRedisScript(

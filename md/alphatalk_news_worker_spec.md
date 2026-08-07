@@ -261,7 +261,7 @@ stream payload (ws_api_spec §4.3 확장 — ⚠️ §6 증보):
   "title": "한은, 기준금리 25bp 인상", "summary": "…", "sentiment": "POSITIVE", "sources": [ … ], "occurredAt": … }
 ```
 
-> 증권사 **투자의견**은 이 파이프라인을 타지 않는다 — worker-batch가 `stream_event` 저장 후 `stream:{code}`를 직접 발행한다(llm-worker와 공동 생산자, [KIS 워커 명세](alphatalk_kis_worker_spec.md) §3.3 · Redis 계약 v0.7). 라우팅은 같지만 payload는 WS v0.6의 `kind=opinion`·`opinion{}` 하위 호환 확장을 쓴다. `queue:ingest`·llm-worker는 관여하지 않는다.
+> 증권사 **투자의견**은 이 파이프라인을 타지 않는다 — worker-batch가 `stream_event` 저장 후 `stream:{code}`를 직접 발행한다(llm-worker와 공동 생산자, [KIS 워커 명세](alphatalk_kis_worker_spec.md) §3.3 · Redis 계약 v0.7). 라우팅은 같지만 payload는 WS v0.7의 `kind=opinion`·`opinion{}` 하위 호환 확장을 쓴다. `queue:ingest`·llm-worker는 관여하지 않는다.
 
 ---
 
@@ -316,7 +316,7 @@ stream payload (ws_api_spec §4.3 확장 — ⚠️ §6 증보):
 
 **트리거와 멱등** — 종목 다이제스트와 같은 장치를 그대로 쓴다:
 
-- ingest 스케줄러가 매일 **17:40 KST**에 `XADD queue:ingest type=digest codes=MARKET sourceId=digest:MARKET:{yyyy-MM-dd}` 1건을 적재한다(redis_contract v0.16 §2.3 — `MARKET`은 의사코드). 종목 잡(18:00)보다 20분 앞서는 이유는 종목 브리핑이 삽입할 시장 분석이 그때까지 완성돼 있을 확률을 높이기 위해서다 — 보장이 아니라 헤드룸이고, 못 맞추면 §4.2의 생략 규칙이 흡수한다.
+- ingest 스케줄러가 매일 **17:40 KST**에 `XADD queue:ingest type=digest codes=MARKET sourceId=digest:MARKET:{yyyy-MM-dd}` 1건을 적재한다(redis_contract v0.18 §2.3 — `MARKET`은 의사코드). 종목 잡(18:00)보다 20분 앞서는 이유는 종목 브리핑이 삽입할 시장 분석이 그때까지 완성돼 있을 확률을 높이기 위해서다 — 보장이 아니라 헤드룸이고, 못 맞추면 §4.2의 생략 규칙이 흡수한다.
 - **적재는 설정 게이트(`market-enabled`) 뒤에 있고 기본 on이다.** 게이트를 남겨 둔 이유는 배포 순서 때문이다 — `MARKET` 분기를 모르는 구버전 llm-worker(`DigestProcessor`)가 이 잡을 받으면 클러스터 0건 종목처럼 브리핑 없이 ACK해 버리고, 멱등 마커 때문에 재적재도 안 된다(그날치 조용한 유실). **N7을 처음 올리는 배포에서는 llm-worker를 먼저 올리거나, 그 창에서 ingest의 게이트를 잠시 off로 둔다.** 유실은 하루치에 그치고 다음 날 정상화되므로 롤백 사유는 아니다.
 - 원자 적재(§4.1의 마커 확인→XADD→마커 기록 단일 실행)·기동 보충·재조정 규칙은 시장 잡에도 동일 적용된다. 멱등 키는 `digest:MARKET:{date}` → `market_digest(date)`.
 - **재실행의 교체 규칙**: LLM·검색 결과는 비결정적이라 재처리(중복 XADD·persist 후 XACK 전 종료)가 같은 날짜에 다른 결과를 만들 수 있다. `market_digest` 쓰기는 **기존 행이 `degraded=true`이고 새 결과가 `degraded=false`일 때만 교체**하고, 그 외에는 no-op(먼저 쓴 결과 유지)다 — 완성본이 나중에 온 낮은 품질본으로 덮이지 않고, 종목 브리핑 간 삽입 편차는 최대 한 번의 상향 전환뿐이다.
@@ -454,8 +454,8 @@ Liquibase 마이그레이션(`db-migrations` 모듈, `news/` changelog — Flywa
 | :contracts | `Queues`·`Keys.seenIngest/clusterLock`·`IngestQueueEntry`·`StreamData` v0.5 확장 | ✅ 반영 (N0) |
 | :contracts | `StreamCategory` + `IngestType.streamCategory()` — 수집 type→발행 category·이벤트 type 관통 매핑 | ✅ 반영 |
 | redis_contract **v0.7** §1.1 | `stream:{code}` 공동 발행자 batch-worker(투자의견 직접 발행 — KIS 명세 §3.3, llm-worker 비관여) | ✅ 반영 |
-| redis_contract **v0.16** §2.3 | digest 엔트리 `codes`에 의사코드 `MARKET` 허용 — 시장 다이제스트 잡(`sourceId=digest:MARKET:{date}`, §4.3) | ✅ 반영 |
-| ws_api_spec **v0.7** §4.3 | `digest.marketAnalysis{}` optional 필드 — 시장 다이제스트 삽입(§4.2·§4.3), 비파괴 | ✅ 반영 |
+| redis_contract **v0.18** §2.3 | digest 엔트리 `codes`에 의사코드 `MARKET` 허용 — 시장 다이제스트 잡(`sourceId=digest:MARKET:{date}`, §4.3) | ✅ 반영 |
+| ws_api_spec **v0.8** §4.3 | `digest.marketAnalysis{}` optional 필드 — 시장 다이제스트 삽입(§4.2·§4.3), 비파괴 | ✅ 반영 |
 | KIS 워커 명세 §4 | worker-llm의 `daily_candle`·`investor_flow_daily`·`stock_master` **읽기 전용** 소비자 표기(§4.3 팩트시트) | ✅ 반영 |
 
 ---

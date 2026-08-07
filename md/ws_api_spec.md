@@ -1,7 +1,8 @@
-# Alpha Talk — WebSocket(STOMP) API 명세 v0.7
+# Alpha Talk — WebSocket(STOMP) API 명세 v0.8
 **WS Gateway · 실시간 푸시 전용**
 
-> **v0.6 → v0.7**: `digest{}`에 optional `marketAnalysis{}` 추가 — 하루 1건 생성되는 시장 매크로 브리핑(순환매·수급·해외 지표)을 전 종목 일일 브리핑에 동일하게 삽입([뉴스 파이프라인 명세](alphatalk_news_worker_spec.md) §4.3). 생성이 늦거나 실패하면 필드가 생략된다. 기존 필드 변경 없음 — 비파괴.
+> **v0.7 → v0.8**: `digest{}`에 optional `marketAnalysis{}` 추가 — 하루 1건 생성되는 시장 매크로 브리핑(순환매·수급·해외 지표)을 전 종목 일일 브리핑에 동일하게 삽입([뉴스 파이프라인 명세](alphatalk_news_worker_spec.md) §4.3). 생성이 늦거나 실패하면 필드가 생략된다. 기존 필드 변경 없음 — 비파괴.
+> **v0.6 → v0.7**: `opinion{}`에서 `ratingCode`·`previousRatingCode` **제거** — KIS 실계정 계측 결과 `invt_opnn_cls_code`는 등급 분류가 아니라 위치 값(현재 의견=2·직전 의견=3 고정)이라 정보가 없다([KIS 워커 명세](alphatalk_kis_worker_spec.md) §3.3·§9-7). 아직 발행 코드가 없어 기수신 클라이언트 영향도 없다. 필수 필드는 `brokerCode`·`rating`·`businessDate`.
 > **v0.5 → v0.6**: `stream`의 `category=report`에 증권사 투자의견 subtype 추가 — optional `kind=opinion`·`opinion{}` 필드. STOMP 목적지·봉투·기존 필드는 변경 없음([KIS 워커 명세](alphatalk_kis_worker_spec.md) §3.3).
 > **v0.4 → v0.5**: `stream` payload 확장(§4.3) — `sentiment`·`scope`·`sector`·`sources[]`(news) · `digest{}`(ai) **optional** 필드 추가([뉴스 파이프라인 명세](alphatalk_news_worker_spec.md) §3.5·§3.6·§4.2). 기존 필드 변경 없음 — 모르는 필드는 무시하면 된다(비파괴).
 > **v0.3 → v0.4**: 게이트웨이 구현 스택을 WebFlux → **Spring MVC + STOMP 브로커**로 변경 (하단 구현 노트만 수정, 클라이언트 노출 프로토콜 §1~§9는 변경 없음)
@@ -144,11 +145,9 @@ accept-version:1.2
 
   "kind": "opinion",
   "opinion": {
-    "brokerCode": "0000",
-    "brokerName": "미래에셋증권",
-    "ratingCode": "1",
+    "brokerCode": "00005",
+    "brokerName": "미래에셋",
     "rating": "매수",
-    "previousRatingCode": "2",
     "previousRating": "중립",
     "targetPrice": 95000,
     "businessDate": "20260727"
@@ -161,7 +160,8 @@ accept-version:1.2
   - `digest`: `category=ai` 일일 브리핑. `digest.marketAnalysis`는 그 안에서도 optional이다 — 하루 1건의 시장 브리핑을 전 종목에 동일 삽입하며(종목별 내용이 아니다), 생성 지연·실패 시 생략된다. `degraded=true`는 일부 입력(해외 리서치 등)이 빠진 채 생성됐다는 뜻이고, `global[]` 항목의 `sourceIds`가 `sources[]`의 `id`를 가리켜 수치별 검색 근거를 잇는다. 신선도 판단은 `date`가 아니라 `asOf`(생성 기준 시각)·`factDate`(국내 데이터 기준 거래일)로 한다 — 지연 생성 시 `asOf`가 늦고, 주말·휴장일엔 `factDate`가 지난 거래일이며, 국내 팩트 층이 빠진 산출물엔 `factDate`가 없다(optional)
   - `kind=opinion`·`opinion`: `category=report`인 증권사 투자의견
 - 투자의견은 `summary`·`sourceUrl`·`sentiment`를 싣지 않는다. `occurredAt`은 최초 수집 시각이다. KIS가 제공한 영업일자는 `opinion.businessDate`에 원문 그대로 둔다.
-- `opinion.brokerName`·`previousRatingCode`·`previousRating`·`targetPrice`는 원천 값이 없으면 `null`일 수 있다. `brokerCode`·`ratingCode`·`rating`·`businessDate`는 필수다.
+- `opinion.brokerCode`는 KIS 회원사 마스터의 5자리 코드, `opinion.brokerName`은 KIS 응답의 회원사명이다. `rating`·`previousRating`은 회원사가 쓴 표기 그대로다(`매수`·`BUY`·`NotRated` 등 — 표준화하지 않는다).
+- `opinion.brokerName`·`previousRating`·`targetPrice`는 원천 값이 없으면 `null`일 수 있다(목표가는 KIS가 `0`으로 주는 무의견도 `null`). `brokerCode`·`rating`·`businessDate`는 필수다.
 - 뉴스 상세 구조·생성 규칙은 [뉴스 파이프라인 명세](alphatalk_news_worker_spec.md) §3.5·§3.6·§4.2, 투자의견 수집·멱등 규칙은 [KIS 워커 명세](alphatalk_kis_worker_spec.md) §3.3이 소유한다.
 
 ### 4.4 `post` (글/댓글)

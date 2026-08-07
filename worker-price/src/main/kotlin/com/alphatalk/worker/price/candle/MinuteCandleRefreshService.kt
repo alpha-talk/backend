@@ -2,6 +2,7 @@ package com.alphatalk.worker.price.candle
 
 import com.alphatalk.kis.rest.KisMinuteCandle
 import com.alphatalk.worker.price.calendar.MarketCalendar
+import com.alphatalk.worker.price.market.MarketDivStore
 import io.micrometer.core.instrument.MeterRegistry
 import org.slf4j.LoggerFactory
 import java.time.Duration
@@ -23,6 +24,7 @@ class MinuteCandleRefreshService(
     private val refreshLock: MinuteRefreshLock,
     private val watermarks: MinuteRefreshWatermarkStore,
     private val marketDivs: MinuteMarketDivStore,
+    private val knownDivs: MarketDivStore,
     private val freshSeconds: Long,
     private val meters: MeterRegistry,
     private val waitTimeoutMillis: Long = 2_000,
@@ -106,10 +108,10 @@ class MinuteCandleRefreshService(
         if (!calendar.isTradingDay()) return 0
         val at = now()
         val date = at.toLocalDate().format(DateTimeFormatter.BASIC_ISO_DATE)
-        var div = marketDivs.get(code, date)
+        val pinned = marketDivs.get(code, date)
         val storedLatest = store.latestTime(code, date)
-        if (isComplete(code, date, storedLatest, div)) return 0
-        if (div == null && storedLatest != null) {
+        if (isComplete(code, date, storedLatest, pinned)) return 0
+        if (pinned == null && storedLatest != null) {
             log.warn(
                 "minute candle 그날 구분 기록이 없는데 적재분이 있다 - 구분 혼입을 막기 위해 그날은 갱신하지 않는다: code={} date={} latest={}",
                 code,
@@ -123,34 +125,42 @@ class MinuteCandleRefreshService(
             val last = lastFetchedAt[code]
             if (last != null && Duration.between(last, at.toInstant()).seconds < freshSeconds) return 0
         }
-        var probing = div == null
+        var div = pinned ?: knownDivs.get(code)
+        var pinnedDiv = pinned
         val budget = FetchBudget(deadlineMillis)
         var total = 0
         repeat(MAX_DIV_PASSES) {
-            val outcome = fetchPass(code, date, at, div ?: DIV_UNIFIED, probing, budget)
+            val used = div ?: DIV_UNIFIED
+            val outcome = fetchPass(code, date, at, used, budget)
             total += outcome.upserted
-            if (probing && outcome.resolvedUnified) {
-                marketDivs.put(code, date, DIV_UNIFIED)
-                meters.counter("minute.candle.market.div", "div", DIV_UNIFIED).increment()
+            if (outcome.resolvedKrx) {
+                watermarks.clear(code, date)
+                pinnedDiv = pinDiv(code, date, DIV_KRX, pinnedDiv)
+                knownDivs.confirm(code, DIV_KRX)
+                div = DIV_KRX
+                return@repeat
             }
-            if (!outcome.resolvedKrx) {
-                lastFetchedAt[code] = at.toInstant()
-                return total
+            if (outcome.upserted > 0) {
+                pinnedDiv = pinDiv(code, date, used, pinnedDiv)
+                if (used == DIV_UNIFIED) knownDivs.confirm(code, DIV_UNIFIED)
             }
-            watermarks.clear(code, date)
-            marketDivs.put(code, date, DIV_KRX)
-            meters.counter("minute.candle.market.div", "div", DIV_KRX).increment()
-            div = DIV_KRX
-            probing = false
+            lastFetchedAt[code] = at.toInstant()
+            return total
         }
         lastFetchedAt[code] = at.toInstant()
         return total
     }
 
+    private fun pinDiv(code: String, date: String, div: String, pinnedDiv: String?): String {
+        if (pinnedDiv == div) return div
+        marketDivs.put(code, date, div)
+        meters.counter("minute.candle.market.div", "div", div).increment()
+        return div
+    }
+
     private data class PassOutcome(
         val upserted: Int,
         val resolvedKrx: Boolean = false,
-        val resolvedUnified: Boolean = false,
     )
 
     private class FetchBudget(private val deadlineMillis: Long) {
@@ -171,7 +181,6 @@ class MinuteCandleRefreshService(
         date: String,
         at: ZonedDateTime,
         div: String,
-        probing: Boolean,
         budget: FetchBudget,
     ): PassOutcome {
         val openTime = openTimeOf(div)
@@ -190,7 +199,6 @@ class MinuteCandleRefreshService(
         var from = LocalTime.parse(gapStart, HHMM)
         var sawZeroPage = false
         var reachedCeiling = false
-        var resolvedUnified = false
         var page = 0
         while (page < MAX_PAGES) {
             if (!budget.tryConsume()) {
@@ -226,7 +234,6 @@ class MinuteCandleRefreshService(
             val valid = chart.candles.filter {
                 it.date == date && it.time >= openBar && it.time <= closeBar && !it.isZeroPriced()
             }
-            if (probing && div == DIV_UNIFIED && valid.isNotEmpty()) resolvedUnified = true
             valid.forEach { byTime[it.time] = it }
             if (to >= ceiling) {
                 reachedCeiling = true
@@ -247,13 +254,13 @@ class MinuteCandleRefreshService(
                 meters.counter("minute.candle.empty.complete").increment()
                 watermarks.record(code, date, ceiling.format(HHMM))
             }
-            return PassOutcome(0, resolvedUnified = resolvedUnified)
+            return PassOutcome(0)
         }
         val upserted = upsertWithRetry(code, date, rows)
         if (reachedCeiling && !sawZeroPage) watermarks.record(code, date, ceiling.format(HHMM))
         meters.counter("minute.candle.refresh").increment(upserted.toDouble())
         log.info("minute candle refresh: code={} date={} div={} gapStart={} rows={}", code, date, div, gapStart, upserted)
-        return PassOutcome(upserted, resolvedUnified = resolvedUnified)
+        return PassOutcome(upserted)
     }
 
     private fun upsertWithRetry(code: String, date: String, rows: List<KisMinuteCandle>): Int = try {

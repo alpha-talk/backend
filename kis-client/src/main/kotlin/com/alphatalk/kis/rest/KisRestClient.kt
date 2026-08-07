@@ -30,13 +30,13 @@ class KisRestClient(
 ) {
     private val mapper: ObjectMapper = jacksonObjectMapper()
 
-    fun quoteSnapshot(account: KisAccount, code: String): KisQuoteSnapshot {
+    fun quoteSnapshot(account: KisAccount, code: String, marketDiv: String = MARKET_DIV_KRX): KisQuoteSnapshot {
         val json = getJson(
             account,
             INQUIRE_PRICE_PATH,
             TR_INQUIRE_PRICE,
             mapOf(
-                "FID_COND_MRKT_DIV_CODE" to "J",
+                "FID_COND_MRKT_DIV_CODE" to marketDiv,
                 "FID_INPUT_ISCD" to code,
             ),
         )
@@ -146,6 +146,53 @@ class KisRestClient(
         return KisMinuteChart(dailyVolume = dailyVolume, candles = candles)
     }
 
+    fun investOpinions(
+        account: KisAccount,
+        brokerQueryCode: String,
+        from: LocalDate,
+        to: LocalDate,
+    ): List<KisInvestOpinion> {
+        require(brokerQueryCode.length == INVEST_OPINION_QUERY_CODE_LENGTH && brokerQueryCode.all(Char::isDigit)) {
+            "invest opinion broker query code must be $INVEST_OPINION_QUERY_CODE_LENGTH digits: $brokerQueryCode"
+        }
+        val json = getJson(
+            account,
+            INVEST_OPINION_PATH,
+            TR_INVEST_OPINION,
+            mapOf(
+                "FID_COND_MRKT_DIV_CODE" to "J",
+                "FID_COND_SCR_DIV_CODE" to "16634",
+                "FID_INPUT_ISCD" to brokerQueryCode,
+                "FID_DIV_CLS_CODE" to "0",
+                "FID_INPUT_DATE_1" to from.format(DateTimeFormatter.BASIC_ISO_DATE),
+                "FID_INPUT_DATE_2" to to.format(DateTimeFormatter.BASIC_ISO_DATE),
+            ),
+        )
+        val rtCd = json.path("rt_cd").asText("")
+        if (rtCd != "0") {
+            throw KisClientException(
+                "invest opinion failed: keyId=${account.keyId} broker=$brokerQueryCode rt_cd=$rtCd msg_cd=${json.path("msg_cd").asText("")}",
+            )
+        }
+        return json.path("output").mapNotNull { row ->
+            val code = row.path("stck_shrn_iscd").asText("").trim()
+            val businessDate = row.path("stck_bsop_date").asText("").trim()
+            val rating = row.path("invt_opnn").asText("").trim()
+            if (code.isEmpty() || businessDate.isEmpty() || rating.isEmpty()) {
+                null
+            } else {
+                KisInvestOpinion(
+                    code = code,
+                    businessDate = businessDate,
+                    rating = rating,
+                    previousRating = row.path("rgbf_invt_opnn").asText("").trim().ifEmpty { null },
+                    targetPrice = row.path("hts_goal_prc").asText("").trim().toLongOrNull()?.takeIf { it > 0 },
+                    memberName = row.path("mbcr_name").asText("").trim().ifEmpty { null },
+                )
+            }
+        }
+    }
+
     internal fun getJson(account: KisAccount, path: String, trId: String, params: Map<String, String>): JsonNode {
         val first = send(account, path, trId, params)
         if (first.statusCode() == 401) {
@@ -193,8 +240,12 @@ class KisRestClient(
         const val TR_INQUIRE_PRICE = "FHKST01010100"
         const val TR_DAILY_CHART = "FHKST03010100"
         const val TR_MINUTE_CHART = "FHKST03010200"
+        const val TR_INVEST_OPINION = "FHKST663400C0"
+        const val INVEST_OPINION_QUERY_CODE_LENGTH = 3
+        const val INVEST_OPINION_PAGE_CAP = 100
         private const val INQUIRE_PRICE_PATH = "/uapi/domestic-stock/v1/quotations/inquire-price"
         private const val DAILY_CHART_PATH = "/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice"
         private const val MINUTE_CHART_PATH = "/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice"
+        private const val INVEST_OPINION_PATH = "/uapi/domestic-stock/v1/quotations/invest-opbysec"
     }
 }

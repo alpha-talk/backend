@@ -76,6 +76,42 @@ class EnvelopeJsonTest {
         assertFalse(json.contains("sector"))
         assertFalse(json.contains("sources"))
         assertFalse(json.contains("digest"))
+        assertFalse(json.contains("kind"))
+        assertFalse(json.contains("opinion"))
+    }
+
+    @Test
+    fun `stream 봉투 투자의견 왕복 - v0_7`() {
+        val envelope = Envelope(
+            type = "stream",
+            code = "005930",
+            eventId = "01J9Z8X7ABCDEFGHJKMNPQRSTV",
+            ts = 1719600000000,
+            data = StreamData(
+                category = "report",
+                title = "미래에셋 투자의견 매수",
+                occurredAt = 1719500000000,
+                kind = "opinion",
+                opinion = OpinionData(
+                    brokerCode = "00005",
+                    brokerName = "미래에셋",
+                    rating = "매수",
+                    previousRating = "중립",
+                    targetPrice = 95000,
+                    businessDate = "20260727",
+                ),
+            ),
+        )
+        val back = mapper.readValue<Envelope<StreamData>>(mapper.writeValueAsString(envelope))
+        assertEquals(envelope, back)
+    }
+
+    @Test
+    fun `투자의견 optional 필드 null 생략 - 필수 필드만 직렬화`() {
+        val json = mapper.writeValueAsString(
+            OpinionData(brokerCode = "00088", rating = "NotRated", businessDate = "20260807"),
+        )
+        assertEquals("""{"brokerCode":"00088","rating":"NotRated","businessDate":"20260807"}""", json)
     }
 
     @Test

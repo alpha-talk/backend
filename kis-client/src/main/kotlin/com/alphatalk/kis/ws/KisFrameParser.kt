@@ -58,7 +58,7 @@ object KisFrameParser {
         if (fieldsPerRecord < MIN_FIELDS_PER_RECORD) return KisFrame.Unknown(text)
         val ticks = (0 until count).mapNotNull { record -> toTick(fields, record * fieldsPerRecord) }
         if (ticks.size != count) return KisFrame.Unknown(text)
-        return KisFrame.Ticks(ticks)
+        return KisFrame.Ticks(trId, ticks)
     }
 
     private fun toTick(fields: List<String>, base: Int): KisTick? {

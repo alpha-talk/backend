@@ -3,6 +3,7 @@ package com.alphatalk.worker.price.poll
 import com.alphatalk.worker.price.calendar.MarketCalendar
 import com.alphatalk.worker.price.calendar.MarketPhase
 import com.alphatalk.worker.price.leader.LeaderLock
+import com.alphatalk.worker.price.market.MarketDivStore
 import com.alphatalk.worker.price.publish.QuotePublisher
 import io.micrometer.core.instrument.MeterRegistry
 import org.slf4j.LoggerFactory
@@ -12,6 +13,7 @@ import java.time.Clock
 class RestPollingScheduler(
     private val degraded: () -> Set<String>,
     private val fetcher: QuoteSnapshotFetcher,
+    private val marketDivs: MarketDivStore,
     private val publisher: QuotePublisher,
     private val calendar: MarketCalendar,
     private val leader: LeaderLock,
@@ -31,7 +33,7 @@ class RestPollingScheduler(
         var polled = 0
         symbols.forEach { code ->
             runCatching {
-                val snapshot = fetcher.fetch(code)
+                val snapshot = fetcher.fetch(code, marketDivs.get(code) ?: MarketDivStore.UNIFIED)
                 publisher.publish(code, snapshot.toQuoteData(), clock.millis())
                 polled += 1
             }.onFailure {

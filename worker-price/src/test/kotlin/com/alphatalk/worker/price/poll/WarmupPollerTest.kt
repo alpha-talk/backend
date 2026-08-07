@@ -22,9 +22,10 @@ class WarmupPollerTest {
     private fun poller(calendar: MarketCalendar, leader: LeaderLock = ToggleLeaderLock(leader = true)): WarmupPoller {
         val scheduler = RestPollingScheduler(
             degraded = { emptySet() },
-            fetcher = { code ->
+            fetcher = { code, _ ->
                 KisQuoteSnapshot(code, 71200, 700, 0.99, 70600, 71500, 70400, 1234567)
             },
+            marketDivs = com.alphatalk.worker.price.market.InMemoryMarketDivStore(),
             publisher = publisher,
             calendar = calendar,
             leader = leader,
