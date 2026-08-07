@@ -353,8 +353,9 @@ class SessionPoolTest {
         assertEquals(setOf("047040"), pool.degradedSymbols())
     }
 
+
     @Test
-    fun `재접속하면 침묵 감시를 다시 무장하되 학습한 구분은 유지한다`() {
+    fun `강등된 종목은 재접속을 거쳐도 틱이 다시 흐를 때까지 REST 폴백을 유지한다`() {
         val divs = InMemoryMarketDivStore()
         val meters = SimpleMeterRegistry()
         val pool = pool(trIds = listOf("H0UNCNT0"), marketDivs = divs, silenceMillis = 1_000, meters = meters)
@@ -368,12 +369,17 @@ class SessionPoolTest {
         assertEquals(setOf("047040"), pool.degradedSymbols())
 
         server.closeAllConnections()
-
         await().atMost(Duration.ofSeconds(10)).until {
             now += 200
             pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
             trKeysOf(server.receivedMessages, "H0UNCNT0").size >= 2
         }
+
+        assertEquals(setOf("047040"), pool.degradedSymbols())
+
+        server.broadcastText(tickFrame("H0UNCNT0", "047040"))
+        awaitTicksReceived(meters, 1)
+        pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
 
         assertTrue(pool.degradedSymbols().isEmpty())
     }
