@@ -116,6 +116,56 @@ class SessionPoolTest {
     }
 
     @Test
+    fun `분봉이 뒤늦게 KRX로 판정하면 활성 구독도 그 채널로 갈아탄다`() {
+        val divs = InMemoryMarketDivStore()
+        val meters = SimpleMeterRegistry()
+        val pool = pool(trIds = listOf("H0UNCNT0"), marketDivs = divs, silenceMillis = 1_000, meters = meters)
+
+        pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
+        server.awaitMessages(1)
+        server.broadcastText(ackFrame("047040", success = true, trId = "H0UNCNT0"))
+        awaitConfirmed(meters, 1)
+        now += 2_000
+        pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
+        assertEquals(setOf("047040"), pool.degradedSymbols())
+
+        divs.confirm("047040", "J")
+        pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
+
+        server.awaitMessages(3)
+        assertEquals(listOf("047040"), trKeysOf(server.receivedMessages, "H0STCNT0"))
+        assertTrue(unsubscribesOf(server.receivedMessages).isNotEmpty())
+        assertEquals(setOf("047040"), pool.degradedSymbols())
+
+        server.broadcastText(tickFrame("H0STCNT0", "047040"))
+        await().atMost(Duration.ofSeconds(5)).until { meters.counter("tick.in").count() > 0 }
+        pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
+
+        assertTrue(pool.degradedSymbols().isEmpty())
+    }
+
+    @Test
+    fun `틱이 흐르는 종목은 구분 기록을 다시 읽지 않는다`() {
+        val divs = InMemoryMarketDivStore()
+        val meters = SimpleMeterRegistry()
+        val pool = pool(trIds = listOf("H0UNCNT0"), marketDivs = divs, silenceMillis = 1_000, meters = meters)
+
+        pool.maintain(linkedSetOf("005930"), subscribeAllowed = true)
+        server.awaitMessages(1)
+        server.broadcastText(ackFrame("005930", success = true, trId = "H0UNCNT0"))
+        awaitConfirmed(meters, 1)
+        server.broadcastText(tickFrame("H0UNCNT0", "005930"))
+        await().atMost(Duration.ofSeconds(5)).until { meters.counter("tick.in").count() > 0 }
+
+        divs.confirm("005930", "J")
+        now += 2_000
+        pool.maintain(linkedSetOf("005930"), subscribeAllowed = true)
+
+        assertEquals(0.0, meters.counter("tick.div.resubscribed").count())
+        assertTrue(trKeysOf(server.receivedMessages, "H0STCNT0").isEmpty())
+    }
+
+    @Test
     fun `KRX 틱은 그 종목이 NXT 미상장이라는 증거가 아니라 구분을 기록하지 않는다`() {
         val divs = InMemoryMarketDivStore(mapOf("047040" to "J"))
         val meters = SimpleMeterRegistry()
