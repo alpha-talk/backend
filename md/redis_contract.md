@@ -153,7 +153,7 @@ ingest-worker 스케줄러(싱글턴)가 매일 적재하고 — 종목 잡은 1
 |---|---|
 | `type` | `"digest"` |
 | `sourceId` | `digest:{code}:{yyyy-MM-dd}` — 멱등 키(종목·일자당 브리핑 1건). 시장 다이제스트는 `digest:MARKET:{yyyy-MM-dd}`(일자당 1건) |
-| `codes` | 대상 종목 1개, 또는 의사코드 `MARKET`(시장 다이제스트, v0.16 — 실종목 코드와 형식이 달라 충돌하지 않는다) |
+| `codes` | 대상 종목 1개, 또는 의사코드 `MARKET`(시장 다이제스트, v0.18 — 실종목 코드와 형식이 달라 충돌하지 않는다) |
 | `source` | `"scheduler"` — `title`/`url`/`body` 공란 |
 
 처리 순서·불변식은 §2.2와 동일(persist → publish → ack). 생성물은 `type=AI` StreamEvent(뉴스 워커 명세 §4). 단 `codes=MARKET` 잡의 생성물은 `stream_event`가 아니라 `market_digest` 테이블이고 **발행이 없다**(persist → ack) — 방이 없어 배달할 채널이 없고, 종목 브리핑 생성 시 삽입되어 노출된다(뉴스 워커 명세 §4.2·§4.3).
