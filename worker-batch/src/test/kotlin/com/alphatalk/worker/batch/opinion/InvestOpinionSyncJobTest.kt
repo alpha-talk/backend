@@ -260,6 +260,26 @@ class InvestOpinionSyncJobTest {
     }
 
     @Test
+    fun `일시 실패한 회원사는 잡 말미에 1회 재시도해 같은 회차에 수집한다`() {
+        var attempts = 0
+        val published = job(
+            fetcher = { broker, _, _ ->
+                if (broker.code == "00005") {
+                    attempts++
+                    if (attempts == 1) error("transient") else listOf(row())
+                } else {
+                    emptyList()
+                }
+            },
+        ).syncOnce()
+
+        assertEquals(1, published)
+        assertEquals(2, attempts)
+        assertEquals(0, runs.lastFailCount)
+        assertEquals(listOf("SUCCESS"), runs.finished)
+    }
+
+    @Test
     fun `회원사 목록 조회가 실패하면 잡을 실패로 기록한다`() {
         val job = job(fetcher = { _, _, _ -> emptyList() }, directory = BrokerDirectory { error("master down") })
 
