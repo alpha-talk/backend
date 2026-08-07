@@ -412,4 +412,4 @@ idempotency_record(user_id, idem_key CHAR(26), action, response JSONB NULL, crea
 
 ---
 
-*core-api REST API 명세 v0.3 — WS 명세 v0.3·Redis 계약 v0.15·KIS 워커 명세 v0.5와 정합. 봉투/채널 문자열은 `:contracts`가 원천.*
+*core-api REST API 명세 v0.3 — WS 명세 v0.3·Redis 계약 v0.17·KIS 워커 명세 v0.7과 정합. 봉투/채널 문자열은 `:contracts`가 원천.*

@@ -40,6 +40,8 @@ class PriceOrchestratorTest {
         buffer = ConflationBuffer(),
         meters = SimpleMeterRegistry(),
         tickTrIds = PriceConfig.TICK_TR_IDS,
+        marketDivs = com.alphatalk.worker.price.market.InMemoryMarketDivStore(),
+        silenceMillis = Long.MAX_VALUE,
         backoff = BackoffPolicy(initialMillis = 50, jitterRatio = 0.0),
     )
 

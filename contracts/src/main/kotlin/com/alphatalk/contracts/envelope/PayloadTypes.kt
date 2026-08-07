@@ -25,7 +25,23 @@ data class StreamData(
     val sector: SectorRef? = null,
     val sources: List<SourceRef>? = null,
     val digest: DigestData? = null,
+    val kind: String? = null,
+    val opinion: OpinionData? = null,
 )
+
+@JsonInclude(JsonInclude.Include.NON_NULL)
+data class OpinionData(
+    val brokerCode: String,
+    val brokerName: String? = null,
+    val rating: String,
+    val previousRating: String? = null,
+    val targetPrice: Long? = null,
+    val businessDate: String,
+) {
+    companion object {
+        const val KIND = "opinion"
+    }
+}
 
 enum class Sentiment { POSITIVE, NEGATIVE, NEUTRAL }
 

@@ -18,7 +18,7 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
-@DataJpaTest(properties = ["spring.liquibase.change-log=classpath:db/changelog/batch/db.changelog-batch.yaml"])
+@DataJpaTest(properties = ["spring.liquibase.change-log=classpath:db/changelog/db.changelog-master.yaml"])
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
 @Import(JpaStockMasterStore::class)
 @Testcontainers(disabledWithoutDocker = true)
@@ -27,7 +27,9 @@ class JpaStockMasterStoreTest {
         @Container
         @ServiceConnection
         @JvmStatic
-        val postgres = PostgreSQLContainer("postgres:16-alpine")
+        val postgres = PostgreSQLContainer(
+            org.testcontainers.utility.DockerImageName.parse("pgvector/pgvector:pg16").asCompatibleSubstituteFor("postgres"),
+        )
     }
 
     @Autowired

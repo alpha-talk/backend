@@ -25,7 +25,15 @@ object Keys {
 
     fun kisRestRate(keyId: String) = "rate:kis-rest:$keyId"
 
+    fun kisToken(keyId: String) = "kis:token:$keyId"
+
+    fun kisTokenLock(keyId: String) = "kis:token:lock:$keyId"
+
+    fun kisTokenIssued(keyId: String) = "kis:token:issued:$keyId"
+
     fun minuteRefreshWatermark(code: String, date: String) = "minute:through:$code:$date"
+
+    fun marketDiv(code: String) = "market-div:$code"
 
     fun minuteMarketDiv(code: String, date: String) = "minute:market-div:$code:$date"
 

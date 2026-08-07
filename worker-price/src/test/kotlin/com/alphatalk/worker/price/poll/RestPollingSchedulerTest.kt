@@ -12,6 +12,7 @@ import java.time.Instant
 import java.time.ZoneId
 import java.time.ZonedDateTime
 import kotlin.test.Test
+import com.alphatalk.worker.price.market.InMemoryMarketDivStore
 import kotlin.test.assertEquals
 
 class RestPollingSchedulerTest {
@@ -29,12 +30,13 @@ class RestPollingSchedulerTest {
     private fun scheduler(
         symbols: Set<String>,
         publisher: QuotePublisher,
-        fetcher: QuoteSnapshotFetcher = QuoteSnapshotFetcher { snapshot(it) },
+        fetcher: QuoteSnapshotFetcher = QuoteSnapshotFetcher { code, _ -> snapshot(code) },
         calendar: MarketCalendar = MarketCalendar(enforced = false),
         leader: LeaderLock = ToggleLeaderLock(leader = true),
     ) = RestPollingScheduler(
         degraded = { symbols },
         fetcher = fetcher,
+        marketDivs = InMemoryMarketDivStore(),
         publisher = publisher,
         calendar = calendar,
         leader = leader,
@@ -59,7 +61,7 @@ class RestPollingSchedulerTest {
     @Test
     fun `한 종목이 실패해도 나머지는 발행된다`() {
         val publisher = RecordingPublisher()
-        val fetcher = QuoteSnapshotFetcher { code ->
+        val fetcher = QuoteSnapshotFetcher { code, _ ->
             if (code == "005930") throw KisClientException("boom")
             snapshot(code)
         }
