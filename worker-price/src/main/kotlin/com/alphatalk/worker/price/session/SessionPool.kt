@@ -2,10 +2,12 @@ package com.alphatalk.worker.price.session
 
 import com.alphatalk.kis.model.KisAccount
 import com.alphatalk.kis.model.KisLimits
+import com.alphatalk.kis.ws.KisFrameParser
 import com.alphatalk.kis.ws.KisSessionListener
 import com.alphatalk.kis.ws.KisTick
 import com.alphatalk.kis.ws.KisWebSocketSession
 import com.alphatalk.worker.price.conflation.ConflationBuffer
+import com.alphatalk.worker.price.market.MarketDivStore
 import io.micrometer.core.instrument.Gauge
 import io.micrometer.core.instrument.MeterRegistry
 import org.slf4j.LoggerFactory
@@ -20,6 +22,10 @@ class SessionPool(
     private val buffer: ConflationBuffer,
     private val meters: MeterRegistry,
     private val tickTrIds: List<String>,
+    private val marketDivs: MarketDivStore,
+    private val unifiedTrId: String = KisFrameParser.TR_ID_TICK_TOTAL,
+    private val krxTrId: String = KisFrameParser.TR_ID_TICK,
+    private val silenceMillis: Long = 20_000,
     maxRegistrationsPerSession: Int = KisLimits.MAX_REGISTRATIONS_PER_SESSION,
     private val removalGraceMillis: Long = 30_000,
     private val backoff: BackoffPolicy = BackoffPolicy(),
@@ -38,6 +44,11 @@ class SessionPool(
     private val assignments = mutableMapOf<String, PooledSession>()
     private val pendingRemovals = mutableMapOf<String, Long>()
     private val degraded = linkedSetOf<String>()
+    private val tickDivs = ConcurrentHashMap<String, String>()
+    private val lastTickAt = ConcurrentHashMap<String, Long>()
+    private val subscribedAt = ConcurrentHashMap<String, Long>()
+    private val silenceEscalated = ConcurrentHashMap.newKeySet<String>()
+    private val silenceDegraded = ConcurrentHashMap.newKeySet<String>()
 
     private data class Registration(val trId: String, val symbol: String)
 
@@ -59,6 +70,7 @@ class SessionPool(
     fun maintain(target: Set<String>, subscribeAllowed: Boolean) {
         reconcileAssignments(target)
         val now = clock()
+        if (subscribeAllowed) escalateSilent(now)
         sessions.forEach { session ->
             session.absorbConnectionLoss()
             if (session.state != SessionState.CONNECTED && session.state != SessionState.CONNECTING &&
@@ -79,6 +91,64 @@ class SessionPool(
 
     @Synchronized
     fun degradedSymbols(): Set<String> = degraded.toSet()
+
+    private fun trIdsFor(symbol: String): List<String> {
+        val chosen = tickDivs.computeIfAbsent(symbol) { marketDivs.get(it) ?: MarketDivStore.UNIFIED }
+        val tick = if (chosen == MarketDivStore.KRX) krxTrId else unifiedTrId
+        return tickTrIds.map { if (it == unifiedTrId) tick else it }
+    }
+
+    private fun escalateSilent(now: Long) {
+        assignments.keys.forEach { symbol ->
+            if (symbol in silenceDegraded) {
+                degraded += symbol
+                return@forEach
+            }
+            val since = subscribedAt[symbol] ?: return@forEach
+            if (lastTickAt.containsKey(symbol) || now - since < silenceMillis) return@forEach
+            val onUnified = tickDivs[symbol] != MarketDivStore.KRX
+            if (onUnified && silenceEscalated.add(symbol)) {
+                log.warn(
+                    "실시간 틱 침묵 - 통합 채널이 이 종목을 다루지 않는다고 보고 KRX 전용으로 재등록한다: code={} silenceMs={}",
+                    symbol,
+                    now - since,
+                )
+                meters.counter("tick.silence.escalated").increment()
+                tickDivs[symbol] = MarketDivStore.KRX
+                subscribedAt[symbol] = now
+                return@forEach
+            }
+            silenceDegraded += symbol
+            degraded += symbol
+            log.warn("실시간 틱이 두 채널 모두 침묵 - REST 폴링으로 넘긴다: code={}", symbol)
+            meters.counter("tick.silence.degraded").increment()
+        }
+    }
+
+    private fun onSymbolTick(symbol: String, now: Long) {
+        val first = lastTickAt.put(symbol, now) == null
+        if (!first) return
+        silenceDegraded.remove(symbol)
+        val div = tickDivs[symbol] ?: return
+        if (div == MarketDivStore.KRX && !silenceEscalated.contains(symbol)) return
+        marketDivs.confirm(symbol, div)
+        meters.counter("tick.market.div", "div", div).increment()
+    }
+
+    private fun rearmSilence(symbol: String) {
+        subscribedAt.remove(symbol)
+        lastTickAt.remove(symbol)
+        silenceEscalated.remove(symbol)
+        silenceDegraded.remove(symbol)
+    }
+
+    private fun forgetSymbol(symbol: String) {
+        tickDivs.remove(symbol)
+        lastTickAt.remove(symbol)
+        subscribedAt.remove(symbol)
+        silenceEscalated.remove(symbol)
+        silenceDegraded.remove(symbol)
+    }
 
     @Synchronized
     private fun applyAck(pooled: PooledSession, trId: String?, trKey: String?, success: Boolean) {
@@ -107,6 +177,7 @@ class SessionPool(
         pendingRemovals.entries.filter { it.value <= now }.map { it.key }.forEach { symbol ->
             pendingRemovals.remove(symbol)
             assignments.remove(symbol)?.assigned?.remove(symbol)
+            forgetSymbol(symbol)
         }
     }
 
@@ -158,7 +229,9 @@ class SessionPool(
             val current = session ?: return
             val now = clock()
             pending.entries.removeIf { now - it.value >= ackTimeoutMillis }
-            val wanted = assigned.flatMapTo(mutableSetOf()) { symbol -> tickTrIds.map { Registration(it, symbol) } }
+            val wanted = assigned.flatMapTo(mutableSetOf()) { symbol ->
+                trIdsFor(symbol).map { Registration(it, symbol) }
+            }
             (wanted - confirmed - pending.keys).forEach { registration ->
                 runCatching { current.subscribe(registration.symbol, registration.trId) }
                     .onSuccess { pending[registration] = now }
@@ -182,6 +255,9 @@ class SessionPool(
             if (pending.remove(registration) == null) return
             if (success) {
                 confirmed += registration
+                if (registration.trId == unifiedTrId || registration.trId == krxTrId) {
+                    subscribedAt.putIfAbsent(trKey, clock())
+                }
             } else {
                 log.warn("subscribe rejected, retrying: keyId={} trId={} code={}", account.keyId, trId, trKey)
             }
@@ -190,6 +266,7 @@ class SessionPool(
         fun clearSubscriptions() {
             confirmed.clear()
             pending.clear()
+            assigned.forEach(::rearmSilence)
         }
 
         fun disconnect() {
@@ -214,7 +291,11 @@ class SessionPool(
 
     private inner class FrameHandler(private val pooled: PooledSession) : KisSessionListener {
         override fun onTicks(ticks: List<KisTick>) {
-            ticks.forEach(buffer::offer)
+            val now = clock()
+            ticks.forEach { tick ->
+                buffer.offer(tick)
+                onSymbolTick(tick.code, now)
+            }
             meters.counter("tick.in").increment(ticks.size.toDouble())
         }
 
