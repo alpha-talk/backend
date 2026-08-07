@@ -120,7 +120,7 @@ class KisWebSocketSessionTest {
             transportErrors += t
         }
 
-        override fun onTicks(ticks: List<KisTick>) {
+        override fun onTicks(trId: String, ticks: List<KisTick>) {
             this.ticks += ticks
         }
 

@@ -1,6 +1,7 @@
 package com.alphatalk.worker.price.config
 
 import com.alphatalk.worker.price.conflation.ConflationBuffer
+import com.alphatalk.worker.price.market.InMemoryMarketDivStore
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory
 import org.springframework.data.redis.core.StringRedisTemplate
@@ -17,7 +18,7 @@ class PriceConfigTest {
     private val redisTemplate = StringRedisTemplate()
 
     private fun sessionPool(props: PriceProperties) =
-        config.sessionPool(props, ConflationBuffer(), SimpleMeterRegistry())
+        config.sessionPool(props, ConflationBuffer(), SimpleMeterRegistry(), InMemoryMarketDivStore())
 
     private fun demandSource() = config.demandSource(redisTemplate, connectionFactory)
 
@@ -52,7 +53,7 @@ class PriceConfigTest {
     }
 
     @Test
-    fun `틱 구독은 통합·시간외 TR만 쓴다 - KRX 전용 TR은 NXT 체결분이 빠진다`() {
+    fun `틱 구독 기본은 통합·시간외이고 KRX 전용은 종목별로 대체된다`() {
         assertEquals(listOf("H0UNCNT0", "H0STOUP0"), PriceConfig.TICK_TR_IDS)
     }
 

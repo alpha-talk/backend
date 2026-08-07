@@ -2,7 +2,7 @@ package com.alphatalk.kis.ws
 
 interface KisSessionListener {
     fun onOpen() {}
-    fun onTicks(ticks: List<KisTick>) {}
+    fun onTicks(trId: String, ticks: List<KisTick>) {}
     fun onSubscribeAck(trId: String?, trKey: String?, success: Boolean) {}
     fun onPingPong() {}
     fun onEncryptedDropped(trId: String) {}
