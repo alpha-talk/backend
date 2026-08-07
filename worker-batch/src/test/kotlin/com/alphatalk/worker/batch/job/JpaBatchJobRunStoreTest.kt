@@ -18,7 +18,7 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 
-@DataJpaTest(properties = ["spring.liquibase.change-log=classpath:db/changelog/batch/db.changelog-batch.yaml"])
+@DataJpaTest(properties = ["spring.liquibase.change-log=classpath:db/changelog/db.changelog-master.yaml"])
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
 @Import(JpaBatchJobRunStore::class)
 @Testcontainers(disabledWithoutDocker = true)
@@ -27,7 +27,9 @@ class JpaBatchJobRunStoreTest {
         @Container
         @ServiceConnection
         @JvmStatic
-        val postgres = PostgreSQLContainer("postgres:16-alpine")
+        val postgres = PostgreSQLContainer(
+            org.testcontainers.utility.DockerImageName.parse("pgvector/pgvector:pg16").asCompatibleSubstituteFor("postgres"),
+        )
     }
 
     @Autowired
@@ -43,6 +45,20 @@ class JpaBatchJobRunStoreTest {
         runs.succeed(first, 10, 0, Instant.now())
 
         assertNull(runs.start("stock_master_sync", "20260729", Instant.now()))
+    }
+
+    @Test
+    fun `restart는 같은 날 SUCCESS여도 다시 시작한다 - 일내 반복 잡`() {
+        val first = runs.restart("invest_opinion_sync", "20260807", Instant.now())
+        runs.succeed(first, 5, 0, Instant.now())
+
+        val second = runs.restart("invest_opinion_sync", "20260807", Instant.now())
+
+        assertEquals(first, second)
+        val row = repository.findById(second).orElseThrow()
+        assertEquals("RUNNING", row.status)
+        assertEquals(0, row.okCount)
+        assertNull(row.finishedAt)
     }
 
     @Test

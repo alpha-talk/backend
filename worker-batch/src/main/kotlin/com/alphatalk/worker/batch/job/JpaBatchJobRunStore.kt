@@ -68,6 +68,23 @@ interface BatchJobRunJpaRepository : JpaRepository<BatchJobRunEntity, Long> {
     @Query(
         """
         update BatchJobRunEntity r
+        set r.status = :running, r.startedAt = :startedAt,
+            r.finishedAt = null, r.error = null, r.okCount = 0, r.failCount = 0
+        where r.job = :job and r.runDate = :runDate
+        """,
+    )
+    fun restartAlways(
+        @Param("job") job: String,
+        @Param("runDate") runDate: String,
+        @Param("startedAt") startedAt: Instant,
+        @Param("running") running: String,
+    ): Int
+
+    @Transactional
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
+    @Query(
+        """
+        update BatchJobRunEntity r
         set r.status = :status, r.okCount = :okCount, r.failCount = :failCount, r.finishedAt = :finishedAt
         where r.id = :id
         """,
@@ -105,6 +122,17 @@ class JpaBatchJobRunStore(
         val existing = repository.findByJobAndRunDate(job, runDate)
             ?: return insertRunning(job, runDate, startedAt) ?: restartAfterLostRace(job, runDate, startedAt)
         return if (restarted(job, runDate, startedAt)) existing.id else null
+    }
+
+    override fun restart(job: String, runDate: String, startedAt: Instant): Long {
+        if (repository.restartAlways(job, runDate, startedAt, RUNNING) == 1) {
+            return requireNotNull(repository.findByJobAndRunDate(job, runDate)?.id)
+        }
+        insertRunning(job, runDate, startedAt)?.let { return it }
+        check(repository.restartAlways(job, runDate, startedAt, RUNNING) == 1) {
+            "batch_job_run restart lost race twice: job=$job runDate=$runDate"
+        }
+        return requireNotNull(repository.findByJobAndRunDate(job, runDate)?.id)
     }
 
     override fun succeed(id: Long, okCount: Int, failCount: Int, finishedAt: Instant) {

@@ -66,6 +66,8 @@ class StockMasterSyncJobTest {
 
         override fun start(job: String, runDate: String, startedAt: Instant): Long? = startResult
 
+        override fun restart(job: String, runDate: String, startedAt: Instant): Long = startResult ?: 1L
+
         override fun succeed(id: Long, okCount: Int, failCount: Int, finishedAt: Instant) {
             succeeded = Triple(id, okCount, failCount)
         }

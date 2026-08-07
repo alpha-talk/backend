@@ -388,6 +388,8 @@ class IndustrySyncJobTest {
 
         override fun start(job: String, runDate: String, startedAt: Instant): Long? = if (succeeded) null else 1L
 
+        override fun restart(job: String, runDate: String, startedAt: Instant): Long = 1L
+
         override fun succeed(id: Long, okCount: Int, failCount: Int, finishedAt: Instant) {
             succeeded = true
             succeededOk = okCount
