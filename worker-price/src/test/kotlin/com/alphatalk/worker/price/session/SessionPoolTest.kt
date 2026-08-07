@@ -3,6 +3,8 @@ package com.alphatalk.worker.price.session
 import com.alphatalk.kis.model.KisAccount
 import com.alphatalk.kis.test.FakeKisServer
 import com.alphatalk.worker.price.conflation.ConflationBuffer
+import com.alphatalk.worker.price.market.InMemoryMarketDivStore
+import com.alphatalk.worker.price.market.MarketDivStore
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import org.awaitility.Awaitility.await
@@ -36,13 +38,18 @@ class SessionPoolTest {
         graceMillis: Long = 1_000,
         ackTimeoutMillis: Long = 5_000,
         trIds: List<String> = listOf("H0STCNT0"),
+        marketDivs: MarketDivStore = InMemoryMarketDivStore(),
+        silenceMillis: Long = Long.MAX_VALUE,
+        meters: SimpleMeterRegistry = SimpleMeterRegistry(),
     ) = SessionPool(
         accounts = (1..accounts).map { KisAccount("key$it", "app$it", "secret$it") },
         wsUrl = server.url,
         approvalKeys = { "AK" },
         buffer = ConflationBuffer(),
-        meters = SimpleMeterRegistry(),
+        meters = meters,
         tickTrIds = trIds,
+        marketDivs = marketDivs,
+        silenceMillis = silenceMillis,
         maxRegistrationsPerSession = maxPerSession,
         removalGraceMillis = graceMillis,
         backoff = BackoffPolicy(initialMillis = 50, jitterRatio = 0.0),
@@ -61,6 +68,140 @@ class SessionPoolTest {
 
     private fun unsubscribesOf(messages: List<String>) =
         messages.map { mapper.readTree(it) }.filter { it.path("header").path("tr_type").asText() == "2" }
+
+    private fun awaitConfirmed(meters: SimpleMeterRegistry, count: Int) {
+        await().atMost(Duration.ofSeconds(5)).until {
+            meters.find("kis.subscribed.symbols").gauge()?.value()?.toInt() == count
+        }
+    }
+
+    private fun trKeysOf(messages: List<String>, trId: String) =
+        subscribesOf(messages)
+            .filter { it.path("body").path("input").path("tr_id").asText() == trId }
+            .map { it.path("body").path("input").path("tr_key").asText() }
+
+    @Test
+    fun `KRX로 확정된 종목은 통합 대신 KRX 체결 TR로 구독한다`() {
+        val pool = pool(
+            maxPerSession = 4,
+            trIds = listOf("H0UNCNT0", "H0STOUP0"),
+            marketDivs = InMemoryMarketDivStore(mapOf("047040" to "J")),
+        )
+
+        pool.maintain(linkedSetOf("047040", "005930"), subscribeAllowed = true)
+
+        server.awaitMessages(4)
+        assertEquals(listOf("005930"), trKeysOf(server.receivedMessages, "H0UNCNT0"))
+        assertEquals(listOf("047040"), trKeysOf(server.receivedMessages, "H0STCNT0"))
+        assertEquals(setOf("005930", "047040"), trKeysOf(server.receivedMessages, "H0STOUP0").toSet())
+    }
+
+    @Test
+    fun `통합 등록 뒤 침묵하면 KRX 체결 TR로 재등록한다`() {
+        val divs = InMemoryMarketDivStore()
+        val meters = SimpleMeterRegistry()
+        val pool = pool(trIds = listOf("H0UNCNT0"), marketDivs = divs, silenceMillis = 1_000, meters = meters)
+
+        pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
+        server.awaitMessages(1)
+        server.broadcastText(ackFrame("047040", success = true, trId = "H0UNCNT0"))
+        awaitConfirmed(meters, 1)
+
+        now += 2_000
+        pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
+
+        server.awaitMessages(3)
+        assertEquals(listOf("047040"), trKeysOf(server.receivedMessages, "H0STCNT0"))
+        assertTrue(unsubscribesOf(server.receivedMessages).isNotEmpty())
+        assertEquals(null, divs.get("047040"))
+    }
+
+    @Test
+    fun `재등록한 KRX에서 틱이 오면 그 종목의 구분을 확정 기록한다`() {
+        val divs = InMemoryMarketDivStore()
+        val meters = SimpleMeterRegistry()
+        val pool = pool(trIds = listOf("H0UNCNT0"), marketDivs = divs, silenceMillis = 1_000, meters = meters)
+
+        pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
+        server.awaitMessages(1)
+        server.broadcastText(ackFrame("047040", success = true, trId = "H0UNCNT0"))
+        awaitConfirmed(meters, 1)
+        now += 2_000
+        pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
+        server.awaitMessages(3)
+
+        server.broadcastText("0|H0STCNT0|001|047040^134058^16110^2^10^0.06^16000^16200^16000^0^0^0^0^4355991")
+
+        await().atMost(Duration.ofSeconds(5)).until { divs.get("047040") == "J" }
+    }
+
+    @Test
+    fun `두 채널 모두 침묵하면 REST 폴링 대상으로 강등한다`() {
+        val divs = InMemoryMarketDivStore()
+        val meters = SimpleMeterRegistry()
+        val pool = pool(trIds = listOf("H0UNCNT0"), marketDivs = divs, silenceMillis = 1_000, meters = meters)
+
+        pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
+        server.awaitMessages(1)
+        server.broadcastText(ackFrame("047040", success = true, trId = "H0UNCNT0"))
+        awaitConfirmed(meters, 1)
+        now += 2_000
+        pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
+        server.awaitMessages(3)
+        server.broadcastText(ackFrame("047040", success = true, trId = "H0STCNT0"))
+        awaitConfirmed(meters, 1)
+
+        now += 2_000
+        pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
+
+        assertEquals(setOf("047040"), pool.degradedSymbols())
+        assertEquals(null, divs.get("047040"))
+    }
+
+    @Test
+    fun `이미 KRX로 확정된 종목이 침묵하면 전환 단계 없이 바로 강등한다`() {
+        val divs = InMemoryMarketDivStore(mapOf("047040" to "J"))
+        val meters = SimpleMeterRegistry()
+        val pool = pool(trIds = listOf("H0UNCNT0"), marketDivs = divs, silenceMillis = 1_000, meters = meters)
+
+        pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
+        server.awaitMessages(1)
+        server.broadcastText(ackFrame("047040", success = true, trId = "H0STCNT0"))
+        awaitConfirmed(meters, 1)
+
+        now += 2_000
+        pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
+
+        assertEquals(setOf("047040"), pool.degradedSymbols())
+        assertEquals(0.0, meters.counter("tick.silence.escalated").count())
+    }
+
+    @Test
+    fun `재접속하면 침묵 감시를 다시 무장하되 학습한 구분은 유지한다`() {
+        val divs = InMemoryMarketDivStore()
+        val meters = SimpleMeterRegistry()
+        val pool = pool(trIds = listOf("H0UNCNT0"), marketDivs = divs, silenceMillis = 1_000, meters = meters)
+
+        pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
+        server.awaitMessages(1)
+        server.broadcastText(ackFrame("047040", success = true, trId = "H0UNCNT0"))
+        awaitConfirmed(meters, 1)
+        now += 2_000
+        pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
+        server.awaitMessages(3)
+        assertEquals(1.0, meters.counter("tick.silence.escalated").count())
+
+        server.closeAllConnections()
+
+        await().atMost(Duration.ofSeconds(10)).until {
+            now += 200
+            pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
+            trKeysOf(server.receivedMessages, "H0STCNT0").size >= 2
+        }
+
+        assertTrue(pool.degradedSymbols().isEmpty())
+        assertEquals(1.0, meters.counter("tick.silence.escalated").count())
+    }
 
     @Test
     fun `용량을 넘는 종목은 강등 목록에 남는다`() {

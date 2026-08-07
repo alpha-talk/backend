@@ -34,6 +34,8 @@ import com.alphatalk.worker.price.demand.DemandSource
 import com.alphatalk.worker.price.demand.RedisDemandSource
 import com.alphatalk.worker.price.leader.LeaderLock
 import com.alphatalk.worker.price.leader.RedisLeaderLock
+import com.alphatalk.worker.price.market.MarketDivStore
+import com.alphatalk.worker.price.market.RedisMarketDivStore
 import com.alphatalk.worker.price.poll.QuoteSnapshotFetcher
 import com.alphatalk.worker.price.poll.RestPollingScheduler
 import com.alphatalk.worker.price.poll.WarmupPoller
@@ -74,6 +76,7 @@ class PriceConfig {
         props: PriceProperties,
         buffer: ConflationBuffer,
         meters: MeterRegistry,
+        marketDivs: MarketDivStore,
     ): SessionPool {
         val accounts = parseAccounts(props.accountsJson)
         check(accounts.isNotEmpty()) {
@@ -87,9 +90,17 @@ class PriceConfig {
             buffer = buffer,
             meters = meters,
             tickTrIds = TICK_TR_IDS,
+            marketDivs = marketDivs,
+            unifiedTrId = KisFrameParser.TR_ID_TICK_TOTAL,
+            krxTrId = KisFrameParser.TR_ID_TICK,
+            silenceMillis = props.tickSilenceMs,
             removalGraceMillis = props.removalGraceMs,
         )
     }
+
+    @Bean
+    @ConditionalOnProperty("alphatalk.price.enabled", havingValue = "true")
+    fun marketDivStore(redis: StringRedisTemplate): MarketDivStore = RedisMarketDivStore(redis)
 
     @Bean
     @ConditionalOnProperty("alphatalk.price.enabled", havingValue = "true")
@@ -155,7 +166,7 @@ class PriceConfig {
             ),
             gate,
         )
-        return QuoteSnapshotFetcher { code -> rest.quoteSnapshot(account, code) }
+        return QuoteSnapshotFetcher { code, marketDiv -> rest.quoteSnapshot(account, code, marketDiv) }
     }
 
     @Bean
@@ -163,11 +174,13 @@ class PriceConfig {
     fun restPollingScheduler(
         pool: SessionPool,
         fetcher: QuoteSnapshotFetcher,
+        marketDivs: MarketDivStore,
         publisher: QuotePublisher,
         calendar: MarketCalendar,
         leader: LeaderLock,
         meters: MeterRegistry,
-    ): RestPollingScheduler = RestPollingScheduler(pool::degradedSymbols, fetcher, publisher, calendar, leader, meters)
+    ): RestPollingScheduler =
+        RestPollingScheduler(pool::degradedSymbols, fetcher, marketDivs, publisher, calendar, leader, meters)
 
     @Bean
     @ConditionalOnProperty("alphatalk.price.enabled", havingValue = "true")
@@ -320,6 +333,7 @@ class PriceConfig {
         refreshLock: MinuteRefreshLock,
         watermarks: MinuteRefreshWatermarkStore,
         marketDivs: MinuteMarketDivStore,
+        knownDivs: MarketDivStore,
         props: PriceProperties,
         meters: MeterRegistry,
     ): MinuteCandleRefreshService = MinuteCandleRefreshService(
@@ -329,6 +343,7 @@ class PriceConfig {
         refreshLock = refreshLock,
         watermarks = watermarks,
         marketDivs = marketDivs,
+        knownDivs = knownDivs,
         freshSeconds = props.minuteCandleFreshSec,
         meters = meters,
     )

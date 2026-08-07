@@ -30,13 +30,13 @@ class KisRestClient(
 ) {
     private val mapper: ObjectMapper = jacksonObjectMapper()
 
-    fun quoteSnapshot(account: KisAccount, code: String): KisQuoteSnapshot {
+    fun quoteSnapshot(account: KisAccount, code: String, marketDiv: String = MARKET_DIV_KRX): KisQuoteSnapshot {
         val json = getJson(
             account,
             INQUIRE_PRICE_PATH,
             TR_INQUIRE_PRICE,
             mapOf(
-                "FID_COND_MRKT_DIV_CODE" to "J",
+                "FID_COND_MRKT_DIV_CODE" to marketDiv,
                 "FID_INPUT_ISCD" to code,
             ),
         )
