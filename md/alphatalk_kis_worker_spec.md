@@ -1,6 +1,7 @@
-# Alpha Talk — KIS 수집 워커 명세 v0.5
+# Alpha Talk — KIS 수집 워커 명세 v0.6
 **worker-price · worker-batch · `:kis-client` 공유 라이브러리 · 담당: 민균**
 
+> **v0.6 (2026-08-07)**: 투자의견 수집(§3.3)을 실계정 계측으로 확정 — §9-7 종결. ⑴ 회원사 코드 원천은 KIS 마스터 파일 `memcode.mst.zip`(5자리 코드+이름+외국계 플래그, 집계 행 `99999` 제외 61개사)이고 **요청 `FID_INPUT_ISCD`는 5자리 코드의 뒤 3자리**다 — 5자리를 그대로 보내면 에러가 아니라 `rt_cd=0`에 0행이 온다(조용한 실패). ⑵ 이 TR은 **연속조회를 지원하지 않는다** — 응답은 최신순 최대 100행에서 잘리고 `tr_cont`가 오지 않는다(`P=1`, v0.2의 tr_cont 반복 절차 폐기). ⑶ 응답에 **회원사명 `mbcr_name`이 있다**(v0.2의 "이름 없음" 가정 정정 — 코드만 없다). ⑷ `invt_opnn_cls_code`는 등급 분류가 아니라 위치 값(현재=2·직전=3 고정)이라 **content_hash·payload에서 제외**하고 의견 텍스트를 쓴다(WS 계약 v0.7). ⑸ `hts_goal_prc=0`은 목표가 없음 → `null`.
 > **v0.5 (2026-08-06)**: 분봉 시장 구분을 **전 종목 고정 `UN`에서 종목별 결정으로 정정**(§2.6). 실계정 계측 결과 `UN`은 NXT 미상장 종목에 대해 에러도 빈 응답도 아닌 **가격·거래량이 전부 0인 30행을 `rt_cd=0`으로 반환한다** — 활성 종목 60개 표본에서 45개(75%)가 여기 해당했다. 그 0행이 그대로 적재되고 완주 워터마크까지 찍혀 자가 복구가 막히는 사고가 실제로 났다(대우건설 047040, 2026-08-06, 721행 전부 0). 이에 따라 ⑴ **0봉은 적재도 완주 기록도 하지 않는 불변식**을 세우고, ⑵ 종목별 지원 여부를 프로브해 `minute:market-div:{code}:{date}`(Redis 계약 v0.15)에 **날짜별로** 기록한 뒤 그 구분으로 조회하며, ⑶ **수집 창이 종목별로 달라진다**(NXT 지원 08:00–20:00 · 미지원 09:00–15:30). §9.10 종결, §9.12 신설.
 > **v0.4 (2026-08-05)**: KIS 모의투자(vts) 환경 제거 — **실전 도메인 단일 운영**으로 확정(§1.1). 개발 계획에 없는 환경을 위해 실시간 TR 세트(§2.3)·일봉 유니버스(§2.6)·분봉 시장 구분(§2.6)·REST 유량(§1.3)을 이중으로 유지하던 분기를 전부 걷어냈다. `KIS_ENV` 환경변수와 `alphatalk.price.env` 프로퍼티는 사라졌고, 엔드포인트는 `:kis-client`의 `KisApi` 상수가 단일 소유한다. 환경 차이는 KIS가 아니라 워커 활성화 여부(`alphatalk.price.enabled`, 기본 off)로 만든다. §9.2 종결.
 > **v0.3 (2026-08-04)**: 분봉 수집 추가(FR-15 확장, §2.6). **오늘 분봉은 조회 시 동기 신선화** — core-api가 worker-price 내부 API를 트리거하고 worker-price가 KIS 당일분봉 `FHKST03010200`을 공백만큼 사 와 upsert(60s 신선 임계·single-flight·타임아웃 시 저장분 반환). **과거 분봉은 일 배치**(16:00 당일 확정) + 콜드 종목 7영업일 수요 전이 백필(`FHKST03010230`). 1분봉 원본만 `minute_candle`에 보존 30일, 5/15/30/60분은 core-api가 조회 시 파생(core-api 명세 v0.2 §8). 내부 신선화 API는 서버 간 Redis/DB 원칙의 명시 예외(멱등 트리거·무데이터·best-effort).
@@ -201,7 +202,7 @@ KIS 프레임 → 파싱 → 종목별 최신값 버퍼(덮어쓰기)
 
 ### 2.7 장 운영 캘린더
 
-수신 대상 세션 전체(KST): NXT 프리마켓 08:00–08:50 · KRX/NXT 메인 09:00–15:30 · NXT 애프터마켓 15:30–20:00 · KRX 장후 시간외종가 15:40–16:00 · KRX 시간외단일가 16:00–18:00. **07:50 세션 준비(토큰·Approval·연결) → 08:00 구독 → 20:00 구독 해제·유휴.** 주말·KRX 휴장일은 스킵한다(MVP: 휴장일 YAML 수동 관리, P3: 캘린더 소스 자동화). KIS 새벽 점검 시간대에는 재접속을 억제한다.
+수신 대상 세션 전체(KST): NXT 프리마켓 08:00–08:50 · KRX/NXT 메인 09:00–15:30 · NXT 애프터마켓 15:30–20:00 · KRX 장후 시간외종가 15:40–16:00 · KRX 시간외단일가 16:00–18:00. **07:50 세션 준비(토큰·Approval·연결) → 08:00 구독 → 20:00 구독 해제·유휴.** 주말·KRX 휴장일은 스킵한다(MVP: 휴장일 YAML 수동 관리, P3: 캘린더 소스 자동화). KIS 새벽 점검 시간대에는 재접속을 억제한다. 이 캘린더 판정은 worker-batch의 영업일 잡(`invest_opinion_sync` 등)도 공유하는데, 서버 간 코드 의존 금지로 **휴장일 목록을 price·batch가 각자 설정으로 든다** — 휴장일을 추가할 때 두 모듈 설정을 함께 갱신한다(한쪽만 고치면 batch가 휴장일에 KIS를 조용히 호출한다).
 
 ### 2.8 단일 실행 보장 & 그레이스풀 셧다운
 
@@ -224,7 +225,7 @@ KIS 프레임 → 파싱 → 종목별 최신값 버퍼(덮어쓰기)
 | `minute_candle_purge` | DB 삭제 (§2.6 — 보존 30일 초과분) | 매일 04:30 | `minute_candle` 보존 초과 행 | `(code,date,time)` |
 | `valuation_daily` | KIS `FHKST01010100` 응답의 `per,pbr,eps,bps` + 마스터 시총 | 영업일 16:50 | 전 종목 (~2,600콜) | `(code,date)` |
 | `investor_flow_daily` | KIS `GET .../inquire-investor` · TR `FHKST01010900` — **장마감 후 확정치** | 영업일 17:10 | 전 종목 | `(code,date)` |
-| `invest_opinion_sync` | KIS `GET /uapi/domestic-stock/v1/quotations/invest-opbysec` · TR `FHKST663400C0` — 회원사 코드별 전 종목 투자의견(의견·직전의견·목표가) | 영업일 07:00 이상 18:00 미만 **10분 주기**(07:00~17:50) | 활성 회원사 `B`개 × 연속조회 페이지 `P` | `(code, business_date, broker_code, content_hash)` |
+| `invest_opinion_sync` | KIS `GET /uapi/domestic-stock/v1/quotations/invest-opbysec` · TR `FHKST663400C0` — 회원사 코드별 전 종목 투자의견(의견·직전의견·목표가). 회원사 목록은 `memcode.mst.zip`(§3.3) | 영업일 07:00 이상 18:00 미만 **10분 주기**(07:00~17:50) | 회원사 61개 × 1콜(연속조회 없음 — §3.3) | `(code, business_date, broker_code, content_hash)` |
 | `dart_corp_map` | OpenDART `corpCode.xml`(zip) — corp_code↔종목코드 매핑 | 주 1회 | 전 상장사 | `corp_code` |
 | `industry_sync` | OpenDART `corpCode.xml` → `company.json`(`induty_code`) + KSIC 10차 분류표(worker-batch 리소스 `ksic10.csv`) | 주 1회 일 06:30 (`dart_corp_map`과 한 잡) | 활성 종목 ~2.6k (우선주 제외 — DART는 보통주에만 corp_code 부여) | `code` upsert |
 
@@ -235,12 +236,12 @@ KIS 프레임 → 파싱 → 종목별 최신값 버퍼(덮어쓰기)
 
 업종은 `idxcode.mst`(45바이트 고정폭 — 코드 5자리 + 이름)가 코드와 이름을 함께 준다. 종목 마스터의 업종 필드는 4자리라 그대로는 `sector.code`와 맞지 않는다. **앞에 시장 접두어(KOSPI `0`, KOSDAQ `1`)를 붙여 5자리로 맞춘다** — 예: KOSPI `0027` → `00027`(제조), KOSDAQ `1009` → `11009`(제조). 두 시장이 별개 코드 대역을 쓰므로 접두어 없이는 서로 충돌한다.
 
-일일 KIS 호출 예산(1계정): candle 2.6k + valuation 2.6k + investor 2.6k ≈ **7.8k콜**(15/s 페이싱 ~9분) + 분봉(상시 폴링 없음 — 조회 연동 신선화·일 배치·콜드 백필 모두 조회/수요 종목에 비례, 공용 gate 안에서 흡수) + opinion `B × P × 66회`. `B`와 `P`는 실응답으로 계측해 확정한다(§9). opinion 잡 자체 상한은 **4콜/s**로 두고, 공용 Redis gate가 price REST 폴링과의 합산을 계정 내부 한도(15/s) 아래로 묶는다. 앞 회차가 10분 안에 끝나지 않으면 다음 회차는 ShedLock 획득 실패로 건너뛰고 `opinion_sync_overrun`을 기록한다. OpenDART는 일일 한도 내 여유가 있다(분기 시즌에도 수천 콜) — 정확한 한도는 포털에서 확인한다(§9).
+일일 KIS 호출 예산(1계정): candle 2.6k + valuation 2.6k + investor 2.6k ≈ **7.8k콜**(15/s 페이싱 ~9분) + 분봉(상시 폴링 없음 — 조회 연동 신선화·일 배치·콜드 백필 모두 조회/수요 종목에 비례, 공용 gate 안에서 흡수) + opinion 61사 × 1콜 × 66회 ≈ **4.0k콜**(§9-7 실측 — 연속조회 미지원이라 페이지 변수 없음). opinion 잡 자체 상한은 **4콜/s**로 두고(회차당 ~15초), 공용 Redis gate가 price REST 폴링과의 합산을 계정 내부 한도(15/s) 아래로 묶는다. 앞 회차가 10분 안에 끝나지 않으면 다음 회차는 ShedLock 획득 실패로 건너뛰고 `opinion_sync_overrun`을 기록한다. OpenDART는 일일 한도 내 여유가 있다(분기 시즌에도 수천 콜) — 정확한 한도는 포털에서 확인한다(§9).
 
 ### 3.2 실행 프레임워크
 
 - Spring `@Scheduled` + **ShedLock**(Redis) — 다중 기동에 안전하다. 잡 이력은 테이블 `batch_job_run(job, run_date, status, ok_count, fail_count, started_at, finished_at, error)`에 기록하고, 동일 `(job, run_date)` SUCCESS가 있으면 스킵한다(재실행 멱등).
-- **일내 반복 잡 예외**: `invest_opinion_sync`(10분 주기)는 `(job, run_date)` SUCCESS 스킵을 적용하지 않는다 — 실행 이력만 기록하고 매 회 실행한다. 멱등은 잡 내부의 upsert·미발행 스캔(§3.3)이 담당한다. ShedLock은 동일하게 적용해 실행 중인 회차가 있으면 다음 트리거를 시작하지 않는다. lock TTL은 최대 예상 실행시간보다 길게 두고, 장기 실행 시 만료되지 않도록 연장 가능한 lock provider를 사용한다.
+- **일내 반복 잡 예외**: `invest_opinion_sync`(10분 주기)는 `(job, run_date)` SUCCESS 스킵을 적용하지 않는다 — 실행 이력만 기록하고 매 회 실행한다. 멱등은 잡 내부의 upsert·미발행 스캔(§3.3)이 담당한다. ShedLock은 동일하게 적용해 실행 중인 회차가 있으면 다음 트리거를 시작하지 않는다. lock TTL은 최대 실행시간보다 길어야 한다 — 잡은 **회차 데드라인**(lock TTL보다 짧게, 최악 단일 콜 소요를 더해도 TTL 미만)을 두고 도달 시 잔여 회원사를 다음 회차로 미룬다. KIS가 전반적으로 느려도 락이 실행 중에 만료되지 않아 다중 기동에서 동시 실행이 생기지 않고, 이연분은 조회 창이 직전 영업일을 포함하므로 유실되지 않는다. 순회 시작 위치는 **트리거 시각에서 유도**한다(10분 회차 번호 mod 회원사 수) — 어떤 인스턴스가 락을 잡아도 같은 회차엔 같은 위치에서 시작하고 회차마다 회전하므로, 이연이 반복돼도 특정 회원사가 계속 뒤로 밀리지 않는다(인메모리 커서 없음 — 재기동 안전).
 - 실패 종목은 잡 말미에 1회 재시도한다. 잔여 실패는 `fail_count`+로그로 남기고 다음 날 upsert로 자연 회복한다.
 - 재무 요약 변환: DART 계정과목 → `revenue/operatingProfit/netIncome/assets/liabilities/equity` 매핑 테이블(연결 우선). 매핑 불가 계정은 raw 보존 없이 스킵+카운트한다(포트폴리오 범위 단순화).
 
@@ -250,14 +251,20 @@ KIS 프레임 → 파싱 → 종목별 최신값 버퍼(덮어쓰기)
 
 ```
 worker-batch invest_opinion_sync (영업일 07:00~17:50 · 10분 주기)
-  ① 활성 회원사별 FHKST663400C0 조회
+  ⓪ 회원사 마스터 memcode.mst.zip 일 1회 갱신(인메모리 캐시)
+       - 실패 시 직전 목록 사용, 목록이 아예 없으면 그 회차 스킵 — 조회 창이
+         직전 영업일을 포함하므로 하루 안 복구가 유실이 되지 않는다
+  ① 회원사별 FHKST663400C0 조회 (61사 × 1콜, 연속조회 없음 — §9-7)
        - FID_COND_MRKT_DIV_CODE=J, FID_COND_SCR_DIV_CODE=16634
-       - FID_INPUT_ISCD={brokerCode}, FID_DIV_CLS_CODE=0
+       - FID_INPUT_ISCD={회원사 5자리 코드의 뒤 3자리}, FID_DIV_CLS_CODE=0
        - FID_INPUT_DATE_1={직전 영업일}, FID_INPUT_DATE_2={당일}
-       - 응답 header tr_cont=M이면 tr_cont=N으로 다음 페이지 반복
+       - 응답은 최신순 최대 100행 — 100행이 오면 절단 가능성으로 보고
+         opinion_page_truncated 메트릭·경고를 남긴다(조회 창이 2영업일이라 실제 도달 희박)
   ② 응답 정규화 + content_hash 생성 후 invest_opinion INSERT
-       - code는 stck_shrn_iscd, 의견·직전의견·목표가는 KIS 응답 필드 사용
-       - broker_code는 요청의 FID_INPUT_ISCD, broker_name은 같은 코드의 로컬 회원사 마스터에서 결합
+       - code=stck_shrn_iscd, rating=invt_opnn, previous_rating=rgbf_invt_opnn,
+         target_price=hts_goal_prc(0이면 NULL) — invt_opnn_cls_code류는 위치 값이라 버린다
+       - broker_code는 회원사 마스터의 5자리 코드(요청 코드의 원형), broker_name은 응답 mbcr_name
+         (trim, 빈 값이면 마스터 이름, 그것도 없으면 NULL)
        - PK (code, business_date, broker_code, content_hash)
        - 동일 observation은 ON CONFLICT DO NOTHING, 기존 published_at을 NULL로 되돌리지 않음
   ③ 미통보 스캔 — published_at IS NULL 행 each:
@@ -279,14 +286,12 @@ worker-batch invest_opinion_sync (영업일 07:00~17:50 · 10분 주기)
 {
   "category": "report",
   "kind": "opinion",
-  "title": "미래에셋증권 투자의견 매수",
+  "title": "미래에셋 투자의견 매수",
   "occurredAt": 1785106800000,
   "opinion": {
-    "brokerCode": "0000",
-    "brokerName": "미래에셋증권",
-    "ratingCode": "1",
+    "brokerCode": "00005",
+    "brokerName": "미래에셋",
     "rating": "매수",
-    "previousRatingCode": "2",
     "previousRating": "중립",
     "targetPrice": 95000,
     "businessDate": "20260727"
@@ -295,11 +300,12 @@ worker-batch invest_opinion_sync (영업일 07:00~17:50 · 10분 주기)
 ```
 
 - `businessDate`는 KIS `stck_bsop_date`를 그대로 보존한다. KIS가 시각을 주지 않으므로 `occurredAt`은 해당 observation을 처음 수집한 `collected_at`으로 고정한다.
-- `FHKST663400C0` 응답에는 회원사 코드·이름이 없다. 그래서 `brokerCode`는 조회 요청의 `FID_INPUT_ISCD`, `brokerName`은 회원사 마스터의 표시명을 쓴다. 알 수 없는 코드는 수집을 버리지 않고 `brokerName=null`, 제목은 `"{brokerCode} 투자의견 {rating}"`으로 발행한다.
-- `content_hash` = `SHA-256(ratingCode + "|" + previousRatingCode + "|" + targetPrice)` 소문자 hex. 해시 전 문자열 필드는 trim하고 `null`은 빈 문자열, 목표가는 부호 없는 10진 문자열로 정규화한 UTF-8 바이트를 사용한다. 같은 날 같은 회원사의 의견·목표가가 바뀌면 별도 observation과 이벤트가 된다.
-- `source_key` = `opinion:{code}:{businessDate}:{brokerCode}:{contentHash}`. 해시로 회원사 자체를 식별하지 않고 KIS 회원사 코드를 사용한다.
+- **회원사 마스터**: `memcode.mst.zip`(종목 마스터와 같은 다운로드 호스트, zip 안 CP949 텍스트 — 5자리 코드 + 이름 + 외국계 플래그). `99999`(외국계합) 같은 집계 행은 조회 대상에서 제외한다. `brokerCode`는 이 마스터의 5자리 코드(정본), 요청 `FID_INPUT_ISCD`는 그 뒤 3자리다 — 5자리를 그대로 보내면 `rt_cd=0`에 0행이 오는 조용한 실패이므로 변환을 테스트로 고정한다(§9-7).
+- `brokerName`은 응답 `mbcr_name`(trim)을 쓰고, 빈 값이면 마스터 이름, 그것도 없으면 `null`·제목 `"{brokerCode} 투자의견 {rating}"`으로 발행한다. `rating`·`previousRating`은 회원사 표기 그대로다(`매수`·`BUY`·`NotRated` 등 — 표준화하지 않는다). 응답의 `invt_opnn_cls_code`·`rgbf_invt_opnn_cls_code`는 등급 분류가 아니라 위치 값(현재=2·직전=3 고정 — §9-7 실측)이므로 사용하지 않는다.
+- `content_hash` = `SHA-256(rating + "|" + previousRating + "|" + targetPrice)` 소문자 hex. 해시 전 문자열 필드는 trim하고 `null`은 빈 문자열, 목표가는 부호 없는 10진 문자열로 정규화한 UTF-8 바이트를 사용한다(`hts_goal_prc=0`은 목표가 없음 → `null` → 빈 문자열). 같은 날 같은 회원사의 의견·목표가가 바뀌면 별도 observation과 이벤트가 된다.
+- `source_key` = `opinion:{code}:{businessDate}:{brokerCode}:{contentHash}`. 해시로 회원사 자체를 식별하지 않고 회원사 마스터의 5자리 코드를 사용한다.
 - `stream_event.type=REPORT`, `stream_event.source={brokerCode}`, payload는 위 JSON이다. 발행 봉투·채널명·카테고리·payload 타입은 전부 `:contracts` 상수/DTO를 사용한다.
-- `:contracts`는 `StreamData.kind: String?`, `StreamData.opinion: OpinionData?`와 위 `OpinionData` 필드를 추가한다. 기존 payload 기준으로 두 최상위 필드는 nullable인 하위 호환 확장이고, `OpinionData` 내부의 필수·nullable 구분은 WS 명세 v0.6 §4.3을 따른다. JSON 계약 테스트로 기존 news/report/ai payload가 변하지 않음을 고정한다.
+- `:contracts`는 `StreamData.kind: String?`, `StreamData.opinion: OpinionData?`와 위 `OpinionData` 필드를 추가한다. 기존 payload 기준으로 두 최상위 필드는 nullable인 하위 호환 확장이고, `OpinionData` 내부의 필수·nullable 구분은 WS 명세 v0.7 §4.3을 따른다. JSON 계약 테스트로 기존 news/report/ai payload가 변하지 않음을 고정한다.
 - `sentiment`는 싣지 않는다 — 의견·목표가 자체가 정보이고, "매수=POSITIVE" 같은 기계 매핑을 하지 않는다. 일일 다이제스트(뉴스 명세 §4.2) 취합 대상도 아니다(클러스터 기반이 아니므로 자연 제외).
 - **소유 경계**: 이 경로로 worker-batch는 `stream_event` INSERT·`stream:{code}` PUBLISH 주체가 된다 — llm-worker와 **공동 생산자**(계약 §1.1 v0.7). `stream_event`의 논리 소유자는 core-api stream 모듈이고, DDL은 `db-migrations`가 단일 소유한다.
 - 주기: **영업일 07:00 이상 18:00 미만 KST · 10분** — 장외 시간·주말·휴장일(§2.7 캘린더 공유)은 스킵한다. 호출 예산·overrun 정책은 §3.1 참조.
@@ -318,11 +324,13 @@ valuation_daily(code, date, per NUMERIC, pbr NUMERIC, eps INT, bps INT, market_c
              PK(code, date))
 investor_flow_daily(code, date, individual BIGINT, foreign BIGINT, institution BIGINT,  -- 순매수 백만원
              PK(code, date))
-invest_opinion(code CHAR(6), business_date CHAR(8), broker_code TEXT, broker_name TEXT,
-             rating_code TEXT, rating TEXT, previous_rating_code TEXT NULL, previous_rating TEXT NULL,
+invest_opinion(code CHAR(6), business_date CHAR(8), broker_code TEXT, broker_name TEXT NULL,
+             rating TEXT, previous_rating TEXT NULL,
              target_price BIGINT NULL, content_hash CHAR(64), collected_at TIMESTAMPTZ,
              stream_event_id CHAR(26) NULL, published_at TIMESTAMPTZ NULL,
              PK(code, business_date, broker_code, content_hash))
+-- INDEX (collected_at) WHERE published_at IS NULL — 미통보 스캔(§3.3 ③)이 테이블 누적과 무관하게 좁게 돌도록
+-- rating_code·previous_rating_code 없음: KIS cls_code는 위치 값이라 저장하지 않는다(§3.3, v0.6)
 stream_event(..., source_key TEXT NULL, ...)
 -- UNIQUE(source_key) WHERE source_key IS NOT NULL
 -- source_key DDL의 논리 소유자는 core-api stream, changeSet 파일의 단일 소유자는 db-migrations
@@ -399,7 +407,7 @@ OpenDART 응답 상태는 **세 갈래로 나눈다**. ① 데이터 없음(`013
 4. 마스터 파일 URL 안정성(비공식 경로) — 포털 "종목 다운로드" 링크 주소와 대조, 변경 대비 설정화.
 5. `FID_ORG_ADJ_PRC` 값 의미(0=수정주가) 문서 재확인.
 6. OpenDART 일일 호출 한도 수치.
-7. `FHKST663400C0`의 활성 회원사 코드 원천·갱신 주기, 응답 1페이지 건수와 `tr_cont` 최대 페이지를 실계정 스모크로 확정. 결과로 §3.1의 `B × P` 호출량과 10분 주기 지속 가능성을 검증한다.
+7. ~~`FHKST663400C0`의 활성 회원사 코드 원천·갱신 주기, 응답 1페이지 건수와 `tr_cont` 최대 페이지~~ — **종결**(2026-08-07 실계정 계측, §3.3·v0.6에 반영). 결과: (a) 회원사 원천은 마스터 파일 `memcode.mst.zip`(62행 = 61개사 + 집계 행 `99999` 외국계합; 5자리 코드+이름+외국계 플래그). (b) 요청 `FID_INPUT_ISCD`는 **5자리 코드의 뒤 3자리**(`00003`→`003`) — 5자리 그대로·자릿수 미달(`3`)은 에러 없이 `rt_cd=0` 0행. (c) **연속조회 미지원** — 두 달 범위 전체 조회(`999`)도 최신순 100행에서 잘리고 `tr_cont`·`ctx_area_*`가 비어 온다. `P=1`이며 조회 창을 직전 영업일~당일로 좁게 유지하면 실사용에서 100행에 닿지 않는다(한 회원사 한 달 최대 89행 관측). (d) 호출량 61콜/회차 × 66회 ≈ 4.0k콜/일, 4콜/s 페이싱으로 회차당 ~15초 — 10분 주기 지속 가능. (e) 응답 16필드 확인: `mbcr_name`(회원사명) 존재, `invt_opnn_cls_code`·`rgbf_invt_opnn_cls_code`는 현재=2·직전=3 고정인 위치 값, `hts_goal_prc=0`은 목표가 없음, 정렬은 `stck_bsop_date` 최신순.
 8. **업종 분류의 세분도** — `idxcode.mst`가 주는 대분류는 KOSPI 11종·KOSDAQ 20여 종이라 "제조"에 대부분이 몰린다. worker-llm의 섹터 fan-out이 이 정도 해상도로 쓸 만한지 실데이터로 확인하고, 부족하면 중·소분류(마스터 파일의 [68:72]·[72:76]) 사용이나 서비스 자체 분류를 검토한다.
 9. **분봉 API 계측(§2.6)** — `FHKST03010200`·`FHKST03010230`의 1콜 최대 건수(30건·과거분 추정치), 시각 필드가 봉 시작인지 종료인지, 분 거래량·거래대금 필드가 분값인지 누적값인지(누적이면 diff 계산)를 실응답으로 확정한다.
 10. ~~**분봉 시장 구분 코드(§2.6)**~~ — **종결**(2026-08-06 실계정 계측, §2.6·v0.5에 반영). 결과: `UN`은 NXT 지원 종목에서 프리(08:00–08:50)·애프터(15:30–20:00) 봉을 **실제로 포함한다**(005930 08:30·16:00·19:00 조회 모두 해당 구간 봉 반환). (a) 미지원 시 KIS는 **에러도 빈 `output2`도 주지 않고 `rt_cd=0`에 전 행이 0인 30행을 준다** — 예상한 두 갈래가 모두 틀렸고, 그래서 `minute.candle.empty.complete`가 감지하지 못했다. (b) `UN`의 `acml_tr_pbmn`은 **통합 누적**이다(005930 2026-08-06 최종봉 9,654,526,846,500 ≈ `output1` 9,656,077,035,000, 같은 날 `J`는 6,091,288,502,000). (c) 같은 `stck_cntg_hour`에 KRX·NXT 행이 **따로 오지 않는다**(30행 시각 중복 0). 일봉·현재가의 `J` 유지로 인한 불일치는 §2.6 "가격 기준"(분봉은 원시가, 일봉과 어긋날 수 있음)이 이미 흡수하며, 통합 전환은 분봉에 한정한다.
@@ -408,4 +416,4 @@ OpenDART 응답 상태는 **세 갈래로 나눈다**. ① 데이터 없음(`013
 13. **NXT 편입·제외의 장중 발효 여부(§2.6)** — 판정·전환이 "그날 적재분 0"일 때만 일어나므로, 상태 변화는 **다음 거래일 첫 조회**에 반영된다. ⑴ **편입**된 종목은 그날 하루 `J`로 조회되어 장외 구간이 누락된다(0봉이 아니라 정상 응답이라 감지 신호가 없다 — 가장 조용한 갈래다). ⑵ **제외**된 종목은 그날 첫 조회에서 `UN` 0봉을 만나 즉시 `J`로 전환·자가 복구하고, 이미 적재분이 있는 날은 0봉 가드만 작동해 그날은 정지한다(데이터 유지·오염 없음, `minute.candle.zero.page`). 두 경우 모두 **다음 거래일 첫 조회에서 자동 반영**된다 — 구분 기록이 날짜별이라 별도 무효화 경로가 필요 없다. 남은 확인 사항은 장중에 발효되는 편입·제외가 실제로 있는지다. 있다면 그날 하루는 위 규칙대로 이전 구분을 유지하며(적재분이 있으므로 전환하지 않는다) 지나가는데, 그 하루의 장외 구간 누락을 감수할지 아니면 발효 시각에 그날 기록을 무효화하고 재적재할지 정한다.
 ---
 
-*KIS 수집 워커 명세 v0.5 — Redis 계약 v0.15·WS API v0.6·core-api 명세 v0.3과 정합. KIS 수치는 2026-07 공식 샘플 대조 기준이며 §9 항목은 실계정 재확인 대상.*
+*KIS 수집 워커 명세 v0.6 — Redis 계약 v0.16·WS API v0.7·core-api 명세 v0.3과 정합. KIS 수치는 2026-07 공식 샘플 대조 기준이며 §9 항목은 실계정 재확인 대상.*

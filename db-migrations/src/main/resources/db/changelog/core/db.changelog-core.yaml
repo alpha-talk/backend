@@ -48,3 +48,10 @@ databaseChangeLog:
         - sqlFile:
             path: sql/0007_idempotency.sql
             relativeToChangelogFile: true
+  - changeSet:
+      id: 0008-stream-event-source-key
+      author: core-api
+      changes:
+        - sqlFile:
+            path: sql/0008_stream_event_source_key.sql
+            relativeToChangelogFile: true
