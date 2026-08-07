@@ -158,6 +158,59 @@ class SessionPoolTest {
         assertEquals(null, divs.get("047040"))
     }
 
+    private fun tickFrame(trId: String, code: String) =
+        "0|$trId|001|$code^134058^16110^2^10^0.06^16000^16200^16000^0^0^0^0^4355991"
+
+    @Test
+    fun `시간외 틱은 통합 체결 증거가 아니라 구분을 확정하지 않는다`() {
+        val divs = InMemoryMarketDivStore()
+        val meters = SimpleMeterRegistry()
+        val pool = pool(
+            maxPerSession = 4,
+            trIds = listOf("H0UNCNT0", "H0STOUP0"),
+            marketDivs = divs,
+            silenceMillis = 1_000,
+            meters = meters,
+        )
+
+        pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
+        server.awaitMessages(2)
+        server.broadcastText(ackFrame("047040", success = true, trId = "H0UNCNT0"))
+        awaitConfirmed(meters, 1)
+
+        server.broadcastText(tickFrame("H0STOUP0", "047040"))
+        await().atMost(Duration.ofSeconds(5)).until { meters.counter("tick.in").count() > 0 }
+
+        assertEquals(null, divs.get("047040"))
+        assertEquals(0.0, meters.counter("tick.market.div", "div", "UN").count())
+    }
+
+    @Test
+    fun `시간외 틱은 침묵 감지를 막지 못한다`() {
+        val divs = InMemoryMarketDivStore()
+        val meters = SimpleMeterRegistry()
+        val pool = pool(
+            maxPerSession = 4,
+            trIds = listOf("H0UNCNT0", "H0STOUP0"),
+            marketDivs = divs,
+            silenceMillis = 1_000,
+            meters = meters,
+        )
+
+        pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
+        server.awaitMessages(2)
+        server.broadcastText(ackFrame("047040", success = true, trId = "H0UNCNT0"))
+        awaitConfirmed(meters, 1)
+        server.broadcastText(tickFrame("H0STOUP0", "047040"))
+        await().atMost(Duration.ofSeconds(5)).until { meters.counter("tick.in").count() > 0 }
+
+        now += 2_000
+        pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
+
+        assertEquals(1.0, meters.counter("tick.silence.escalated").count())
+        assertEquals(listOf("047040"), trKeysOf(server.receivedMessages, "H0STCNT0"))
+    }
+
     @Test
     fun `이미 KRX로 확정된 종목이 침묵하면 전환 단계 없이 바로 강등한다`() {
         val divs = InMemoryMarketDivStore(mapOf("047040" to "J"))
