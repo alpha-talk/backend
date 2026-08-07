@@ -1,7 +1,7 @@
 # Alpha Talk — KIS 수집 워커 명세 v0.6
 **worker-price · worker-batch · `:kis-client` 공유 라이브러리 · 담당: 민균**
 
-> **v0.6 (2026-08-07)**: 같은 함정이 **실시간에도 있었다** — `H0UNCNT0`(통합)이 NXT 미상장 종목에 등록 SUCCESS를 주고 틱을 0건 준다(047040 45초 0건 vs `H0STCNT0` 48건, 실계정 계측). 대우건설이 구독·거래 중인데 `price:047040` 캐시가 한 번도 안 생긴 사고의 원인이다. ⑴ 체결 TR을 **종목별로** 고르고(§2.3), ⑵ **NXT 상장 여부를 `market-div:{code}` 한 키가 소유**해 분봉·실시간·현재가 폴백이 함께 읽고 확정 판정만 쓰며(Redis 계약 v0.16), ⑶ 통합 침묵 → KRX 재등록 → 그래도 침묵이면 degraded 강등으로 **조용한 심볼을 방치하지 않는다**. 현재가 폴백도 같은 구분을 써 폴백 구간의 누적거래량 37% 어긋남을 없앤다.
+> **v0.6 (2026-08-07)**: 같은 함정이 **실시간에도 있었다** — `H0UNCNT0`(통합)이 NXT 미상장 종목에 등록 SUCCESS를 주고 틱을 0건 준다(047040 45초 0건 vs `H0STCNT0` 48건, 실계정 계측). 대우건설이 구독·거래 중인데 `price:047040` 캐시가 한 번도 안 생긴 사고의 원인이다. ⑴ 체결 TR을 **종목별로** 고르고(§2.3), ⑵ **NXT 상장 여부를 `market-div:{code}` 한 키가 소유**해 분봉·실시간·현재가 폴백이 함께 읽고 확정 판정만 쓰며(Redis 계약 v0.16), ⑶ 등록됐는데 조용한 심볼을 degraded로 강등해 REST 폴링이 받게 한다 — **조용히 비는 상태를 만들지 않는다**. 현재가 폴백도 같은 구분을 써 폴백 구간의 누적거래량 37% 어긋남을 없앤다.
 > **v0.5 (2026-08-06)**: 분봉 시장 구분을 **전 종목 고정 `UN`에서 종목별 결정으로 정정**(§2.6). 실계정 계측 결과 `UN`은 NXT 미상장 종목에 대해 에러도 빈 응답도 아닌 **가격·거래량이 전부 0인 30행을 `rt_cd=0`으로 반환한다** — 활성 종목 60개 표본에서 45개(75%)가 여기 해당했다. 그 0행이 그대로 적재되고 완주 워터마크까지 찍혀 자가 복구가 막히는 사고가 실제로 났다(대우건설 047040, 2026-08-06, 721행 전부 0). 이에 따라 ⑴ **0봉은 적재도 완주 기록도 하지 않는 불변식**을 세우고, ⑵ 종목별 지원 여부를 프로브해 `minute:market-div:{code}:{date}`(Redis 계약 v0.15)에 **날짜별로** 기록한 뒤 그 구분으로 조회하며, ⑶ **수집 창이 종목별로 달라진다**(NXT 지원 08:00–20:00 · 미지원 09:00–15:30). §9.10 종결, §9.12 신설.
 > **v0.4 (2026-08-05)**: KIS 모의투자(vts) 환경 제거 — **실전 도메인 단일 운영**으로 확정(§1.1). 개발 계획에 없는 환경을 위해 실시간 TR 세트(§2.3)·일봉 유니버스(§2.6)·분봉 시장 구분(§2.6)·REST 유량(§1.3)을 이중으로 유지하던 분기를 전부 걷어냈다. `KIS_ENV` 환경변수와 `alphatalk.price.env` 프로퍼티는 사라졌고, 엔드포인트는 `:kis-client`의 `KisApi` 상수가 단일 소유한다. 환경 차이는 KIS가 아니라 워커 활성화 여부(`alphatalk.price.enabled`, 기본 off)로 만든다. §9.2 종결.
 > **v0.3 (2026-08-04)**: 분봉 수집 추가(FR-15 확장, §2.6). **오늘 분봉은 조회 시 동기 신선화** — core-api가 worker-price 내부 API를 트리거하고 worker-price가 KIS 당일분봉 `FHKST03010200`을 공백만큼 사 와 upsert(60s 신선 임계·single-flight·타임아웃 시 저장분 반환). **과거 분봉은 일 배치**(16:00 당일 확정) + 콜드 종목 7영업일 수요 전이 백필(`FHKST03010230`). 1분봉 원본만 `minute_candle`에 보존 30일, 5/15/30/60분은 core-api가 조회 시 파생(core-api 명세 v0.2 §8). 내부 신선화 API는 서버 간 Redis/DB 원칙의 명시 예외(멱등 트리거·무데이터·best-effort).
@@ -107,10 +107,10 @@ WS 구독 용량이 유한하므로(§1.3) 전 종목이 아니라 수요가 있
 - **왜 통합 하나로 통일할 수 없나**: `H0UNCNT0`은 NXT 미상장 종목에 **등록은 `SUBSCRIBE SUCCESS`로 받아주고 틱을 하나도 주지 않는다.** 실계정 계측(2026-08-07 13:40, 45초 · 한 연결에서 동시 등록): 047040 대우건설 통합 **0건** / KRX 전용 **48건**, 같은 시각 005930 삼성전자는 통합 166건 · KRX 134건으로 둘 다 정상. 등록 ACK가 성공이라 **ACK만 보고는 절대 감지할 수 없다.** 분봉의 0봉 문제(§2.6)와 같은 뿌리이며, 시계열 API가 NXT 미상장 종목에서 깨지는 현상이다(현재가 `FHKST01010100`은 `UN`으로도 정상).
 - **왜 KRX 전용 하나로 통일할 수도 없나**: 통합이 NXT 체결분을 실제로 더 준다. 같은 계측에서 005930 누적거래량이 통합 **23,968,985** vs KRX **15,036,769** — 약 **37%** 차이다.
 - **구분의 출처**: `market-div:{code}`(Redis 계약 v0.16) 하나가 소유한다. 분봉(§2.6)과 이 절이 같은 키를 읽고 쓴다.
-- **침묵 감지로 배운다**: KIS가 NXT 상장 명단을 주지 않으므로(§2.6) 기록이 없는 종목은 통합으로 등록한 뒤 **`silence-ms`(기본 20s) 동안 체결 틱이 하나도 없으면 KRX 전용으로 재등록**한다. 그 뒤 KRX에서 틱이 오면 그때 `J`로 확정 기록한다 — **침묵 자체는 약한 증거이므로 기록하지 않는다**(거래가 뜸한 종목도 조용하다). 통합에서 틱이 오면 `UN`으로 확정한다.
-- **판정에 쓰는 틱은 체결 TR의 것만이다**: `H0STOUP0`(시간외)는 시장 구분과 무관하게 항상 등록되는 KRX 전용 채널이므로, 그 틱을 통합 체결의 증거로 삼으면 **NXT 미상장 종목이 `UN`으로 잘못 확정되어 7일간 고정된다**(15:40–18:00 시간외 단일가 구간에 기동·재접속하면 바로 걸린다). 같은 이유로 시간외 틱은 **침묵 판정도 리셋하지 않는다** — 리셋하면 정규장 체결이 0건인 종목이 조용히 방치된다. 틱 프레임의 `tr_id`를 소비 지점까지 전달해 체결 TR만 판정에 쓴다.
-- **전환 도중 흘러든 잔여 틱은 무시한다**: 재등록으로 채널을 바꾼 직후 이전 채널의 틱이 늦게 도착할 수 있다. 현재 선택된 채널과 다른 TR이 준 틱으로는 확정하지 않는다.
-- **두 채널 모두 침묵하면 degraded로 강등**해 REST 폴링(30s, §2.5)이 받는다. 원인이 미상장이든 장애든 조용한 심볼이 방치되지 않게 하는 안전망이다 — 강등 목록이 "세션 배정 실패"만 담던 구조에는 이 경로가 아예 없었다. 이때도 확정이 아니므로 `market-div`에 쓰지 않는다.
+- **침묵은 판정 근거가 아니라 운영 신호다**: 기록이 없는 종목은 통합으로 등록하고, `silence-ms`(기본 20s) 동안 체결 틱이 하나도 없으면 **degraded로 강등해 REST 폴링(30s, §2.5)이 받는다.** 채널을 KRX로 바꾸지 않는다 — 침묵은 "통합이 이 종목을 안 준다"와 "그 시간에 체결이 없었다"를 구분하지 못하기 때문이다. 특히 프리마켓(08:00–08:50)처럼 얇은 구간에서는 정상 NXT 종목도 20초쯤 조용한 것이 흔하다. 여기서 KRX로 바꾸고 그 뒤 도착한 KRX 틱을 `J`의 근거로 삼으면 **거의 모든 종목이 `J`로 잘못 확정되어** NXT 체결분(누적의 37%)과 장외 세션을 통째로 잃는다. **조용히 틀린 데이터보다 30초 늦은 정확한 데이터가 낫다.**
+- **`J`는 실시간이 쓰지 않는다**: 확정 근거가 되는 "거래량은 있는데 통합이 안 준다"를 관측할 수 있는 쪽은 분봉의 REST 응답(`acml_vol > 0` + 봉 전부 0)뿐이다(§2.6). 실시간은 통합 틱이 실제로 도착했을 때 `UN`만 확정한다 — 이건 통합이 그 종목을 다룬다는 직접 증거다. 채널 선택은 분봉이 채운 `market-div:{code}`를 읽어서 한다.
+- **판정에 쓰는 틱은 체결 TR의 것만이다**: `H0STOUP0`(시간외)는 시장 구분과 무관하게 항상 등록되는 KRX 전용 채널이므로, 그 틱을 통합 체결의 증거로 삼으면 NXT 미상장 종목이 `UN`으로 잘못 확정되어 7일간 고정된다(15:40–18:00 구간에 기동·재접속하면 바로 걸린다). 같은 이유로 시간외 틱은 **침묵 판정도 리셋하지 않는다**. 틱 프레임의 `tr_id`를 소비 지점까지 전달해 체결 TR만 쓴다.
+- **현재 선택된 채널이 준 틱만 센다**: 채널이 바뀐 직후 이전 채널의 잔여 틱이 늦게 도착할 수 있다. 이걸 세면 **침묵 상태가 오염된다** — 강등이 풀리고 침묵 감시가 영구히 꺼져, 지금 채널이 조용해도 다시는 감지되지 않는다. 확정뿐 아니라 침묵 리셋도 현재 채널의 틱에만 반응한다.
 - REST 폴링과 장전 워밍은 같은 `market-div:{code}`를 읽어 현재가를 조회한다 — 폴백 구간에서 누적거래량이 위 37%만큼 어긋나지 않게 한다.
 
 `:kis-client`의 프레임 파서는 세 TR을 모두 인식한다.
@@ -378,13 +378,13 @@ OpenDART 응답 상태는 **세 갈래로 나눈다**. ① 데이터 없음(`013
 | `DART_API_KEY` | — | OpenDART |
 | `DEMAND_RECONCILE_SEC` / `CONFLATION_MS` | `60` / `200` | §2 파라미터 |
 | `MINUTE_CANDLE_FRESH_SEC` / `MINUTE_CANDLE_RETENTION_DAYS` | `60` / `30` | §2.6 분봉 신선화 임계·보존 |
-| `TICK_SILENCE_MS` | `20000` | §2.3 통합 등록 후 이 시간 동안 틱이 없으면 KRX 전용으로 재등록, 재차 침묵이면 degraded 강등 |
+| `TICK_SILENCE_MS` | `20000` | §2.3 등록 후 이 시간 동안 체결 틱이 없으면 degraded로 강등해 REST 폴링에 넘긴다 |
 | `MARKET_HOLIDAYS_FILE` | `holidays-2026.yml` | 휴장일 |
 | `REDIS_URL` / `DB_URL` | — | 공용 |
 
 ## 6. 관측성
 
-메트릭: `kis_ws_sessions{state}` · `kis_subscribed_symbols` · `demand_symbols` · `degraded_symbols` · `tick_in_rate`/`quote_publish_rate` · `conflation_lag_ms` · `pingpong_miss` · `rest_call_rate{keyId}` · `rest_throttled` · `token_refresh_total` · `batch_job_duration/fail{job}`. 로그는 구조화 JSON으로 남기고 appkey/token은 마스킹한다. 프레임 원문은 DEBUG+샘플링으로만 남긴다. 실시간 메트릭(§2.3): `tick.silence.escalated`(통합 침묵으로 KRX 재등록) · `tick.silence.degraded`(두 채널 모두 침묵 → REST 폴링) · `tick.market.div{div}`(실시간이 확정한 구분 분포). **`tick.silence.degraded`는 발생 즉시 알람** — 실시간 경로가 그 종목을 못 받고 있다는 뜻이다. 분봉 메트릭(§2.6): `minute.candle.refresh` · `minute.candle.upsert.retry` · `minute.candle.empty.complete`(`output2`가 빈 채로 완주) · `minute.candle.zero.page`(전 행 0인 페이지 — 시장 구분 오판·KIS 이상) · `minute.candle.value.regressed`(누적 거래대금 역행 = 시장 구분 혼입 의심) · `minute.candle.market.div{div}`(날짜별 판별 결과 분포) · `minute.candle.div.unknown`(그날 구분 기록 없이 적재분만 있어 갱신을 건너뛴 횟수 — Redis 유실 신호). 알람: WS 세션 전멸 5분, 장중 tick_in=0, 배치 실패, throttled 급증, `candle_sync_aborted`(유니버스 조회 실패로 일봉 회차 중단), `candle_sync_failed` 지속(재시도 회차까지 남는 종목 실패 — 둘 다 §2.6), **`minute.candle.value.regressed` 발생 즉시**(앵커 오염은 조용히 번진다).
+메트릭: `kis_ws_sessions{state}` · `kis_subscribed_symbols` · `demand_symbols` · `degraded_symbols` · `tick_in_rate`/`quote_publish_rate` · `conflation_lag_ms` · `pingpong_miss` · `rest_call_rate{keyId}` · `rest_throttled` · `token_refresh_total` · `batch_job_duration/fail{job}`. 로그는 구조화 JSON으로 남기고 appkey/token은 마스킹한다. 프레임 원문은 DEBUG+샘플링으로만 남긴다. 실시간 메트릭(§2.3): `tick.silence.degraded`(등록됐는데 체결 틱이 없어 REST 폴링으로 넘긴 종목) · `tick.market.div{div}`(실시간이 확정한 구분 — `UN`만 나온다). **`tick.silence.degraded`는 발생 즉시 알람** — 실시간 경로가 그 종목을 못 받고 있다는 뜻이다. 분봉 메트릭(§2.6): `minute.candle.refresh` · `minute.candle.upsert.retry` · `minute.candle.empty.complete`(`output2`가 빈 채로 완주) · `minute.candle.zero.page`(전 행 0인 페이지 — 시장 구분 오판·KIS 이상) · `minute.candle.value.regressed`(누적 거래대금 역행 = 시장 구분 혼입 의심) · `minute.candle.market.div{div}`(날짜별 판별 결과 분포) · `minute.candle.div.unknown`(그날 구분 기록 없이 적재분만 있어 갱신을 건너뛴 횟수 — Redis 유실 신호). 알람: WS 세션 전멸 5분, 장중 tick_in=0, 배치 실패, throttled 급증, `candle_sync_aborted`(유니버스 조회 실패로 일봉 회차 중단), `candle_sync_failed` 지속(재시도 회차까지 남는 종목 실패 — 둘 다 §2.6), **`minute.candle.value.regressed` 발생 즉시**(앵커 오염은 조용히 번진다).
 
 ## 7. 장애 시나리오 & 대응
 

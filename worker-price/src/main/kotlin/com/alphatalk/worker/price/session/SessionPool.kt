@@ -47,7 +47,6 @@ class SessionPool(
     private val tickDivs = ConcurrentHashMap<String, String>()
     private val lastTickAt = ConcurrentHashMap<String, Long>()
     private val subscribedAt = ConcurrentHashMap<String, Long>()
-    private val silenceEscalated = ConcurrentHashMap.newKeySet<String>()
     private val silenceDegraded = ConcurrentHashMap.newKeySet<String>()
 
     private data class Registration(val trId: String, val symbol: String)
@@ -106,33 +105,29 @@ class SessionPool(
             }
             val since = subscribedAt[symbol] ?: return@forEach
             if (lastTickAt.containsKey(symbol) || now - since < silenceMillis) return@forEach
-            val onUnified = tickDivs[symbol] != MarketDivStore.KRX
-            if (onUnified && silenceEscalated.add(symbol)) {
-                log.warn(
-                    "실시간 틱 침묵 - 통합 채널이 이 종목을 다루지 않는다고 보고 KRX 전용으로 재등록한다: code={} silenceMs={}",
-                    symbol,
-                    now - since,
-                )
-                meters.counter("tick.silence.escalated").increment()
-                tickDivs[symbol] = MarketDivStore.KRX
-                subscribedAt[symbol] = now
-                return@forEach
-            }
             silenceDegraded += symbol
             degraded += symbol
-            log.warn("실시간 틱이 두 채널 모두 침묵 - REST 폴링으로 넘긴다: code={}", symbol)
+            log.warn(
+                "실시간 틱 침묵 - REST 폴링으로 넘긴다: code={} div={} silenceMs={}",
+                symbol,
+                tickDivs[symbol] ?: MarketDivStore.UNIFIED,
+                now - since,
+            )
             meters.counter("tick.silence.degraded").increment()
         }
     }
 
     private fun onSymbolTick(trId: String, symbol: String, now: Long) {
-        if (trId != unifiedTrId && trId != krxTrId) return
+        val div = when (trId) {
+            krxTrId -> MarketDivStore.KRX
+            unifiedTrId -> MarketDivStore.UNIFIED
+            else -> return
+        }
+        if (div != (tickDivs[symbol] ?: MarketDivStore.UNIFIED)) return
         val first = lastTickAt.put(symbol, now) == null
         if (!first) return
         silenceDegraded.remove(symbol)
-        val div = if (trId == krxTrId) MarketDivStore.KRX else MarketDivStore.UNIFIED
-        if (div != (tickDivs[symbol] ?: MarketDivStore.UNIFIED)) return
-        if (div == MarketDivStore.KRX && !silenceEscalated.contains(symbol)) return
+        if (div != MarketDivStore.UNIFIED) return
         marketDivs.confirm(symbol, div)
         meters.counter("tick.market.div", "div", div).increment()
     }
@@ -140,7 +135,6 @@ class SessionPool(
     private fun rearmSilence(symbol: String) {
         subscribedAt.remove(symbol)
         lastTickAt.remove(symbol)
-        silenceEscalated.remove(symbol)
         silenceDegraded.remove(symbol)
     }
 
@@ -148,7 +142,6 @@ class SessionPool(
         tickDivs.remove(symbol)
         lastTickAt.remove(symbol)
         subscribedAt.remove(symbol)
-        silenceEscalated.remove(symbol)
         silenceDegraded.remove(symbol)
     }
 

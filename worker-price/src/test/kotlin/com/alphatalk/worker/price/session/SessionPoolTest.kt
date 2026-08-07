@@ -97,7 +97,7 @@ class SessionPoolTest {
     }
 
     @Test
-    fun `통합 등록 뒤 침묵하면 KRX 체결 TR로 재등록한다`() {
+    fun `통합 등록 뒤 침묵하면 REST 폴링으로 강등한다`() {
         val divs = InMemoryMarketDivStore()
         val meters = SimpleMeterRegistry()
         val pool = pool(trIds = listOf("H0UNCNT0"), marketDivs = divs, silenceMillis = 1_000, meters = meters)
@@ -105,50 +105,6 @@ class SessionPoolTest {
         pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
         server.awaitMessages(1)
         server.broadcastText(ackFrame("047040", success = true, trId = "H0UNCNT0"))
-        awaitConfirmed(meters, 1)
-
-        now += 2_000
-        pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
-
-        server.awaitMessages(3)
-        assertEquals(listOf("047040"), trKeysOf(server.receivedMessages, "H0STCNT0"))
-        assertTrue(unsubscribesOf(server.receivedMessages).isNotEmpty())
-        assertEquals(null, divs.get("047040"))
-    }
-
-    @Test
-    fun `재등록한 KRX에서 틱이 오면 그 종목의 구분을 확정 기록한다`() {
-        val divs = InMemoryMarketDivStore()
-        val meters = SimpleMeterRegistry()
-        val pool = pool(trIds = listOf("H0UNCNT0"), marketDivs = divs, silenceMillis = 1_000, meters = meters)
-
-        pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
-        server.awaitMessages(1)
-        server.broadcastText(ackFrame("047040", success = true, trId = "H0UNCNT0"))
-        awaitConfirmed(meters, 1)
-        now += 2_000
-        pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
-        server.awaitMessages(3)
-
-        server.broadcastText("0|H0STCNT0|001|047040^134058^16110^2^10^0.06^16000^16200^16000^0^0^0^0^4355991")
-
-        await().atMost(Duration.ofSeconds(5)).until { divs.get("047040") == "J" }
-    }
-
-    @Test
-    fun `두 채널 모두 침묵하면 REST 폴링 대상으로 강등한다`() {
-        val divs = InMemoryMarketDivStore()
-        val meters = SimpleMeterRegistry()
-        val pool = pool(trIds = listOf("H0UNCNT0"), marketDivs = divs, silenceMillis = 1_000, meters = meters)
-
-        pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
-        server.awaitMessages(1)
-        server.broadcastText(ackFrame("047040", success = true, trId = "H0UNCNT0"))
-        awaitConfirmed(meters, 1)
-        now += 2_000
-        pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
-        server.awaitMessages(3)
-        server.broadcastText(ackFrame("047040", success = true, trId = "H0STCNT0"))
         awaitConfirmed(meters, 1)
 
         now += 2_000
@@ -156,7 +112,69 @@ class SessionPoolTest {
 
         assertEquals(setOf("047040"), pool.degradedSymbols())
         assertEquals(null, divs.get("047040"))
+        assertEquals(listOf("047040"), trKeysOf(server.receivedMessages, "H0UNCNT0"))
     }
+
+    @Test
+    fun `KRX 틱은 그 종목이 NXT 미상장이라는 증거가 아니라 구분을 기록하지 않는다`() {
+        val divs = InMemoryMarketDivStore(mapOf("047040" to "J"))
+        val meters = SimpleMeterRegistry()
+        val pool = pool(trIds = listOf("H0UNCNT0"), marketDivs = divs, silenceMillis = 1_000, meters = meters)
+        divs.confirmed.clear()
+        divs.confirm("047040", "J")
+
+        pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
+        server.awaitMessages(1)
+        server.broadcastText(ackFrame("047040", success = true, trId = "H0STCNT0"))
+        awaitConfirmed(meters, 1)
+
+        server.broadcastText(tickFrame("H0STCNT0", "047040"))
+        await().atMost(Duration.ofSeconds(5)).until { meters.counter("tick.in").count() > 0 }
+
+        assertTrue(pool.degradedSymbols().isEmpty())
+        assertEquals(0.0, meters.counter("tick.market.div", "div", "J").count())
+    }
+
+    @Test
+    fun `통합 틱이 오면 그 종목을 통합으로 확정 기록한다`() {
+        val divs = InMemoryMarketDivStore()
+        val meters = SimpleMeterRegistry()
+        val pool = pool(trIds = listOf("H0UNCNT0"), marketDivs = divs, silenceMillis = 1_000, meters = meters)
+
+        pool.maintain(linkedSetOf("005930"), subscribeAllowed = true)
+        server.awaitMessages(1)
+        server.broadcastText(ackFrame("005930", success = true, trId = "H0UNCNT0"))
+        awaitConfirmed(meters, 1)
+
+        server.broadcastText(tickFrame("H0UNCNT0", "005930"))
+
+        await().atMost(Duration.ofSeconds(5)).until { divs.get("005930") == "UN" }
+    }
+
+    @Test
+    fun `전환 전 채널의 잔여 틱은 침묵 상태를 되돌리지 않는다`() {
+        val divs = InMemoryMarketDivStore(mapOf("047040" to "J"))
+        val meters = SimpleMeterRegistry()
+        val pool = pool(trIds = listOf("H0UNCNT0"), marketDivs = divs, silenceMillis = 1_000, meters = meters)
+
+        pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
+        server.awaitMessages(1)
+        server.broadcastText(ackFrame("047040", success = true, trId = "H0STCNT0"))
+        awaitConfirmed(meters, 1)
+        now += 2_000
+        pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
+        assertEquals(setOf("047040"), pool.degradedSymbols())
+
+        server.broadcastText(tickFrame("H0UNCNT0", "047040"))
+        await().atMost(Duration.ofSeconds(5)).until { meters.counter("tick.in").count() > 0 }
+
+        now += 2_000
+        pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
+
+        assertEquals(setOf("047040"), pool.degradedSymbols())
+        assertEquals("J", divs.get("047040"))
+    }
+
 
     private fun tickFrame(trId: String, code: String) =
         "0|$trId|001|$code^134058^16110^2^10^0.06^16000^16200^16000^0^0^0^0^4355991"
@@ -207,8 +225,7 @@ class SessionPoolTest {
         now += 2_000
         pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
 
-        assertEquals(1.0, meters.counter("tick.silence.escalated").count())
-        assertEquals(listOf("047040"), trKeysOf(server.receivedMessages, "H0STCNT0"))
+        assertEquals(1.0, meters.counter("tick.silence.degraded").count())
     }
 
     @Test
@@ -226,7 +243,6 @@ class SessionPoolTest {
         pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
 
         assertEquals(setOf("047040"), pool.degradedSymbols())
-        assertEquals(0.0, meters.counter("tick.silence.escalated").count())
     }
 
     @Test
@@ -241,19 +257,17 @@ class SessionPoolTest {
         awaitConfirmed(meters, 1)
         now += 2_000
         pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
-        server.awaitMessages(3)
-        assertEquals(1.0, meters.counter("tick.silence.escalated").count())
+        assertEquals(setOf("047040"), pool.degradedSymbols())
 
         server.closeAllConnections()
 
         await().atMost(Duration.ofSeconds(10)).until {
             now += 200
             pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
-            trKeysOf(server.receivedMessages, "H0STCNT0").size >= 2
+            trKeysOf(server.receivedMessages, "H0UNCNT0").size >= 2
         }
 
         assertTrue(pool.degradedSymbols().isEmpty())
-        assertEquals(1.0, meters.counter("tick.silence.escalated").count())
     }
 
     @Test
