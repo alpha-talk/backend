@@ -237,4 +237,72 @@ class KisRestClientTest {
             client.minuteCandles(account, "005930", java.time.LocalTime.of(13, 4), KisRestClient.MARKET_DIV_UNIFIED)
         }
     }
+    @Test
+    fun `투자의견을 파싱한다 - 목표가 0과 빈 직전의견은 null`() {
+        server.enqueue("/oauth2/tokenP", 200, tokenBody("T1"))
+        server.enqueue(
+            "/uapi/domestic-stock/v1/quotations/invest-opbysec",
+            200,
+            """
+            {"rt_cd":"0","output":[
+              {"stck_bsop_date":"20260806","stck_shrn_iscd":"251270","hts_kor_isnm":"넷마블",
+               "invt_opnn":"매수","invt_opnn_cls_code":"2","rgbf_invt_opnn":"중립","rgbf_invt_opnn_cls_code":"3",
+               "mbcr_name":"미래에셋","hts_goal_prc":"50000","stck_prpr":"40800"},
+              {"stck_bsop_date":"20260806","stck_shrn_iscd":"252990","hts_kor_isnm":"샘씨엔에스",
+               "invt_opnn":"NotRated","invt_opnn_cls_code":"2","rgbf_invt_opnn":"","rgbf_invt_opnn_cls_code":"3",
+               "mbcr_name":"","hts_goal_prc":"0","stck_prpr":"14160"},
+              {"stck_bsop_date":"","stck_shrn_iscd":"","invt_opnn":""}]}
+            """.trimIndent(),
+        )
+
+        val opinions = client.investOpinions(
+            account,
+            "005",
+            java.time.LocalDate.of(2026, 8, 5),
+            java.time.LocalDate.of(2026, 8, 6),
+        )
+
+        assertEquals(2, opinions.size)
+        val first = opinions[0]
+        assertEquals("251270", first.code)
+        assertEquals("20260806", first.businessDate)
+        assertEquals("매수", first.rating)
+        assertEquals("중립", first.previousRating)
+        assertEquals(50000L, first.targetPrice)
+        assertEquals("미래에셋", first.memberName)
+        val second = opinions[1]
+        assertEquals("NotRated", second.rating)
+        assertEquals(null, second.previousRating)
+        assertEquals(null, second.targetPrice)
+        assertEquals(null, second.memberName)
+
+        val call = server.received.single { it.path.endsWith("invest-opbysec") }
+        assertEquals("FHKST663400C0", call.headers["tr_id"])
+        assertTrue("FID_COND_SCR_DIV_CODE=16634" in call.query)
+        assertTrue("FID_INPUT_ISCD=005" in call.query)
+        assertTrue("FID_DIV_CLS_CODE=0" in call.query)
+        assertTrue("FID_INPUT_DATE_1=20260805" in call.query)
+        assertTrue("FID_INPUT_DATE_2=20260806" in call.query)
+    }
+
+    @Test
+    fun `투자의견 회원사 코드는 3자리만 허용한다 - 5자리는 조용한 0행 실패라 요청 전에 막는다`() {
+        assertFailsWith<IllegalArgumentException> {
+            client.investOpinions(account, "00005", java.time.LocalDate.of(2026, 8, 5), java.time.LocalDate.of(2026, 8, 6))
+        }
+    }
+
+    @Test
+    fun `투자의견 rt_cd가 0이 아니면 예외를 던진다`() {
+        server.enqueue("/oauth2/tokenP", 200, tokenBody("T1"))
+        server.enqueue(
+            "/uapi/domestic-stock/v1/quotations/invest-opbysec",
+            200,
+            """{"rt_cd":"1","msg_cd":"EGW00121"}""",
+        )
+
+        assertFailsWith<KisClientException> {
+            client.investOpinions(account, "005", java.time.LocalDate.of(2026, 8, 5), java.time.LocalDate.of(2026, 8, 6))
+        }
+    }
 }
