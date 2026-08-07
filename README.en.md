@@ -147,10 +147,10 @@ A few things worth knowing:
 | Gateway (`ws`) | JWT auth, demand index, Redis relay, watchlist resolution, presence, metrics — working |
 | News pipeline (`worker-ingest` · `worker-llm`) | Collection through clustering, summarization, sentiment, fan-out, daily briefing, DLQ — working |
 | KIS real-time (`kis-client` · `worker-price`) | Session pool, conflation, publishing, REST polling fallback, daily candles — working |
-| Batch (`worker-batch`) | Stock master sync done. Investor flow, financials, and analyst opinions are specified but not built |
+| Batch (`worker-batch`) | Stock master sync and analyst-opinion collection with real-time publish working. Investor flow and financials are specified but not built |
 | Main server (`core-api`) | Auth, search, watchlist, stream, notifications, community, stock info — 30 REST endpoints working. Deployment hardening (CORS, metrics) is left |
 
-Next up: the remaining batch jobs (investor flow, financials, analyst opinions), deployment hardening for `core-api`, and a load smoke test.
+Next up: the remaining batch jobs (investor flow, financials), deployment hardening for `core-api`, and a load smoke test.
 
 ## Disclaimer
 

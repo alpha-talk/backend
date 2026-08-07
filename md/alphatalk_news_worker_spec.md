@@ -261,7 +261,7 @@ stream payload (ws_api_spec §4.3 확장 — ⚠️ §6 증보):
   "title": "한은, 기준금리 25bp 인상", "summary": "…", "sentiment": "POSITIVE", "sources": [ … ], "occurredAt": … }
 ```
 
-> 증권사 **투자의견**은 이 파이프라인을 타지 않는다 — worker-batch가 `stream_event` 저장 후 `stream:{code}`를 직접 발행한다(llm-worker와 공동 생산자, [KIS 워커 명세](alphatalk_kis_worker_spec.md) §3.3 · Redis 계약 v0.7). 라우팅은 같지만 payload는 WS v0.6의 `kind=opinion`·`opinion{}` 하위 호환 확장을 쓴다. `queue:ingest`·llm-worker는 관여하지 않는다.
+> 증권사 **투자의견**은 이 파이프라인을 타지 않는다 — worker-batch가 `stream_event` 저장 후 `stream:{code}`를 직접 발행한다(llm-worker와 공동 생산자, [KIS 워커 명세](alphatalk_kis_worker_spec.md) §3.3 · Redis 계약 v0.7). 라우팅은 같지만 payload는 WS v0.7의 `kind=opinion`·`opinion{}` 하위 호환 확장을 쓴다. `queue:ingest`·llm-worker는 관여하지 않는다.
 
 ---
 

@@ -34,6 +34,7 @@ dependencies {
     implementation("org.jetbrains.kotlin:kotlin-reflect")
     implementation(libs.shedlock.spring)
     implementation(libs.shedlock.redis)
+    implementation(libs.ulid.creator)
     runtimeOnly("org.postgresql:postgresql")
 
     testImplementation(kotlin("test"))
