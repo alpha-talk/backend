@@ -48,8 +48,11 @@ class SessionPool(
     private val lastTickAt = ConcurrentHashMap<String, Long>()
     private val subscribedAt = ConcurrentHashMap<String, Long>()
     private val silenceDegraded = ConcurrentHashMap.newKeySet<String>()
+    private val seenTicks = ConcurrentHashMap<String, SeenTick>()
 
     private data class Registration(val trId: String, val symbol: String)
+
+    private data class SeenTick(val div: String, val at: Long)
 
     init {
         SessionState.entries.forEach { state ->
@@ -71,6 +74,7 @@ class SessionPool(
         val now = clock()
         if (subscribeAllowed) {
             adoptUpdatedDivs()
+            absorbSeenTicks()
             escalateSilent(now)
         }
         sessions.forEach { session ->
@@ -139,27 +143,31 @@ class SessionPool(
             unifiedTrId -> MarketDivStore.UNIFIED
             else -> return
         }
-        if (lastTickAt.containsKey(symbol)) return
-        if (!claimFirstTick(div, symbol, now)) return
-        marketDivs.confirm(symbol, div)
-        meters.counter("tick.market.div", "div", div).increment()
+        seenTicks[symbol] = SeenTick(div, now)
     }
 
-    @Synchronized
-    private fun claimFirstTick(div: String, symbol: String, now: Long): Boolean {
-        if (div != (tickDivs[symbol] ?: MarketDivStore.UNIFIED)) return false
-        if (lastTickAt.putIfAbsent(symbol, now) != null) return false
-        silenceDegraded.remove(symbol)
-        return div == MarketDivStore.UNIFIED
+    private fun absorbSeenTicks() {
+        seenTicks.keys.toList().forEach { symbol ->
+            val seen = seenTicks.remove(symbol) ?: return@forEach
+            if (symbol !in assignments) return@forEach
+            if (seen.div != (tickDivs[symbol] ?: MarketDivStore.UNIFIED)) return@forEach
+            silenceDegraded.remove(symbol)
+            if (lastTickAt.put(symbol, seen.at) != null) return@forEach
+            if (seen.div != MarketDivStore.UNIFIED) return@forEach
+            marketDivs.confirm(symbol, seen.div)
+            meters.counter("tick.market.div", "div", seen.div).increment()
+        }
     }
 
     private fun rearmSilence(symbol: String) {
+        seenTicks.remove(symbol)
         subscribedAt.remove(symbol)
         lastTickAt.remove(symbol)
         silenceDegraded.remove(symbol)
     }
 
     private fun forgetSymbol(symbol: String) {
+        seenTicks.remove(symbol)
         tickDivs.remove(symbol)
         lastTickAt.remove(symbol)
         subscribedAt.remove(symbol)

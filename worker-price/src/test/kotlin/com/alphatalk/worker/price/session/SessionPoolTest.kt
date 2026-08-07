@@ -9,9 +9,6 @@ import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import org.awaitility.Awaitility.await
 import java.time.Duration
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
-import kotlin.concurrent.thread
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
@@ -77,6 +74,10 @@ class SessionPoolTest {
         await().atMost(Duration.ofSeconds(5)).until {
             meters.find("kis.subscribed.symbols").gauge()?.value()?.toInt() == count
         }
+    }
+
+    private fun awaitTicksReceived(meters: SimpleMeterRegistry, count: Int) {
+        await().atMost(Duration.ofSeconds(5)).until { meters.counter("tick.in").count().toInt() >= count }
     }
 
     private fun trKeysOf(messages: List<String>, trId: String) =
@@ -149,31 +150,10 @@ class SessionPoolTest {
     }
 
     @Test
-    fun `구분 전환 중 도착한 이전 채널 틱은 침묵 감시를 끄지 못한다`() {
-        val backing = InMemoryMarketDivStore()
-        val entered = CountDownLatch(1)
-        val gate = CountDownLatch(1)
-        val divs = object : MarketDivStore {
-            override fun get(code: String): String? {
-                val value = backing.get(code)
-                if (value == "J") {
-                    entered.countDown()
-                    gate.await(5, TimeUnit.SECONDS)
-                }
-                return value
-            }
-
-            override fun confirm(code: String, div: String) = backing.confirm(code, div)
-        }
+    fun `전환 직전에 도착한 이전 채널 틱은 전환 뒤 폐기된다`() {
+        val divs = InMemoryMarketDivStore()
         val meters = SimpleMeterRegistry()
-        val buffer = ConflationBuffer()
-        val pool = pool(
-            trIds = listOf("H0UNCNT0"),
-            marketDivs = divs,
-            silenceMillis = 1_000,
-            meters = meters,
-            buffer = buffer,
-        )
+        val pool = pool(trIds = listOf("H0UNCNT0"), marketDivs = divs, silenceMillis = 1_000, meters = meters)
 
         pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
         server.awaitMessages(1)
@@ -183,19 +163,40 @@ class SessionPoolTest {
         pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
         assertEquals(setOf("047040"), pool.degradedSymbols())
 
-        backing.confirm("047040", "J")
-        val switching = thread { pool.maintain(linkedSetOf("047040"), subscribeAllowed = true) }
-        assertTrue(entered.await(5, TimeUnit.SECONDS))
         server.broadcastText(tickFrame("H0UNCNT0", "047040"))
-        await().atMost(Duration.ofSeconds(5)).until { "047040" in buffer.drainDirty() }
-        gate.countDown()
-        switching.join(5_000)
+        awaitTicksReceived(meters, 1)
+        divs.confirm("047040", "J")
 
-        now += 2_000
         pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
 
         assertEquals(setOf("047040"), pool.degradedSymbols())
-        assertEquals("J", backing.get("047040"))
+        assertEquals("J", divs.get("047040"))
+
+        now += 2_000
+        pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
+        assertEquals(setOf("047040"), pool.degradedSymbols())
+    }
+
+    @Test
+    fun `현재 채널 틱은 다음 정비 주기에 흡수되어 강등을 푼다`() {
+        val divs = InMemoryMarketDivStore()
+        val meters = SimpleMeterRegistry()
+        val pool = pool(trIds = listOf("H0UNCNT0"), marketDivs = divs, silenceMillis = 1_000, meters = meters)
+
+        pool.maintain(linkedSetOf("005930"), subscribeAllowed = true)
+        server.awaitMessages(1)
+        server.broadcastText(ackFrame("005930", success = true, trId = "H0UNCNT0"))
+        awaitConfirmed(meters, 1)
+        now += 2_000
+        pool.maintain(linkedSetOf("005930"), subscribeAllowed = true)
+        assertEquals(setOf("005930"), pool.degradedSymbols())
+
+        server.broadcastText(tickFrame("H0UNCNT0", "005930"))
+        awaitTicksReceived(meters, 1)
+        pool.maintain(linkedSetOf("005930"), subscribeAllowed = true)
+
+        assertTrue(pool.degradedSymbols().isEmpty())
+        assertEquals("UN", divs.get("005930"))
     }
 
     @Test
@@ -209,7 +210,8 @@ class SessionPoolTest {
         server.broadcastText(ackFrame("005930", success = true, trId = "H0UNCNT0"))
         awaitConfirmed(meters, 1)
         server.broadcastText(tickFrame("H0UNCNT0", "005930"))
-        await().atMost(Duration.ofSeconds(5)).until { meters.counter("tick.in").count() > 0 }
+        awaitTicksReceived(meters, 1)
+        pool.maintain(linkedSetOf("005930"), subscribeAllowed = true)
 
         divs.confirm("005930", "J")
         now += 2_000
@@ -251,8 +253,10 @@ class SessionPoolTest {
         awaitConfirmed(meters, 1)
 
         server.broadcastText(tickFrame("H0UNCNT0", "005930"))
+        awaitTicksReceived(meters, 1)
+        pool.maintain(linkedSetOf("005930"), subscribeAllowed = true)
 
-        await().atMost(Duration.ofSeconds(5)).until { divs.get("005930") == "UN" }
+        assertEquals("UN", divs.get("005930"))
     }
 
     @Test
