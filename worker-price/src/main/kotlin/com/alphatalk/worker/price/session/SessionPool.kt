@@ -125,11 +125,13 @@ class SessionPool(
         }
     }
 
-    private fun onSymbolTick(symbol: String, now: Long) {
+    private fun onSymbolTick(trId: String, symbol: String, now: Long) {
+        if (trId != unifiedTrId && trId != krxTrId) return
         val first = lastTickAt.put(symbol, now) == null
         if (!first) return
         silenceDegraded.remove(symbol)
-        val div = tickDivs[symbol] ?: return
+        val div = if (trId == krxTrId) MarketDivStore.KRX else MarketDivStore.UNIFIED
+        if (div != (tickDivs[symbol] ?: MarketDivStore.UNIFIED)) return
         if (div == MarketDivStore.KRX && !silenceEscalated.contains(symbol)) return
         marketDivs.confirm(symbol, div)
         meters.counter("tick.market.div", "div", div).increment()
@@ -290,11 +292,11 @@ class SessionPool(
     }
 
     private inner class FrameHandler(private val pooled: PooledSession) : KisSessionListener {
-        override fun onTicks(ticks: List<KisTick>) {
+        override fun onTicks(trId: String, ticks: List<KisTick>) {
             val now = clock()
             ticks.forEach { tick ->
                 buffer.offer(tick)
-                onSymbolTick(tick.code, now)
+                onSymbolTick(trId, tick.code, now)
             }
             meters.counter("tick.in").increment(ticks.size.toDouble())
         }
