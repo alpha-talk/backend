@@ -17,6 +17,8 @@ class KisMasterClient(
 
     fun downloadSectors(): ByteArray = download(KisSectorParser.FILE_NAME)
 
+    fun downloadMembers(): ByteArray = download(KisMemberParser.FILE_NAME)
+
     private fun download(fileName: String): ByteArray {
         val request = HttpRequest.newBuilder()
             .uri(URI.create("$baseUrl/$fileName.mst.zip"))

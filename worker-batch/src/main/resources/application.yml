@@ -46,6 +46,16 @@ alphatalk:
       max-failure-ratio: 0.05                   # 조회 실패가 이 비율을 넘으면 부분 결과를 저장하지 않고 잡을 실패시킨다
       group-overrides:                          # DART 신고 업종이 뉴스 맥락과 어긋나는 종목의 수동 보정
         "[005930]": "261"                       # 삼성전자 — DART 신고는 264(통신·방송장비)지만 반도체 뉴스가 본류다
+    holidays: []                                # KRX 휴장일(yyyy-MM-dd) — worker-price와 같은 목록을 각자 든다, 함께 갱신 (명세 §2.7)
+    kis:
+      accounts-json: ${KIS_ACCOUNTS:[]}         # [{"keyId":"...","appkey":"...","appsecret":"..."}] — price와 같은 계정, 토큰은 Redis로 공유 (Redis 계약 v0.16)
+      rate-factor: ${KIS_RATE_FACTOR:0.75}      # 공용 gate 상한 = 15/s × factor — price와 같은 KIS_RATE_FACTOR를 읽어 합산 버킷 파라미터가 갈라지지 않게 한다
+    opinion:                                    # 증권사 투자의견 수집·발행 (명세 §3.3)
+      enabled: false                            # KIS 계정이 있는 환경에서만 켠다 — 켜면 계정 필수(fail-closed)
+      cron: "0 0/10 7-17 * * MON-FRI"           # 영업일 07:00~17:50 10분 주기 — 휴장일은 잡 내부 캘린더가 스킵
+      calls-per-second: 4.0                     # 잡 자체 상한 4콜/s (명세 §3.1)
+      request-interval: 250ms
+      scan-limit: 500                           # 회차당 미통보 스캔 상한
 
 management:
   endpoints:
