@@ -31,9 +31,6 @@ open class InvestOpinionSyncJob(
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
 
-    @Volatile
-    private var resumeIndex = 0
-
     @Scheduled(cron = "\${alphatalk.batch.opinion.cron:0 0/10 7-17 * * MON-FRI}", zone = "Asia/Seoul")
     open fun scheduled() {
         syncOnce()
@@ -73,53 +70,80 @@ open class InvestOpinionSyncJob(
 
     private fun collect(today: LocalDate, deadline: Instant): Pair<Int, Int> {
         val from = previousBusinessDay(today)
-        var inserted = 0
-        var failed = 0
         val members = brokers.brokers()
         if (members.isEmpty()) return 0 to 0
-        val start = resumeIndex % members.size
-        var processed = 0
-        while (processed < members.size) {
+        val start = ((clock().epochSecond / CYCLE_SECONDS) % members.size).toInt()
+        var inserted = 0
+        val retryQueue = mutableListOf<Broker>()
+        for (offset in members.indices) {
             if (clock() >= deadline) {
                 meters.counter("batch.opinion.deadline").increment()
                 log.warn(
                     "collect deadline reached before lock expiry, deferring {} brokers to next cycle",
-                    members.size - processed,
+                    members.size - offset,
                 )
                 break
             }
-            val broker = members[(start + processed) % members.size]
-            processed++
-            pause(requestInterval)
-            val rows = try {
-                fetcher.fetch(broker, from, today)
-            } catch (e: Exception) {
-                failed++
-                log.warn("opinion fetch failed, next cycle retries: broker={}", broker.code, e)
-                continue
-            }
-            if (rows.size >= KisRestClient.INVEST_OPINION_PAGE_CAP) {
-                meters.counter("batch.opinion.truncated").increment()
-                log.warn("opinion response hit page cap, oldest rows may be missing: broker={} rows={}", broker.code, rows.size)
-            }
-            for (row in rows) {
-                val observation = OpinionObservation(
-                    code = row.code,
-                    businessDate = row.businessDate,
-                    brokerCode = broker.code,
-                    brokerName = row.memberName ?: broker.name.ifBlank { null },
-                    rating = row.rating,
-                    previousRating = row.previousRating,
-                    targetPrice = row.targetPrice,
-                    contentHash = OpinionObservation.contentHash(row.rating, row.previousRating, row.targetPrice),
-                    collectedAt = clock(),
-                )
-                if (store.insertIfAbsent(observation)) inserted++
+            val broker = members[(start + offset) % members.size]
+            val collected = fetchAndStore(broker, from, today)
+            if (collected == null) {
+                log.warn("opinion fetch failed, retrying at end of cycle: broker={}", broker.code)
+                retryQueue += broker
+            } else {
+                inserted += collected
             }
         }
-        resumeIndex = (start + processed) % members.size
+        var failed = 0
+        for ((index, broker) in retryQueue.withIndex()) {
+            if (clock() >= deadline) {
+                failed += retryQueue.size - index
+                meters.counter("batch.opinion.deadline").increment()
+                log.warn(
+                    "collect deadline reached before retry pass completed, deferring {} brokers to next cycle",
+                    retryQueue.size - index,
+                )
+                break
+            }
+            val collected = fetchAndStore(broker, from, today)
+            if (collected == null) {
+                failed++
+                log.warn("opinion retry failed, next cycle retries: broker={}", broker.code)
+            } else {
+                inserted += collected
+            }
+        }
         meters.counter("batch.opinion.collected").increment(inserted.toDouble())
         return inserted to failed
+    }
+
+    private fun fetchAndStore(broker: Broker, from: LocalDate, to: LocalDate): Int? {
+        pause(requestInterval)
+        val rows = try {
+            fetcher.fetch(broker, from, to)
+        } catch (e: Exception) {
+            log.warn("opinion fetch failed: broker={}", broker.code, e)
+            return null
+        }
+        if (rows.size >= KisRestClient.INVEST_OPINION_PAGE_CAP) {
+            meters.counter("batch.opinion.truncated").increment()
+            log.warn("opinion response hit page cap, oldest rows may be missing: broker={} rows={}", broker.code, rows.size)
+        }
+        var inserted = 0
+        for (row in rows) {
+            val observation = OpinionObservation(
+                code = row.code,
+                businessDate = row.businessDate,
+                brokerCode = broker.code,
+                brokerName = row.memberName ?: broker.name.ifBlank { null },
+                rating = row.rating,
+                previousRating = row.previousRating,
+                targetPrice = row.targetPrice,
+                contentHash = OpinionObservation.contentHash(row.rating, row.previousRating, row.targetPrice),
+                collectedAt = clock(),
+            )
+            if (store.insertIfAbsent(observation)) inserted++
+        }
+        return inserted
     }
 
     internal fun publishPending(deadline: Instant): Int {
@@ -161,5 +185,6 @@ open class InvestOpinionSyncJob(
         private val LOCK_AT_LEAST_FOR: Duration = Duration.ofSeconds(5)
         private val COLLECT_DEADLINE: Duration = Duration.ofMinutes(6)
         private val PUBLISH_DEADLINE: Duration = Duration.ofMinutes(8)
+        private const val CYCLE_SECONDS = 600L
     }
 }
