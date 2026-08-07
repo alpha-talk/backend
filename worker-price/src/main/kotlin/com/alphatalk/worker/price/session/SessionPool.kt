@@ -69,7 +69,10 @@ class SessionPool(
     fun maintain(target: Set<String>, subscribeAllowed: Boolean) {
         reconcileAssignments(target)
         val now = clock()
-        if (subscribeAllowed) escalateSilent(now)
+        if (subscribeAllowed) {
+            adoptUpdatedDivs()
+            escalateSilent(now)
+        }
         sessions.forEach { session ->
             session.absorbConnectionLoss()
             if (session.state != SessionState.CONNECTED && session.state != SessionState.CONNECTING &&
@@ -95,6 +98,19 @@ class SessionPool(
         val chosen = tickDivs.computeIfAbsent(symbol) { marketDivs.get(it) ?: MarketDivStore.UNIFIED }
         val tick = if (chosen == MarketDivStore.KRX) krxTrId else unifiedTrId
         return tickTrIds.map { if (it == unifiedTrId) tick else it }
+    }
+
+    private fun adoptUpdatedDivs() {
+        assignments.keys.forEach { symbol ->
+            if (lastTickAt.containsKey(symbol)) return@forEach
+            val known = marketDivs.get(symbol) ?: return@forEach
+            val current = tickDivs[symbol] ?: MarketDivStore.UNIFIED
+            if (known == current) return@forEach
+            log.info("시장 구분 기록이 갱신됐다 - 재구독한다: code={} {} -> {}", symbol, current, known)
+            meters.counter("tick.div.resubscribed").increment()
+            tickDivs[symbol] = known
+            subscribedAt.remove(symbol)
+        }
     }
 
     private fun escalateSilent(now: Long) {
