@@ -44,11 +44,12 @@ class SessionPoolTest {
         marketDivs: MarketDivStore = InMemoryMarketDivStore(),
         silenceMillis: Long = Long.MAX_VALUE,
         meters: SimpleMeterRegistry = SimpleMeterRegistry(),
+        buffer: ConflationBuffer = ConflationBuffer(),
     ) = SessionPool(
         accounts = (1..accounts).map { KisAccount("key$it", "app$it", "secret$it") },
         wsUrl = server.url,
         approvalKeys = { "AK" },
-        buffer = ConflationBuffer(),
+        buffer = buffer,
         meters = meters,
         tickTrIds = trIds,
         marketDivs = marketDivs,
@@ -165,7 +166,14 @@ class SessionPoolTest {
             override fun confirm(code: String, div: String) = backing.confirm(code, div)
         }
         val meters = SimpleMeterRegistry()
-        val pool = pool(trIds = listOf("H0UNCNT0"), marketDivs = divs, silenceMillis = 1_000, meters = meters)
+        val buffer = ConflationBuffer()
+        val pool = pool(
+            trIds = listOf("H0UNCNT0"),
+            marketDivs = divs,
+            silenceMillis = 1_000,
+            meters = meters,
+            buffer = buffer,
+        )
 
         pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
         server.awaitMessages(1)
@@ -179,11 +187,10 @@ class SessionPoolTest {
         val switching = thread { pool.maintain(linkedSetOf("047040"), subscribeAllowed = true) }
         assertTrue(entered.await(5, TimeUnit.SECONDS))
         server.broadcastText(tickFrame("H0UNCNT0", "047040"))
-        Thread.sleep(200)
+        await().atMost(Duration.ofSeconds(5)).until { "047040" in buffer.drainDirty() }
         gate.countDown()
         switching.join(5_000)
 
-        await().atMost(Duration.ofSeconds(5)).until { meters.counter("tick.in").count() > 0 }
         now += 2_000
         pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
 
