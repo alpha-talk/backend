@@ -34,6 +34,9 @@ alphatalk:
     enabled: true
     catch-up:
       enabled: true                           # 기동 시 오늘 크론 시각이 이미 지난 일 1회 잡을 순차 실행 (명세 §3.2) — 이미 성공했으면 잡이 스스로 스킵
+      passes: 3                               # 재확인 횟수 — 앞 프로세스가 남긴 스테일 ShedLock이 첫 패스를 통째로 스킵시킬 수 있다
+      pass-interval: 20m                      # 지평 40분 > valuation_daily의 lockAtMostFor 30분. 더 늘리면 부분 실패한 회차의 전 종목 재조회만 배가된다 (명세 §3.2)
+      stop-timeout: 5s                        # 종료 시 따라잡기 스레드를 join하는 상한 — 남은 잡은 다음 기동/크론이 회수한다
     stock-master:
       enabled: true
       cron: "0 0 8 * * *"                       # 매일 08:00 KST — 원본이 07:40경 갱신된다 (명세 §3.1)
