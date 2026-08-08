@@ -62,6 +62,20 @@ class JpaBatchJobRunStoreTest {
     }
 
     @Test
+    fun `failCounted는 FAILED로 남기면서 성공·실패 카운트를 보존한다`() {
+        val id = runs.start("valuation_daily", "20260807", Instant.now())
+        assertNotNull(id)
+        runs.failCounted(id, 2500, 100, "partial failure: failed=100", Instant.now())
+
+        val row = repository.findById(id).orElseThrow()
+        assertEquals("FAILED", row.status)
+        assertEquals(2500, row.okCount)
+        assertEquals(100, row.failCount)
+        assertEquals("partial failure: failed=100", row.error)
+        assertNotNull(runs.start("valuation_daily", "20260807", Instant.now()))
+    }
+
+    @Test
     fun `실패한 잡은 같은 날 다시 시작된다`() {
         val first = runs.start("stock_master_sync", "20260729", Instant.now())
         assertNotNull(first)

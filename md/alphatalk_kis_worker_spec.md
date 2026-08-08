@@ -238,7 +238,7 @@ KIS 프레임 → 파싱 → 종목별 최신값 버퍼(덮어쓰기)
 | `minute_candle_daily_sync` | KIS `FHKST03010200` (§2.6 — 실행 주체는 price. **완주 판정 = 20:00 봉 존재 또는 20:00까지 조회 완료 워터마크**(희소·거래정지 종목은 마지막 체결이 일러도 완주). 종목별 시도 3회·백오프, 예외·경합은 다음 회차 재시도) | 영업일 **20:05** + 21·22·23시 15분 재시도 — **회차마다 대상을 재계산**해 미완주가 없으면 no-op | 당일 수요·조회 이력 종목(`symbols ∪ minute_candle` 당일 적재 종목) | `(code,date,time)` |
 | `minute_candle_backfill` | KIS `FHKST03010230` (§2.6 — 실행 주체는 price, ⚠️ 후속 구현 — §9.9 계측 후) | 수요 0→1 전이 즉시(비동기) | 콜드 종목 × 직전 7영업일 | `(code,date,time)` |
 | `minute_candle_purge` | DB 삭제 (§2.6 — 보존 30일 초과분) | 매일 04:30 | `minute_candle` 보존 초과 행 | `(code,date,time)` |
-| `valuation_daily` | KIS `FHKST01010100` 응답의 `per,pbr,eps,bps` + 마스터 시총 | 영업일 16:50 | 전 종목 (~2,600콜) | `(code,date)` |
+| `valuation_daily` | KIS `FHKST01010100` 응답의 `per,pbr,eps,bps` + 마스터 시총(상장주식수×종가) | 영업일 16:50 (+부분 실패 시 17:20·18:20 재실행 — §3.2 예외) | 전 종목 (~2,600콜, 재실행 회차당 +2.6k콜) | `(code,date)` |
 | `investor_flow_daily` | KIS `GET .../inquire-investor` · TR `FHKST01010900` — **장마감 후 확정치** | 영업일 17:10 | 전 종목 | `(code,date)` |
 | `invest_opinion_sync` | KIS `GET /uapi/domestic-stock/v1/quotations/invest-opbysec` · TR `FHKST663400C0` — 회원사 코드별 전 종목 투자의견(의견·직전의견·목표가). 회원사 목록은 `memcode.mst.zip`(§3.3) | 영업일 07:00 이상 18:00 미만 **10분 주기**(07:00~17:50) | 회원사 61개 × 1콜(연속조회 없음 — §3.3) | `(code, business_date, broker_code, content_hash)` |
 | `dart_corp_map` | OpenDART `corpCode.xml`(zip) — corp_code↔종목코드 매핑 | 주 1회 | 전 상장사 | `corp_code` |
@@ -257,7 +257,7 @@ KIS 프레임 → 파싱 → 종목별 최신값 버퍼(덮어쓰기)
 
 - Spring `@Scheduled` + **ShedLock**(Redis) — 다중 기동에 안전하다. 잡 이력은 테이블 `batch_job_run(job, run_date, status, ok_count, fail_count, started_at, finished_at, error)`에 기록하고, 동일 `(job, run_date)` SUCCESS가 있으면 스킵한다(재실행 멱등).
 - **일내 반복 잡 예외**: `invest_opinion_sync`(10분 주기)는 `(job, run_date)` SUCCESS 스킵을 적용하지 않는다 — 실행 이력만 기록하고 매 회 실행한다. 멱등은 잡 내부의 upsert·미발행 스캔(§3.3)이 담당한다. ShedLock은 동일하게 적용해 실행 중인 회차가 있으면 다음 트리거를 시작하지 않는다. lock TTL은 최대 실행시간보다 길어야 한다 — 잡은 **회차 데드라인**(lock TTL보다 짧게, 최악 단일 콜 소요를 더해도 TTL 미만)을 두고 도달 시 잔여 회원사를 다음 회차로 미룬다. KIS가 전반적으로 느려도 락이 실행 중에 만료되지 않아 다중 기동에서 동시 실행이 생기지 않고, 이연분은 조회 창이 직전 영업일을 포함하므로 유실되지 않는다. 순회 시작 위치는 **트리거 시각에서 유도**한다(10분 회차 번호 mod 회원사 수) — 어떤 인스턴스가 락을 잡아도 같은 회차엔 같은 위치에서 시작하고 회차마다 회전하므로, 이연이 반복돼도 특정 회원사가 계속 뒤로 밀리지 않는다(인메모리 커서 없음 — 재기동 안전).
-- 실패 종목은 잡 말미에 1회 재시도한다. 잔여 실패는 `fail_count`+로그로 남기고 다음 날 upsert로 자연 회복한다.
+- 실패 종목은 잡 말미에 1회 재시도한다. 잔여 실패는 `fail_count`+로그로 남기고 다음 날 upsert로 자연 회복한다. **예외 — `valuation_daily`**: 날짜 키 스냅샷이라 다음 날 실행이 그날의 공백을 채우지 못한다. 부분 실패 회차는 SUCCESS 대신 **FAILED로 기록**하고(ok/fail 카운트 보존 — `failCounted`), 17:20·18:20 재실행 크론이 FAILED 회차만 전 종목 재조회로 채운다(SUCCESS면 no-op, upsert 멱등). 마지막 재실행까지 실패가 남으면 FAILED로 확정돼 알람 대상이 되고, 그날 행은 수동 재실행으로만 채울 수 있다.
 - 재무 요약 변환: DART 계정과목 → `revenue/operatingProfit/netIncome/assets/liabilities/equity` 매핑 테이블(연결 우선). 매핑 불가 계정은 raw 보존 없이 스킵+카운트한다(포트폴리오 범위 단순화).
 
 ### 3.3 투자의견 → 실시간 소식 파이프라인 (`stream:{code}` 직접 발행) — ★ Redis 계약 v0.7·WS 계약 v0.6 반영

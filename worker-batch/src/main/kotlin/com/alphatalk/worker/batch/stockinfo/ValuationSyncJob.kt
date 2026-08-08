@@ -37,6 +37,12 @@ open class ValuationSyncJob(
         syncOnce()
     }
 
+    @Scheduled(cron = "\${alphatalk.batch.valuation.retry-cron:0 20 17,18 * * MON-FRI}", zone = "Asia/Seoul")
+    @SchedulerLock(name = JOB_NAME, lockAtMostFor = "PT30M", lockAtLeastFor = "PT1M")
+    open fun scheduledRetry() {
+        syncOnce()
+    }
+
     fun syncOnce(): Int {
         val date = today()
         if (!isBusinessDay(date)) return 0
@@ -60,7 +66,7 @@ open class ValuationSyncJob(
             for ((index, stock) in stocks.withIndex()) {
                 if (clock() >= deadlineAt) {
                     stored += store.upsert(buffer)
-                    return abortOnDeadline(runId, stored, stocks.size - index)
+                    return abortOnDeadline(runId, stored, failed.size + stocks.size - index)
                 }
                 val row = fetchRow(stock, runDate)
                 if (row == null) {
@@ -77,7 +83,7 @@ open class ValuationSyncJob(
             for ((index, stock) in failed.withIndex()) {
                 if (clock() >= deadlineAt) {
                     stored += store.upsert(buffer)
-                    return abortOnDeadline(runId, stored, failed.size - index)
+                    return abortOnDeadline(runId, stored, failCount + failed.size - index)
                 }
                 val row = fetchRow(stock, runDate)
                 if (row == null) {
@@ -93,9 +99,18 @@ open class ValuationSyncJob(
             }
             stored += store.upsert(buffer)
             meters.counter("batch.valuation.synced").increment(stored.toDouble())
-            if (failCount > 0) meters.counter("batch.valuation.failed").increment(failCount.toDouble())
-            runs.succeed(runId, stored, failCount, clock())
-            log.info("valuation sync done: stored={} failed={}", stored, failCount)
+            if (failCount > 0) {
+                meters.counter("batch.valuation.failed").increment(failCount.toDouble())
+                runs.failCounted(runId, stored, failCount, "partial failure: failed=$failCount", clock())
+                log.error(
+                    "valuation sync incomplete - retry cron or manual rerun completes today's rows. stored={} failed={}",
+                    stored,
+                    failCount,
+                )
+                return stored
+            }
+            runs.succeed(runId, stored, 0, clock())
+            log.info("valuation sync done: stored={}", stored)
             return stored
         } catch (e: Exception) {
             runs.fail(runId, e.toString(), clock())
@@ -119,14 +134,14 @@ open class ValuationSyncJob(
         null
     }
 
-    private fun abortOnDeadline(runId: Long, stored: Int, remaining: Int): Int {
+    private fun abortOnDeadline(runId: Long, stored: Int, unresolved: Int): Int {
         meters.counter("batch.valuation.deadline").increment()
         log.error(
-            "valuation sync deadline reached before lock expiry - marked FAILED for manual rerun. stored={} remaining={}",
+            "valuation sync deadline reached before lock expiry - marked FAILED for manual rerun. stored={} unresolved={}",
             stored,
-            remaining,
+            unresolved,
         )
-        runs.fail(runId, "deadline reached: remaining=$remaining", clock())
+        runs.failCounted(runId, stored, unresolved, "deadline reached: unresolved=$unresolved", clock())
         return stored
     }
 

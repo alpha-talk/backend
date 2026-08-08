@@ -59,6 +59,7 @@ alphatalk:
     valuation:                                  # PER·PBR·EPS·BPS + 시총 일일 적재 (명세 §3.1)
       enabled: false                            # KIS 계정이 있는 환경에서만 켠다 — 켜면 계정 필수(fail-closed)
       cron: "0 50 16 * * MON-FRI"               # 영업일 16:50 — 종가 확정 후, 휴장일은 잡 내부 캘린더가 스킵
+      retry-cron: "0 20 17,18 * * MON-FRI"      # 부분 실패(FAILED) 회차 재실행 — 날짜 키 스냅샷이라 당일 안에만 채울 수 있다. SUCCESS면 no-op
       calls-per-second: 8.0                     # 전 종목 ~2,600콜 ≈ 5.5분 — 공용 gate가 계정 합산 상한을 지킨다
       chunk-size: 200                           # 트랜잭션당 upsert 행 수 — 중단 시 부분 진행 보존
     investor:                                   # 투자자별 순매수 확정치 일일 적재 (명세 §3.1)
