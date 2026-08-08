@@ -25,6 +25,9 @@ data class BatchProperties(
 
     data class CatchUp(
         val enabled: Boolean = true,
+        val passes: Int = 3,
+        val passInterval: Duration = Duration.ofMinutes(20),
+        val stopTimeout: Duration = Duration.ofSeconds(5),
     )
 
     data class Kis(

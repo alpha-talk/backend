@@ -261,7 +261,13 @@ class BatchConfig {
                 add(CatchUpTask(FinancialsSyncJob.JOB_NAME, props.financials.cron) { job.scheduled() })
             }
         }
-        return StartupCatchUp(tasks, meters)
+        return StartupCatchUp(
+            tasks = tasks,
+            meters = meters,
+            passes = props.catchUp.passes,
+            passInterval = props.catchUp.passInterval,
+            stopTimeout = props.catchUp.stopTimeout,
+        )
     }
 
     private fun requireAccount(props: BatchProperties, flag: String): KisAccount {
