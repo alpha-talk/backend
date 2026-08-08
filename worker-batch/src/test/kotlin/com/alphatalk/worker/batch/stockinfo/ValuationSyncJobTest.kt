@@ -67,24 +67,30 @@ class ValuationSyncJobTest {
     }
 
     @Test
-    fun `실패 종목은 말미에 1회 재시도하고 잔여 실패는 fail_count로 남긴다`() {
+    fun `잔여 실패는 FAILED로 남겨 당일 재실행이 빈 종목을 채울 수 있게 한다`() {
         val attempts = mutableMapOf<String, Int>()
-        val stored = job(
-            fetcher = { code ->
-                attempts.merge(code, 1, Int::plus)
-                when {
-                    code == "005930" && attempts.getValue(code) == 1 -> throw IllegalStateException("transient")
-                    code == "000660" -> throw IllegalStateException("permanent")
-                    else -> snapshot(code)
-                }
-            },
-        ).syncOnce()
+        var brokenCode: String? = "000660"
+        val fetcher = ValuationFetcher { code ->
+            attempts.merge(code, 1, Int::plus)
+            when {
+                code == "005930" && attempts.getValue(code) == 1 -> throw IllegalStateException("transient")
+                code == brokenCode -> throw IllegalStateException("outage")
+                else -> snapshot(code)
+            }
+        }
+
+        val stored = job(fetcher = fetcher).syncOnce()
 
         assertEquals(1, stored)
         assertEquals(2, attempts.getValue("005930"))
         assertEquals(2, attempts.getValue("000660"))
-        assertEquals(1, runs.lastFailCount)
-        assertEquals(listOf("SUCCESS"), runs.finished)
+        assertEquals(listOf("FAILED"), runs.finished)
+
+        brokenCode = null
+        job(fetcher = fetcher).syncOnce()
+
+        assertEquals(listOf("FAILED", "SUCCESS"), runs.finished)
+        assertTrue(store.rows.any { it.code == "000660" })
     }
 
     @Test

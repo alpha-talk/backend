@@ -112,6 +112,25 @@ interface BatchJobRunJpaRepository : JpaRepository<BatchJobRunEntity, Long> {
         @Param("error") error: String,
         @Param("finishedAt") finishedAt: Instant,
     ): Int
+
+    @Transactional
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
+    @Query(
+        """
+        update BatchJobRunEntity r
+        set r.status = :status, r.okCount = :okCount, r.failCount = :failCount,
+            r.error = :error, r.finishedAt = :finishedAt
+        where r.id = :id
+        """,
+    )
+    fun finishWithErrorCounted(
+        @Param("id") id: Long,
+        @Param("status") status: String,
+        @Param("okCount") okCount: Int,
+        @Param("failCount") failCount: Int,
+        @Param("error") error: String,
+        @Param("finishedAt") finishedAt: Instant,
+    ): Int
 }
 
 @Repository
@@ -141,6 +160,10 @@ class JpaBatchJobRunStore(
 
     override fun fail(id: Long, error: String, finishedAt: Instant) {
         repository.finishWithError(id, FAILED, error.take(ERROR_MAX_LENGTH), finishedAt)
+    }
+
+    override fun failCounted(id: Long, okCount: Int, failCount: Int, error: String, finishedAt: Instant) {
+        repository.finishWithErrorCounted(id, FAILED, okCount, failCount, error.take(ERROR_MAX_LENGTH), finishedAt)
     }
 
     private fun insertRunning(job: String, runDate: String, startedAt: Instant): Long? =

@@ -58,7 +58,7 @@ open class FinancialsSyncJob(
             var stored = 0
             val failed = mutableListOf<FinancialTarget>()
             for ((index, target) in targets.withIndex()) {
-                if (clock() >= deadlineAt) return abortOnDeadline(runId, stored, targets.size - index)
+                if (clock() >= deadlineAt) return abortOnDeadline(runId, stored, failed.size + targets.size - index)
                 when (process(target)) {
                     ProcessResult.STORED -> stored += 1
                     ProcessResult.ABSENT -> Unit
@@ -67,7 +67,7 @@ open class FinancialsSyncJob(
             }
             var failCount = 0
             for ((index, target) in failed.withIndex()) {
-                if (clock() >= deadlineAt) return abortOnDeadline(runId, stored, failed.size - index)
+                if (clock() >= deadlineAt) return abortOnDeadline(runId, stored, failCount + failed.size - index)
                 when (process(target)) {
                     ProcessResult.STORED -> stored += 1
                     ProcessResult.ABSENT -> Unit
@@ -163,14 +163,14 @@ open class FinancialsSyncJob(
         return null
     }
 
-    private fun abortOnDeadline(runId: Long, stored: Int, remaining: Int): Int {
+    private fun abortOnDeadline(runId: Long, stored: Int, unresolved: Int): Int {
         meters.counter("batch.financials.deadline").increment()
         log.error(
-            "financials sync deadline reached before lock expiry - marked FAILED for manual rerun. stored={} remaining={}",
+            "financials sync deadline reached before lock expiry - marked FAILED for manual rerun. stored={} unresolved={}",
             stored,
-            remaining,
+            unresolved,
         )
-        runs.fail(runId, "deadline reached: remaining=$remaining", clock())
+        runs.failCounted(runId, stored, unresolved, "deadline reached: unresolved=$unresolved", clock())
         return stored
     }
 
