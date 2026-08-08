@@ -56,6 +56,19 @@ alphatalk:
       calls-per-second: 4.0                     # 잡 자체 상한 4콜/s (명세 §3.1)
       request-interval: 250ms
       scan-limit: 500                           # 회차당 미통보 스캔 상한
+    valuation:                                  # PER·PBR·EPS·BPS + 시총 일일 적재 (명세 §3.1)
+      enabled: false                            # KIS 계정이 있는 환경에서만 켠다 — 켜면 계정 필수(fail-closed)
+      cron: "0 50 16 * * MON-FRI"               # 영업일 16:50 — 종가 확정 후, 휴장일은 잡 내부 캘린더가 스킵
+      calls-per-second: 8.0                     # 전 종목 ~2,600콜 ≈ 5.5분 — 공용 gate가 계정 합산 상한을 지킨다
+      chunk-size: 200                           # 트랜잭션당 upsert 행 수 — 중단 시 부분 진행 보존
+    investor:                                   # 투자자별 순매수 확정치 일일 적재 (명세 §3.1)
+      enabled: false                            # KIS 계정이 있는 환경에서만 켠다 — 켜면 계정 필수(fail-closed)
+      cron: "0 10 17 * * MON-FRI"               # 영업일 17:10 — 장마감 후 확정치
+      calls-per-second: 8.0
+    financials:                                 # OpenDART 정기공시 → 재무 요약 (명세 §3.1)
+      enabled: false                            # DART 키가 있는 환경에서만 켠다 — 켜면 키 필수(fail-closed)
+      cron: "0 0 6 * * *"                       # 매일 06:00 — 공시 시즌 증분
+      lookback-days: 7                          # list.json 감지 창 — 잡이 며칠 실패해도 창 안에서 자가 회복
 
 management:
   endpoints:

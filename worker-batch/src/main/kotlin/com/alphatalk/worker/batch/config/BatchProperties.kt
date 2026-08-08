@@ -12,6 +12,9 @@ data class BatchProperties(
     val dart: Dart = Dart(),
     val kis: Kis = Kis(),
     val opinion: Opinion = Opinion(),
+    val valuation: Valuation = Valuation(),
+    val investor: Investor = Investor(),
+    val financials: Financials = Financials(),
 ) {
     data class StockMaster(
         val enabled: Boolean = true,
@@ -28,6 +31,22 @@ data class BatchProperties(
         val callsPerSecond: Double = 4.0,
         val requestInterval: Duration = Duration.ofMillis(250),
         val scanLimit: Int = 500,
+    )
+
+    data class Valuation(
+        val enabled: Boolean = false,
+        val callsPerSecond: Double = 8.0,
+        val chunkSize: Int = 200,
+    )
+
+    data class Investor(
+        val enabled: Boolean = false,
+        val callsPerSecond: Double = 8.0,
+    )
+
+    data class Financials(
+        val enabled: Boolean = false,
+        val lookbackDays: Long = 7,
     )
 
     data class Dart(
