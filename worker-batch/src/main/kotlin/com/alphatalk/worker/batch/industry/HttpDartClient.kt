@@ -7,6 +7,8 @@ import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import java.time.Duration
+import java.time.LocalDate
+import java.time.format.DateTimeFormatter
 import java.util.zip.ZipInputStream
 import javax.xml.stream.XMLInputFactory
 import javax.xml.stream.XMLStreamConstants
@@ -50,6 +52,61 @@ class HttpDartClient(
             stockName = node.path("stock_name").asText().trim().ifBlank { null },
             homepage = node.path("hm_url").asText().trim().ifBlank { null },
         )
+    }
+
+    override fun periodicDisclosures(begin: LocalDate, end: LocalDate): List<DartDisclosure> {
+        val disclosures = mutableListOf<DartDisclosure>()
+        var page = 1
+        while (true) {
+            val body = get(
+                "$baseUrl/list.json?crtfc_key=$apiKey" +
+                    "&bgn_de=${begin.format(DateTimeFormatter.BASIC_ISO_DATE)}" +
+                    "&end_de=${end.format(DateTimeFormatter.BASIC_ISO_DATE)}" +
+                    "&pblntf_ty=$PERIODIC_DISCLOSURE_TYPE&page_no=$page&page_count=$LIST_PAGE_SIZE",
+                HttpResponse.BodyHandlers.ofString(),
+            )
+            val node = mapper.readTree(body)
+            when (val status = node.path("status").asText()) {
+                OK_STATUS -> Unit
+                NO_DATA_STATUS -> return disclosures
+                else -> throw DartApiException(status, "OpenDART list 조회 실패: status=$status ${node.path("message").asText()}")
+            }
+            node.path("list").forEach { item ->
+                disclosures += DartDisclosure(
+                    corpCode = item.path("corp_code").asText().trim(),
+                    stockCode = item.path("stock_code").asText().trim().ifBlank { null },
+                    reportName = item.path("report_nm").asText().trim(),
+                    receiptDate = item.path("rcept_dt").asText().trim(),
+                )
+            }
+            val totalPage = node.path("total_page").asInt(1)
+            if (page >= totalPage) return disclosures
+            page += 1
+        }
+    }
+
+    override fun financialAccounts(corpCode: String, year: Int, reprtCode: String, fsDiv: String): List<DartFinancialAccount> {
+        val body = get(
+            "$baseUrl/fnlttSinglAcntAll.json?crtfc_key=$apiKey" +
+                "&corp_code=$corpCode&bsns_year=$year&reprt_code=$reprtCode&fs_div=$fsDiv",
+            HttpResponse.BodyHandlers.ofString(),
+        )
+        val node = mapper.readTree(body)
+        when (val status = node.path("status").asText()) {
+            OK_STATUS -> Unit
+            NO_DATA_STATUS -> return emptyList()
+            else -> throw DartApiException(status, "OpenDART 재무제표 조회 실패: status=$status ${node.path("message").asText()}")
+        }
+        return node.path("list").map { item ->
+            DartFinancialAccount(
+                sjDiv = item.path("sj_div").asText().trim(),
+                accountId = item.path("account_id").asText().trim().takeIf { it.isNotEmpty() && it != "-" },
+                accountName = item.path("account_nm").asText().trim(),
+                accountDetail = item.path("account_detail").asText().trim().takeIf { it.isNotEmpty() && it != "-" },
+                amount = item.path("thstrm_amount").asText().trim().replace(",", "").toLongOrNull(),
+                currency = item.path("currency").asText().trim().ifBlank { null },
+            )
+        }
     }
 
     private fun <T> get(url: String, handler: HttpResponse.BodyHandler<T>): T {
@@ -136,5 +193,7 @@ class HttpDartClient(
         const val UNKNOWN_STATUS = "unknown"
         const val LIST_ELEMENT = "list"
         const val USER_AGENT = "alphatalk-worker-batch"
+        const val PERIODIC_DISCLOSURE_TYPE = "A"
+        const val LIST_PAGE_SIZE = 100
     }
 }
