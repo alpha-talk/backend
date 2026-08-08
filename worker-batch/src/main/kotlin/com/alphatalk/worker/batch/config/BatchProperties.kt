@@ -15,10 +15,16 @@ data class BatchProperties(
     val valuation: Valuation = Valuation(),
     val investor: Investor = Investor(),
     val financials: Financials = Financials(),
+    val catchUp: CatchUp = CatchUp(),
 ) {
     data class StockMaster(
         val enabled: Boolean = true,
         val baseUrl: String = KisMasterClient.DEFAULT_BASE_URL,
+        val cron: String = "0 0 8 * * *",
+    )
+
+    data class CatchUp(
+        val enabled: Boolean = true,
     )
 
     data class Kis(
@@ -35,17 +41,20 @@ data class BatchProperties(
 
     data class Valuation(
         val enabled: Boolean = false,
+        val cron: String = "0 50 16 * * MON-FRI",
         val callsPerSecond: Double = 8.0,
         val chunkSize: Int = 200,
     )
 
     data class Investor(
         val enabled: Boolean = false,
+        val cron: String = "0 10 17 * * MON-FRI",
         val callsPerSecond: Double = 8.0,
     )
 
     data class Financials(
         val enabled: Boolean = false,
+        val cron: String = "0 0 6 * * *",
         val lookbackDays: Long = 7,
     )
 

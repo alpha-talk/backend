@@ -65,6 +65,14 @@ class InvestorFlowSyncJobTest {
     }
 
     @Test
+    fun `유니버스가 비면 FAILED다 - 선행 마스터 동기화 부재는 성공이 아니다`() {
+        val stored = job(fetcher = { flows(it) }, stocks = emptyList()).syncOnce()
+
+        assertEquals(0, stored)
+        assertEquals(listOf("FAILED"), runs.finished)
+    }
+
+    @Test
     fun `주말과 휴장일은 실행하지 않는다`() {
         assertEquals(0, job(fetcher = { flows(it) }, date = LocalDate.parse("2026-08-09")).syncOnce())
         assertEquals(0, job(fetcher = { flows(it) }, holidays = setOf(weekday)).syncOnce())

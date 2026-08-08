@@ -85,6 +85,8 @@ class ValuationSyncJobTest {
         assertEquals(2, attempts.getValue("005930"))
         assertEquals(2, attempts.getValue("000660"))
         assertEquals(listOf("FAILED"), runs.finished)
+        assertEquals(1, runs.lastOkCount)
+        assertEquals(1, runs.lastFailCount)
 
         brokenCode = null
         job(fetcher = fetcher).syncOnce()
@@ -164,11 +166,11 @@ class ValuationSyncJobTest {
     }
 
     @Test
-    fun `유니버스가 비면 적재 없이 성공으로 기록한다`() {
+    fun `유니버스가 비면 FAILED다 - 선행 마스터 동기화 부재는 성공이 아니다`() {
         val stored = job(fetcher = { snapshot(it) }, stocks = emptyList()).syncOnce()
 
         assertEquals(0, stored)
-        assertEquals(listOf("SUCCESS"), runs.finished)
+        assertEquals(listOf("FAILED"), runs.finished)
     }
 }
 
@@ -192,6 +194,7 @@ internal class FakeValuationStore : ValuationStore {
 
 internal class FakeRuns : BatchJobRunStore {
     val finished = mutableListOf<String>()
+    var lastOkCount = -1
     var lastFailCount = -1
 
     override fun start(job: String, runDate: String, startedAt: Instant): Long = 1L
@@ -199,10 +202,17 @@ internal class FakeRuns : BatchJobRunStore {
 
     override fun succeed(id: Long, okCount: Int, failCount: Int, finishedAt: Instant) {
         finished += "SUCCESS"
+        lastOkCount = okCount
         lastFailCount = failCount
     }
 
     override fun fail(id: Long, error: String, finishedAt: Instant) {
         finished += "FAILED"
+    }
+
+    override fun failCounted(id: Long, okCount: Int, failCount: Int, error: String, finishedAt: Instant) {
+        finished += "FAILED"
+        lastOkCount = okCount
+        lastFailCount = failCount
     }
 }
