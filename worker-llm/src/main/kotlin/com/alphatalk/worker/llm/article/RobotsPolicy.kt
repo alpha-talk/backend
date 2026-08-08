@@ -91,6 +91,7 @@ class RobotsPolicy(
     }
 
     companion object {
+        val FETCH_BUDGET: java.time.Duration = java.time.Duration.ofMillis(3_000L + 5_000L)
         private const val AGENT_TOKEN = "alphatalkllm"
     }
 }

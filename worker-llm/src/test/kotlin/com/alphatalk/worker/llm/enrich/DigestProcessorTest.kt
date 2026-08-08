@@ -29,10 +29,13 @@ class DigestProcessorTest {
         override fun sectorOf(stockCode: String) = "33"
     }
 
+    private val marketDigests = InMemoryMarketDigestStore()
+
     private val processor = DigestProcessor(
         store = store,
         sectors = directory,
         events = events,
+        marketDigests = marketDigests,
         publisher = publisher,
         eventIds = { "dg-${++ids}".padEnd(26, '0') },
         llm = FakeLlmClient(),
@@ -84,6 +87,29 @@ class DigestProcessorTest {
         assertEquals(listOf("외국인 순매도"), digest.marketIssues.map { it.title })
         assertEquals(1, digest.neutralCount)
         assertEquals(1, publisher.published.size)
+    }
+
+    @Test
+    fun `시장 다이제스트가 있으면 브리핑에 marketAnalysis로 삽입한다`() {
+        seedCluster("c1".padEnd(26, '0'), "3나노 수주", Sentiment.POSITIVE, inWindow)
+        marketDigests.saved["2026-07-16"] = com.alphatalk.contracts.envelope.MarketAnalysis(
+            summary = "시장 종합", asOf = "2026-07-16T17:40:00+09:00", factDate = "2026-07-16",
+        )
+
+        processor.process(digestEntry())
+
+        assertEquals("시장 종합", events.inserted.single().data.digest!!.marketAnalysis!!.summary)
+    }
+
+    @Test
+    fun `시장 다이제스트 조회가 실패해도 브리핑은 marketAnalysis 없이 생성된다`() {
+        seedCluster("c1".padEnd(26, '0'), "3나노 수주", Sentiment.POSITIVE, inWindow)
+        marketDigests.failing = true
+
+        processor.process(digestEntry())
+
+        val digest = events.inserted.single().data.digest!!
+        assertEquals(null, digest.marketAnalysis)
     }
 
     @Test

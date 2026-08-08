@@ -72,4 +72,5 @@ interface ClusterStore {
     fun stockClustersInWindow(code: String, from: Instant, to: Instant): List<DigestClusterRow>
     fun sectorClustersInWindow(sectorCode: String, stockCode: String, from: Instant, to: Instant): List<DigestClusterRow>
     fun marketClustersInWindow(from: Instant, to: Instant): List<DigestClusterRow>
+    fun highImpactSectorClustersInWindow(from: Instant, to: Instant): List<DigestClusterRow>
 }

@@ -13,15 +13,10 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
 import org.springframework.boot.context.event.ApplicationReadyEvent
 import org.springframework.context.event.EventListener
 import org.springframework.scheduling.annotation.Scheduled
-import org.springframework.scheduling.support.CronExpression
 import org.springframework.stereotype.Component
 import java.time.Clock
 import java.time.LocalDate
-import java.time.ZoneId
-import java.time.ZonedDateTime
 import java.util.concurrent.Executor
-import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicReference
 
 @Component
 @ConditionalOnProperty("alphatalk.ingest.digest.enabled", havingValue = "true", matchIfMissing = true)
@@ -30,30 +25,35 @@ class DigestTrigger(
     private val props: IngestProperties,
     private val meters: MeterRegistry,
     @param:Qualifier(IngestConfig.CATCH_UP_EXECUTOR_BEAN)
-    private val catchUpExecutor: Executor,
+    catchUpExecutor: Executor,
     private val clock: Clock = Clock.systemUTC(),
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
-    private val zone = ZoneId.of(props.digest.zone)
-    private val cron = props.digest.cron
-        .takeIf { it != Scheduled.CRON_DISABLED }
-        ?.let(CronExpression::parse)
-    private val catchUpRunning = AtomicBoolean()
-    private val reconciledThrough = AtomicReference<LocalDate?>()
+    private val catchUp = DigestCatchUp(
+        cronExpression = props.digest.cron,
+        zoneId = props.digest.zone,
+        clock = clock,
+        executor = catchUpExecutor,
+        meters = meters,
+        metricPrefix = "ingest.digest.catchup",
+    ) { date ->
+        val result = triggerForResult(date)
+        record(result)
+        result.complete
+    }
 
     @Scheduled(cron = "\${alphatalk.ingest.digest.cron:0 0 18 * * *}", zone = "\${alphatalk.ingest.digest.zone:Asia/Seoul}")
     fun trigger() {
-        val now = ZonedDateTime.now(clock.withZone(zone))
-        val date = lastFireAtOrBefore(now)?.toLocalDate() ?: now.toLocalDate()
+        val date = catchUp.fireDate()
         val result = triggerForResult(date)
         record(result)
-        if (result.complete) markReconciled(date)
+        if (result.complete) catchUp.markReconciled(date)
     }
 
     @EventListener(ApplicationReadyEvent::class)
     fun catchUpOnStartup() {
         if (!props.digest.catchUpOnStartup) return
-        submitCatchUp()
+        catchUp.submit()
     }
 
     @Scheduled(
@@ -61,49 +61,8 @@ class DigestTrigger(
         initialDelayString = "\${alphatalk.ingest.digest.catch-up-reconcile-delay:1m}",
     )
     fun reconcileCatchUp() {
-        if (!props.digest.catchUpOnStartup || cron == null) return
-        submitCatchUp()
-    }
-
-    private fun submitCatchUp() {
-        if (!catchUpRunning.compareAndSet(false, true)) return
-        runCatching {
-            catchUpExecutor.execute {
-                try {
-                    catchUp()
-                } catch (failure: Exception) {
-                    meters.counter("ingest.digest.catchup.errors").increment()
-                    log.warn("digest catch-up failed", failure)
-                } finally {
-                    catchUpRunning.set(false)
-                }
-            }
-        }.onFailure {
-            catchUpRunning.set(false)
-            meters.counter("ingest.digest.catchup.errors").increment()
-            log.warn("digest catch-up submission failed", it)
-        }
-    }
-
-    private fun catchUp() {
-        val now = ZonedDateTime.now(clock.withZone(zone))
-        val missed = lastFireAtOrBefore(now)
-        if (missed == null) {
-            log.info("digest catch-up skipped: no elapsed schedule now={}", now)
-            return
-        }
-        val date = missed.toLocalDate()
-        if (reconciledThrough.get()?.let { !it.isBefore(date) } == true) return
-        meters.counter("ingest.digest.catchup.attempts").increment()
-        log.info("digest catch-up start: firedAt={} now={}", missed, now)
-        val result = triggerForResult(date)
-        record(result)
-        if (result.complete) {
-            markReconciled(date)
-            meters.counter("ingest.digest.catchup.completed").increment()
-        } else {
-            meters.counter("ingest.digest.catchup.incomplete").increment()
-        }
+        if (!props.digest.catchUpOnStartup) return
+        catchUp.submit()
     }
 
     fun triggerFor(date: LocalDate): Int = triggerForResult(date).enqueued
@@ -139,12 +98,6 @@ class DigestTrigger(
         meters.counter("ingest.digest.enqueue.errors").increment(result.errors.toDouble())
     }
 
-    private fun markReconciled(date: LocalDate) {
-        reconciledThrough.updateAndGet { current ->
-            if (current == null || date.isAfter(current)) date else current
-        }
-    }
-
     private fun entryOf(code: String, sourceId: String) =
         IngestQueueEntry(
             source = IngestQueueEntry.DIGEST_SOURCE,
@@ -155,25 +108,6 @@ class DigestTrigger(
             url = "",
             fetchedAt = clock.millis(),
         )
-
-    private fun lastFireAtOrBefore(now: ZonedDateTime): ZonedDateTime? {
-        val expression = cron ?: return null
-        for (daysBack in 0..CATCH_UP_LOOKBACK_DAYS) {
-            val date = now.toLocalDate().minusDays(daysBack.toLong())
-            var fire = expression.next(date.atStartOfDay(zone).minusNanos(1))
-            var last: ZonedDateTime? = null
-            while (fire != null && fire.toLocalDate() == date && !fire.isAfter(now)) {
-                last = fire
-                fire = expression.next(fire)
-            }
-            if (last != null) return last
-        }
-        return null
-    }
-
-    private companion object {
-        const val CATCH_UP_LOOKBACK_DAYS = 7
-    }
 
     private data class DigestTriggerResult(
         val enqueued: Int,

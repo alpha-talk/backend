@@ -20,29 +20,39 @@ internal class CodexCliLlmClient(
         return StructuredLlmCodec.parseDigest(output)
     }
 
+    override fun marketDigest(input: MarketDigestInput): MarketDigestOutput {
+        val output = call(
+            StructuredLlmCodec.marketDigestPrompt(input.copy(research = false)),
+            StructuredLlmCodec.marketDigestSchema,
+        )
+        return StructuredLlmCodec.parseMarketDigest(output, research = false)
+    }
+
     private fun call(prompt: String, schema: Map<String, Any>): JsonNode {
         val directory = Files.createTempDirectory("alphatalk-codex-")
         val schemaFile = directory.resolve("output-schema.json")
         val outputFile = directory.resolve("last-message.json")
         try {
             Files.writeString(schemaFile, StructuredLlmCodec.mapper.writeValueAsString(schema))
-            val command = mutableListOf(
-                props.codexCli.executable,
-                "exec",
-                "--sandbox",
-                "read-only",
-                "--ephemeral",
-                "--ignore-user-config",
-                "--ignore-rules",
-                "--skip-git-repo-check",
-                "--color",
-                "never",
-                "--cd",
-                directory.toString(),
-                "--output-schema",
-                schemaFile.toString(),
-                "--output-last-message",
-                outputFile.toString(),
+            val command = mutableListOf(props.codexCli.executable)
+            command.addAll(
+                listOf(
+                    "exec",
+                    "--sandbox",
+                    "read-only",
+                    "--ephemeral",
+                    "--ignore-user-config",
+                    "--ignore-rules",
+                    "--skip-git-repo-check",
+                    "--color",
+                    "never",
+                    "--cd",
+                    directory.toString(),
+                    "--output-schema",
+                    schemaFile.toString(),
+                    "--output-last-message",
+                    outputFile.toString(),
+                ),
             )
             props.codexCli.model.takeIf(String::isNotBlank)?.let {
                 command.addAll(listOf("--model", it))

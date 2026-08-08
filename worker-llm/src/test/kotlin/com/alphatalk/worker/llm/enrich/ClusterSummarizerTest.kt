@@ -9,6 +9,8 @@ class ClusterSummarizerTest {
     private fun fixedLlm(output: ClusterSummaryOutput) = object : LlmClient {
         override fun summarize(input: ClusterSummaryInput) = output
         override fun digest(input: DigestInput) = DigestOutput("t", "s")
+        override fun marketDigest(input: MarketDigestInput) =
+            MarketDigestOutput("m", emptyList(), emptyList(), emptyList())
     }
 
     private val input = ClusterSummaryInput("제목", listOf("제목"), null, emptyList(), emptyList())

@@ -64,6 +64,7 @@ data class IngestQueueEntry(
         const val FIELD_MACRO_HINT = "macroHint"
 
         const val DIGEST_SOURCE = "scheduler"
+        const val MARKET_CODE = "MARKET"
 
         fun digestSourceId(code: String, date: String) = "digest:$code:$date"
 
