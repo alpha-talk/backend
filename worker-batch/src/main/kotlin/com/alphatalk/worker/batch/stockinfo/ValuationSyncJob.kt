@@ -55,8 +55,8 @@ open class ValuationSyncJob(
         try {
             val stocks = universe.activeStocks()
             if (stocks.isEmpty()) {
-                log.warn("valuation sync skipped: stock_master is empty (초기 구축 전)")
-                runs.succeed(runId, 0, 0, clock())
+                log.error("valuation sync has no universe: stock_master is empty - stock_master_sync must land first")
+                runs.failCounted(runId, 0, 0, "stock_master is empty", clock())
                 return 0
             }
             val deadlineAt = clock().plus(deadline)

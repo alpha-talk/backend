@@ -94,10 +94,11 @@ open class FinancialsSyncJob(
     }
 
     private fun detectTargets(date: LocalDate): List<FinancialTarget> {
+        val active = universe.activeCodes()
+        check(active.isNotEmpty()) { "stock_master is empty - stock_master_sync must land first" }
         pause(requestInterval)
         val disclosures = dart.periodicDisclosures(date.minusDays(lookbackDays), date)
         if (disclosures.isEmpty()) return emptyList()
-        val active = universe.activeCodes()
         return disclosures.mapNotNull { disclosure ->
             val code = disclosure.stockCode ?: return@mapNotNull null
             if (code !in active) return@mapNotNull null

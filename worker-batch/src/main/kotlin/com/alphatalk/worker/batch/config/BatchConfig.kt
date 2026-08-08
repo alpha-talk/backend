@@ -14,6 +14,8 @@ import com.alphatalk.worker.batch.industry.IndustryStore
 import com.alphatalk.worker.batch.industry.IndustrySyncJob
 import com.alphatalk.worker.batch.industry.KsicCatalog
 import com.alphatalk.worker.batch.job.BatchJobRunStore
+import com.alphatalk.worker.batch.job.CatchUpTask
+import com.alphatalk.worker.batch.job.StartupCatchUp
 import com.alphatalk.worker.batch.kis.RedisKisRateGate
 import com.alphatalk.worker.batch.kis.RedisKisTokenStore
 import com.alphatalk.worker.batch.master.MasterFileFetcher
@@ -39,6 +41,7 @@ import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.fasterxml.jackson.module.kotlin.readValue
 import io.micrometer.core.instrument.MeterRegistry
 import net.javacrumbs.shedlock.core.LockProvider
+import org.springframework.beans.factory.ObjectProvider
 import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
 import org.springframework.context.annotation.Bean
@@ -230,6 +233,35 @@ class BatchConfig {
             lookbackDays = props.financials.lookbackDays,
             requestInterval = props.dart.requestInterval,
         )
+    }
+
+    @Bean
+    @ConditionalOnExpression(
+        "\${alphatalk.batch.enabled:true} and \${alphatalk.batch.catch-up.enabled:true}",
+    )
+    fun startupCatchUp(
+        master: ObjectProvider<StockMasterSyncJob>,
+        valuation: ObjectProvider<ValuationSyncJob>,
+        investor: ObjectProvider<InvestorFlowSyncJob>,
+        financials: ObjectProvider<FinancialsSyncJob>,
+        props: BatchProperties,
+        meters: MeterRegistry,
+    ): StartupCatchUp {
+        val tasks = buildList {
+            master.ifAvailable?.let { job ->
+                add(CatchUpTask(StockMasterSyncJob.JOB_NAME, props.stockMaster.cron) { job.scheduled() })
+            }
+            valuation.ifAvailable?.let { job ->
+                add(CatchUpTask(ValuationSyncJob.JOB_NAME, props.valuation.cron) { job.scheduled() })
+            }
+            investor.ifAvailable?.let { job ->
+                add(CatchUpTask(InvestorFlowSyncJob.JOB_NAME, props.investor.cron) { job.scheduled() })
+            }
+            financials.ifAvailable?.let { job ->
+                add(CatchUpTask(FinancialsSyncJob.JOB_NAME, props.financials.cron) { job.scheduled() })
+            }
+        }
+        return StartupCatchUp(tasks, meters)
     }
 
     private fun requireAccount(props: BatchProperties, flag: String): KisAccount {

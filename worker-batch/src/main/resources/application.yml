@@ -32,6 +32,8 @@ server:
 alphatalk:
   batch:
     enabled: true
+    catch-up:
+      enabled: true                           # 기동 시 오늘 크론 시각이 이미 지난 일 1회 잡을 순차 실행 (명세 §3.2) — 이미 성공했으면 잡이 스스로 스킵
     stock-master:
       enabled: true
       cron: "0 0 8 * * *"                       # 매일 08:00 KST — 원본이 07:40경 갱신된다 (명세 §3.1)

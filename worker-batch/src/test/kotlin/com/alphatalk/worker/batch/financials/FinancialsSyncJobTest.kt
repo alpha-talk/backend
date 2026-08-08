@@ -230,6 +230,16 @@ class FinancialsSyncJobTest {
     }
 
     @Test
+    fun `유니버스가 비면 FAILED다 - 선행 마스터 동기화 부재는 성공이 아니다`() {
+        val dart = StubDart(listOf(disclosure()), mapOf("00126380:CFS" to cfsAccounts))
+
+        assertFailsWith<IllegalStateException> { job(dart, active = emptySet()).syncOnce() }
+
+        assertEquals(listOf("FAILED"), runs.finished)
+        assertTrue(dart.requested.isEmpty())
+    }
+
+    @Test
     fun `저장 실패는 재시도 대상이 아니라 잡 실패다`() {
         val dart = StubDart(listOf(disclosure()), mapOf("00126380:CFS" to cfsAccounts))
         val brokenStore = object : FinancialSummaryStore {
