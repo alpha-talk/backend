@@ -118,6 +118,90 @@ class KisRestClientTest {
     }
 
     @Test
+    fun `밸류에이션 스냅샷을 파싱한다 - 0은 지표 없음이라 null`() {
+        server.enqueue("/oauth2/tokenP", 200, tokenBody("T1"))
+        server.enqueue(
+            "/uapi/domestic-stock/v1/quotations/inquire-price",
+            200,
+            """
+            {"rt_cd":"0","msg_cd":"MCA00000","output":{
+              "stck_prpr":"71200","per":"12.10","pbr":"0.00","eps":"5771.00","bps":"0"}}
+            """.trimIndent(),
+        )
+
+        val snapshot = client.valuationSnapshot(account, "005930")
+
+        assertEquals(71200, snapshot.price)
+        assertEquals("12.10", snapshot.per?.toPlainString())
+        assertEquals(null, snapshot.pbr)
+        assertEquals(5771, snapshot.eps)
+        assertEquals(null, snapshot.bps)
+        val call = server.received.single { it.path.endsWith("inquire-price") }
+        assertEquals("FHKST01010100", call.headers["tr_id"])
+        assertTrue("FID_INPUT_ISCD=005930" in call.query)
+    }
+
+    @Test
+    fun `밸류에이션 스냅샷은 적자 음수 EPS를 보존한다`() {
+        server.enqueue("/oauth2/tokenP", 200, tokenBody("T1"))
+        server.enqueue(
+            "/uapi/domestic-stock/v1/quotations/inquire-price",
+            200,
+            """
+            {"rt_cd":"0","msg_cd":"MCA00000","output":{
+              "stck_prpr":"3000","per":"0.00","pbr":"0.45","eps":"-1520.00","bps":"6600.00"}}
+            """.trimIndent(),
+        )
+
+        val snapshot = client.valuationSnapshot(account, "123456")
+
+        assertEquals(null, snapshot.per)
+        assertEquals("0.45", snapshot.pbr?.toPlainString())
+        assertEquals(-1520, snapshot.eps)
+        assertEquals(6600, snapshot.bps)
+    }
+
+    @Test
+    fun `투자자별 순매수를 파싱하고 결측 행은 건너뛴다`() {
+        server.enqueue("/oauth2/tokenP", 200, tokenBody("T1"))
+        server.enqueue(
+            "/uapi/domestic-stock/v1/quotations/inquire-investor",
+            200,
+            """
+            {"rt_cd":"0","msg_cd":"MCA00000","output":[
+              {"stck_bsop_date":"20260807","prsn_ntby_tr_pbmn":"-12000","frgn_ntby_tr_pbmn":"8000","orgn_ntby_tr_pbmn":"4000"},
+              {"stck_bsop_date":"20260806","prsn_ntby_tr_pbmn":"1500","frgn_ntby_tr_pbmn":"-900","orgn_ntby_tr_pbmn":"-600"},
+              {"stck_bsop_date":"","prsn_ntby_tr_pbmn":"1","frgn_ntby_tr_pbmn":"1","orgn_ntby_tr_pbmn":"1"},
+              {"stck_bsop_date":"20260805","prsn_ntby_tr_pbmn":"","frgn_ntby_tr_pbmn":"1","orgn_ntby_tr_pbmn":"1"}]}
+            """.trimIndent(),
+        )
+
+        val flows = client.investorFlows(account, "005930")
+
+        assertEquals(2, flows.size)
+        assertEquals("20260807", flows[0].date)
+        assertEquals(-12000, flows[0].individual)
+        assertEquals(8000, flows[0].foreign)
+        assertEquals(4000, flows[0].institution)
+        val call = server.received.single { it.path.endsWith("inquire-investor") }
+        assertEquals("FHKST01010900", call.headers["tr_id"])
+        assertTrue("FID_COND_MRKT_DIV_CODE=J" in call.query)
+        assertTrue("FID_INPUT_ISCD=005930" in call.query)
+    }
+
+    @Test
+    fun `투자자별 순매수 rt_cd가 0이 아니면 예외를 던진다`() {
+        server.enqueue("/oauth2/tokenP", 200, tokenBody("T1"))
+        server.enqueue(
+            "/uapi/domestic-stock/v1/quotations/inquire-investor",
+            200,
+            """{"rt_cd":"1","msg_cd":"EGW00121","msg1":"invalid"}""",
+        )
+
+        assertFailsWith<KisClientException> { client.investorFlows(account, "005930") }
+    }
+
+    @Test
     fun `기간별 일봉을 파싱하고 빈 행은 건너뛴다`() {
         server.enqueue("/oauth2/tokenP", 200, tokenBody("T1"))
         server.enqueue(

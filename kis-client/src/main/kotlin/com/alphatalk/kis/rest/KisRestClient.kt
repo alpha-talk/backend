@@ -9,6 +9,8 @@ import com.alphatalk.kis.rate.KisRateLimiters
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
+import java.math.BigDecimal
+import java.math.RoundingMode
 import java.net.URI
 import java.net.URLEncoder
 import java.net.http.HttpClient
@@ -59,6 +61,77 @@ class KisRestClient(
             volume = output.path("acml_vol").asText().trim().toLong(),
         )
     }
+
+    fun valuationSnapshot(account: KisAccount, code: String): KisValuationSnapshot {
+        val json = getJson(
+            account,
+            INQUIRE_PRICE_PATH,
+            TR_INQUIRE_PRICE,
+            mapOf(
+                "FID_COND_MRKT_DIV_CODE" to MARKET_DIV_KRX,
+                "FID_INPUT_ISCD" to code,
+            ),
+        )
+        val rtCd = json.path("rt_cd").asText("")
+        if (rtCd != "0") {
+            throw KisClientException(
+                "inquire-price failed: keyId=${account.keyId} code=$code rt_cd=$rtCd msg_cd=${json.path("msg_cd").asText("")}",
+            )
+        }
+        val output = json.path("output")
+        return KisValuationSnapshot(
+            code = code,
+            price = output.path("stck_prpr").asText().trim().toLong(),
+            per = ratioOrNull(output.path("per").asText("")),
+            pbr = ratioOrNull(output.path("pbr").asText("")),
+            eps = amountOrNull(output.path("eps").asText("")),
+            bps = amountOrNull(output.path("bps").asText("")),
+        )
+    }
+
+    fun investorFlows(account: KisAccount, code: String): List<KisInvestorFlow> {
+        val json = getJson(
+            account,
+            INQUIRE_INVESTOR_PATH,
+            TR_INQUIRE_INVESTOR,
+            mapOf(
+                "FID_COND_MRKT_DIV_CODE" to MARKET_DIV_KRX,
+                "FID_INPUT_ISCD" to code,
+            ),
+        )
+        val rtCd = json.path("rt_cd").asText("")
+        if (rtCd != "0") {
+            throw KisClientException(
+                "inquire-investor failed: keyId=${account.keyId} code=$code rt_cd=$rtCd msg_cd=${json.path("msg_cd").asText("")}",
+            )
+        }
+        return json.path("output").mapNotNull { row ->
+            val date = row.path("stck_bsop_date").asText("").trim()
+            val individual = row.path("prsn_ntby_tr_pbmn").asText("").trim().toLongOrNull()
+            val foreign = row.path("frgn_ntby_tr_pbmn").asText("").trim().toLongOrNull()
+            val institution = row.path("orgn_ntby_tr_pbmn").asText("").trim().toLongOrNull()
+            if (date.isEmpty() || individual == null || foreign == null || institution == null) {
+                null
+            } else {
+                KisInvestorFlow(
+                    code = code,
+                    date = date,
+                    individual = individual,
+                    foreign = foreign,
+                    institution = institution,
+                )
+            }
+        }
+    }
+
+    private fun ratioOrNull(raw: String): BigDecimal? =
+        raw.trim().toBigDecimalOrNull()?.takeIf { it.signum() != 0 }
+
+    private fun amountOrNull(raw: String): Int? =
+        raw.trim().toBigDecimalOrNull()
+            ?.takeIf { it.signum() != 0 }
+            ?.setScale(0, RoundingMode.DOWN)
+            ?.intValueExact()
 
     fun dailyCandles(account: KisAccount, code: String, from: LocalDate, to: LocalDate): List<KisDailyCandle> {
         val json = getJson(
@@ -240,12 +313,14 @@ class KisRestClient(
         const val TR_INQUIRE_PRICE = "FHKST01010100"
         const val TR_DAILY_CHART = "FHKST03010100"
         const val TR_MINUTE_CHART = "FHKST03010200"
+        const val TR_INQUIRE_INVESTOR = "FHKST01010900"
         const val TR_INVEST_OPINION = "FHKST663400C0"
         const val INVEST_OPINION_QUERY_CODE_LENGTH = 3
         const val INVEST_OPINION_PAGE_CAP = 100
         private const val INQUIRE_PRICE_PATH = "/uapi/domestic-stock/v1/quotations/inquire-price"
         private const val DAILY_CHART_PATH = "/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice"
         private const val MINUTE_CHART_PATH = "/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice"
+        private const val INQUIRE_INVESTOR_PATH = "/uapi/domestic-stock/v1/quotations/inquire-investor"
         private const val INVEST_OPINION_PATH = "/uapi/domestic-stock/v1/quotations/invest-opbysec"
     }
 }
