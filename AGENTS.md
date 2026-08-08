@@ -16,8 +16,8 @@
 |---|---|
 | [md/ws_architecture.md](md/ws_architecture.md) | **코드 레벨 설계 기준** — 컴포넌트 책임, 인덱스/동시성, 시퀀스, 에러 정책 |
 | [md/ws_module_plan.md](md/ws_module_plan.md) | 구현 계획 — 단계(S0~S7)별 범위·DoD, 열린 합의 안건 |
-| [md/ws_api_spec.md](md/ws_api_spec.md) | 클라 ↔ 게이트웨이 STOMP 프로토콜 계약 (v0.7) |
-| [md/redis_contract.md](md/redis_contract.md) | 게이트웨이 ↔ 워커 ↔ 메인서버 Redis 계약 — **서비스 간 단일 진실** (v0.17) |
+| [md/ws_api_spec.md](md/ws_api_spec.md) | 클라 ↔ 게이트웨이 STOMP 프로토콜 계약 (v0.8) |
+| [md/redis_contract.md](md/redis_contract.md) | 게이트웨이 ↔ 워커 ↔ 메인서버 Redis 계약 — **서비스 간 단일 진실** (v0.18) |
 | [md/alphatalk_core_api_spec.md](md/alphatalk_core_api_spec.md) | 클라 ↔ 메인서버 REST 계약 (v0.3) — core-api 구현 기준 |
 | [md/alphatalk_kis_worker_spec.md](md/alphatalk_kis_worker_spec.md) | KIS/OpenDART 수집 워커 명세 — 워커 적재 테이블 스키마(§4)의 원천 |
 | [md/alphatalk_news_worker_spec.md](md/alphatalk_news_worker_spec.md) | 뉴스 파이프라인 명세 — worker-ingest·worker-llm (수집·클러스터링·일일 호재/악재 브리핑) |
@@ -107,4 +107,4 @@ backend/
 - 남은 단계: **S6**(graceful shutdown 시나리오 검증, quote 샘플러 여부 판단) · **S7**(41종목×500세션 부하 스모크). 계획서 §5 참조.
 - 미해결 합의 안건은 [md/ws_module_plan.md](md/ws_module_plan.md) §7 (RS256 전환 여부, 관심목록 조회 경로 등). 해당 코드는 포트로 격리된 구현(`:auth-jwt`의 `JwtTokenProvider` HS256, `RedisWatchlistResolver`)을 쓴다.
 - **core-api 7모듈 구현 완료 (M1~M5)**: auth·search·subscription·stream·notification·community·stockinfo — REST 30개 엔드포인트 + 쓰기 레이트리밋·멱등키(명세 §1.5·§1.6). 알림은 fan-out-on-read(ADR A4), 글은 더블라이트(ADR A6), 주/월봉은 일봉 파생(ADR A8). 테스트 234개(동시성·E2E 포함) 통과. 남은 것: M6 경화(CORS 화이트리스트·메트릭·배포)와 springdoc OpenAPI 상호 검증(§0).
-- **뉴스 파이프라인 N0~N6 구현 완료**: `:worker-ingest`(RSS·네이버 검색 수집→정규화→XADD + 다이제스트 트리거 — 텍스트 사전 매핑은 v0.6에서 제거, 종목 후보는 소스 부여만. 테스트 42개) + `:worker-llm`(소비→클러스터링(pgvector)→LLM 요약·감성→scope 사다리 fan-out→persist·publish·ack + 일일 브리핑·DLQ, 테스트 91개). 운영 LLM·임베딩은 미구성 시 fail-closed한다. 로컬 LLM은 Claude CLI 구독이 기본이고 Codex CLI 구독을 선택할 수 있으며, fake LLM은 `provider=fake` 명시 opt-in이다(테스트는 fake 사용). 상세·잔여 설정은 [md/alphatalk_news_worker_spec.md](md/alphatalk_news_worker_spec.md) §9.
+- **뉴스 파이프라인 N0~N7 구현 완료**: `:worker-ingest`(RSS·네이버 검색 수집→정규화→XADD + 다이제스트 트리거(종목 18:00·시장 17:40) — 텍스트 사전 매핑은 v0.6에서 제거, 종목 후보는 소스 부여만. 테스트 51개) + `:worker-llm`(소비→클러스터링(pgvector)→LLM 요약·감성→scope 사다리 fan-out→persist·publish·ack + 일일 브리핑·시장 다이제스트(3층 입력·웹 리서치)·DLQ, 테스트 115개). 운영 LLM·임베딩은 미구성 시 fail-closed한다. 로컬 LLM은 Claude CLI 구독이 기본이고 Codex CLI 구독을 선택할 수 있으며, fake LLM은 `provider=fake` 명시 opt-in이다(테스트는 fake 사용). 상세·잔여 설정은 [md/alphatalk_news_worker_spec.md](md/alphatalk_news_worker_spec.md) §9.

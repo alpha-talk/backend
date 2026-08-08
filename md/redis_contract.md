@@ -1,4 +1,6 @@
-# Alpha Talk — Redis 계약 (`:contracts`) v0.17
+# Alpha Talk — Redis 계약 (`:contracts`) v0.18
+
+> v0.18 (2026-08-07): digest 엔트리(§2.3)의 `codes`에 의사코드 `MARKET` 허용 — 시장 다이제스트 잡. ingest 스케줄러가 매일 17:40 KST에 `sourceId=digest:MARKET:{yyyy-MM-dd}` 1건을 적재하고 llm-worker가 시장 매크로 브리핑을 생성해 `market_digest` 테이블에 기록한다(발행 없음 — 방이 없다. 재실행 교체 규칙·휴장일 무브리핑 ACK 포함 상세는 [뉴스 워커 명세](alphatalk_news_worker_spec.md) §4.3). 적재 원자성·멱등·보충은 종목 digest와 동일 규약이며, 트리거는 소비자(N7 분기) 전체 배포 후 켠다.
 
 > v0.17 (2026-08-07): **NXT 상장 여부를 `market-div:{code}`(값 `UN`|`J`, TTL 7일) 한 곳이 소유한다.** 같은 사실을 분봉·실시간·현재가 폴백이 각자 배우던 것을 하나로 합쳤다. 실계정 계측 결과 KIS의 **시계열 API가 NXT 미상장 종목에서만 깨진다** — 분봉 `FHKST03010200`은 0봉, 실시간 `H0UNCNT0`은 등록 SUCCESS인데 틱 0건(대우건설 047040 45초 관찰 0건 vs `H0STCNT0` 48건). 반면 현재가 `FHKST01010100`은 `UN`으로도 정상이다. 쓰기는 **확정 판정만** 한다(분봉: 거래량>0인데 봉 전부 0 / 실시간: 통합 틱 수신). 통합 채널이 NXT 체결분을 실제로 더 주므로(005930 누적거래량 통합 23,968,985 vs KRX 15,036,769) KRX 전용으로 통일하지 않는다. `minute:market-div:{code}:{date}`(v0.15)는 **그날 적재에 실제로 쓴 구분**을 남기는 출처 기록으로 역할이 좁아진다([KIS 워커 명세](alphatalk_kis_worker_spec.md) §2.3·§2.6).
 
@@ -143,18 +145,18 @@ Streams 필드는 문자열이다. 한 엔트리 = "가공해야 할 원본 소�
 
 ### 2.3 `type="digest"` 엔트리 — 일일 브리핑 잡
 
-ingest-worker 스케줄러(싱글턴)가 매일 18:00 KST에 적재하고 같은 그룹 `g:llm`이 경쟁 소비한다 — 스케줄은 싱글턴, 실행은 ×N(리더 선출 불요).
+ingest-worker 스케줄러(싱글턴)가 매일 적재하고 — 종목 잡은 18:00 KST 시드 전 종목, 시장 잡(`MARKET`)은 17:40 KST 1건 — 같은 그룹 `g:llm`이 경쟁 소비한다. 스케줄은 싱글턴, 실행은 ×N(리더 선출 불요).
 
 적재는 `seen:ingest:{sourceId}` 확인 → `XADD queue:ingest` → 마커 기록을 Redis 단일 실행으로 직렬화한다. XADD보다 마커를 먼저 기록하지 않는다. XADD 실패에는 마커가 남지 않아 재조정할 수 있고, 마커 기록 실패 뒤 중복 XADD는 소비 측 멱등으로 흡수한다. 이 단일 실행은 `seen:ingest:*`와 `queue:ingest` 두 키를 한 스크립트에서 만지므로 **단일 Redis(비클러스터) 전제**다 — 클러스터 전환 시 CROSSSLOT으로 깨지며, 해시 태그로 같은 슬롯을 보장하거나 2단계 적재로 되돌리고 유실 창을 다시 검토해야 한다.
 
 | 필드 | 값 |
 |---|---|
 | `type` | `"digest"` |
-| `sourceId` | `digest:{code}:{yyyy-MM-dd}` — 멱등 키(종목·일자당 브리핑 1건) |
-| `codes` | 대상 종목 1개 |
+| `sourceId` | `digest:{code}:{yyyy-MM-dd}` — 멱등 키(종목·일자당 브리핑 1건). 시장 다이제스트는 `digest:MARKET:{yyyy-MM-dd}`(일자당 1건) |
+| `codes` | 대상 종목 1개, 또는 의사코드 `MARKET`(시장 다이제스트, v0.18 — 실종목 코드와 형식이 달라 충돌하지 않는다) |
 | `source` | `"scheduler"` — `title`/`url`/`body` 공란 |
 
-처리 순서·불변식은 §2.2와 동일(persist → publish → ack). 생성물은 `type=AI` StreamEvent(뉴스 워커 명세 §4).
+처리 순서·불변식은 §2.2와 동일(persist → publish → ack). 생성물은 `type=AI` StreamEvent(뉴스 워커 명세 §4). 단 `codes=MARKET` 잡의 생성물은 `stream_event`가 아니라 `market_digest` 테이블이고 **발행이 없다**(persist → ack) — 방이 없어 배달할 채널이 없고, 종목 브리핑 생성 시 삽입되어 노출된다(뉴스 워커 명세 §4.2·§4.3).
 
 > 증권사 **투자의견**은 이 큐를 타지 않는다 — batch-worker가 `stream_event` 저장 후 `stream:{code}`를 직접 발행한다(§1.1 공동 발행자, v0.7). DB 멱등 저장·같은 `eventId` 재시도·REST 복구 상세는 [KIS 워커 명세](alphatalk_kis_worker_spec.md) §3.3이 소유.
  

@@ -3,11 +3,20 @@ package com.alphatalk.worker.llm.cluster
 import com.alphatalk.worker.llm.config.LlmProperties
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import org.springframework.http.MediaType
+import org.springframework.http.client.SimpleClientHttpRequestFactory
 import org.springframework.web.client.RestClient
 
 class RestEmbeddingClient(
     private val props: LlmProperties.Embedding,
-    private val rest: RestClient = RestClient.builder().baseUrl(props.baseUrl).build(),
+    private val rest: RestClient = RestClient.builder()
+        .baseUrl(props.baseUrl)
+        .requestFactory(
+            SimpleClientHttpRequestFactory().apply {
+                setConnectTimeout(props.connectTimeout)
+                setReadTimeout(props.readTimeout)
+            },
+        )
+        .build(),
 ) : EmbeddingClient {
 
     private val mapper = jacksonObjectMapper()

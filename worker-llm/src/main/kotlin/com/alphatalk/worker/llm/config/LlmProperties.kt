@@ -9,7 +9,7 @@ data class LlmProperties(
     val consumeEnabled: Boolean = true,
     val allowFake: Boolean = false,
     val consumerBlock: Duration = Duration.ofSeconds(5),
-    val consumerBatch: Int = 8,
+    val consumerBatch: Int = 2,
     val poisonMaxDeliveries: Long = 5,
     val claimIdle: Duration = Duration.ofMinutes(5),
     val claimInterval: Duration = Duration.ofMinutes(1),
@@ -21,7 +21,15 @@ data class LlmProperties(
     val codexCli: CodexCli = CodexCli(),
     val embedding: Embedding = Embedding(),
     val article: Article = Article(),
+    val market: Market = Market(),
 ) {
+    data class Market(
+        val researchEnabled: Boolean = true,
+        val researchMaxTurns: Int = 10,
+        val researchTimeout: Duration = Duration.ofMinutes(2),
+        val factCoverageThreshold: Double = 0.9,
+    )
+
     data class Article(
         val allowedHostSuffixes: List<String> = emptyList(),
         val minHostInterval: Duration = Duration.ofSeconds(1),
@@ -48,6 +56,8 @@ data class LlmProperties(
         val apiKey: String = "",
         val version: String = "2023-06-01",
         val maxTokens: Int = 1024,
+        val connectTimeout: Duration = Duration.ofSeconds(5),
+        val readTimeout: Duration = Duration.ofSeconds(25),
     )
 
     data class ClaudeCli(
@@ -68,5 +78,7 @@ data class LlmProperties(
         val apiKey: String = "",
         val model: String = "",
         val dimension: Int = 1024,
+        val connectTimeout: Duration = Duration.ofSeconds(5),
+        val readTimeout: Duration = Duration.ofSeconds(20),
     )
 }

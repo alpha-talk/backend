@@ -4,6 +4,7 @@ import com.alphatalk.contracts.Channels
 import com.alphatalk.contracts.Keys
 import com.alphatalk.contracts.Queues
 import com.alphatalk.contracts.envelope.DigestData
+import com.alphatalk.contracts.envelope.MarketAnalysis
 import com.alphatalk.contracts.envelope.StreamCategory
 import com.alphatalk.contracts.envelope.StreamData
 import com.alphatalk.contracts.queue.IngestQueueEntry
@@ -16,9 +17,11 @@ import com.alphatalk.worker.llm.config.LlmProperties
 import com.alphatalk.worker.llm.consume.IngestConsumer
 import com.alphatalk.worker.llm.enrich.ClusterSummarizer
 import com.alphatalk.worker.llm.enrich.DigestProcessor
+import com.alphatalk.worker.llm.enrich.MarketDigestProcessor
 import com.alphatalk.worker.llm.enrich.NewsProcessor
 import com.alphatalk.worker.llm.enrich.TransactionRunner
 import com.alphatalk.worker.llm.persist.EventIdGenerator
+import com.alphatalk.worker.llm.persist.JdbcMarketDigestStore
 import com.alphatalk.worker.llm.persist.StreamEventStore
 import com.alphatalk.worker.llm.publish.StreamPublisher
 import com.alphatalk.worker.llm.sector.SectorDirectory
@@ -86,6 +89,9 @@ class LlmWorkerIntegrationTest {
 
     @Autowired
     private lateinit var digestProcessor: DigestProcessor
+
+    @Autowired
+    private lateinit var marketDigestProcessor: MarketDigestProcessor
 
     @Autowired
     private lateinit var newsProcessor: NewsProcessor
@@ -328,6 +334,7 @@ class LlmWorkerIntegrationTest {
             redis = redisTemplate,
             news = newsProcessor,
             digest = digestProcessor,
+            marketDigest = marketDigestProcessor,
             meters = SimpleMeterRegistry(),
             props = LlmProperties(
                 consumerBlock = Duration.ofMillis(200),
@@ -508,6 +515,45 @@ class LlmWorkerIntegrationTest {
         val second = eventStore.insertEvent("01ARZ3NDEKTSV4RRFFQ69G5FA2", "005930", "AI", Instant.now(), "worker-llm", data)
         assertTrue(first)
         assertEquals(false, second)
+    }
+
+    @Test
+    fun `N7 - market_digest 교체 규칙 - 완성본은 degraded 재실행으로 덮이지 않는다`() {
+        val store = JdbcMarketDigestStore(jdbc, objectMapper)
+        val degraded = MarketAnalysis(summary = "낮춰 생성", asOf = "2026-07-16T17:40:00+09:00", degraded = true)
+        val complete = MarketAnalysis(summary = "완성본", asOf = "2026-07-16T18:10:00+09:00", degraded = false)
+
+        assertTrue(store.save("2026-07-16", degraded))
+        assertTrue(store.save("2026-07-16", complete))
+        assertEquals(false, store.save("2026-07-16", degraded))
+        assertEquals(false, store.save("2026-07-16", complete.copy(summary = "또 다른 완성본")))
+        assertEquals("완성본", store.find("2026-07-16")!!.summary)
+    }
+
+    @Test
+    fun `N7 DoD - MARKET 잡 소비 - market_digest 생성과 무입력 ACK`() {
+        consumer.ensureGroup()
+        val date = "2026-07-14"
+        xadd(
+            IngestQueueEntry(
+                source = IngestQueueEntry.DIGEST_SOURCE,
+                sourceId = IngestQueueEntry.digestSourceId(IngestQueueEntry.MARKET_CODE, date),
+                type = IngestType.DIGEST,
+                codes = listOf(IngestQueueEntry.MARKET_CODE),
+                title = "",
+                url = "",
+                fetchedAt = System.currentTimeMillis(),
+            ),
+        )
+        drain()
+
+        assertEquals(0, consumer.samplePending())
+        val rows = jdbc.queryForObject(
+            "SELECT count(*) FROM market_digest WHERE date = CAST(:date AS date)",
+            mapOf("date" to date),
+            Long::class.java,
+        )
+        assertEquals(0L, rows)
     }
 
     @Test

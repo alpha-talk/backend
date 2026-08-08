@@ -28,16 +28,25 @@ class RedisArticleRequestGate(
         if (intervalMillis == 0L) return
         val host = requireNotNull(uri.host).lowercase()
         val key = Keys.articleFetchRate(host)
+        val deadlineNanos = System.nanoTime() + MAX_TOTAL_WAIT.toNanos()
+        var firstAttempt = true
         while (true) {
+            val remainingMillis = (deadlineNanos - System.nanoTime()) / 1_000_000
+            check(firstAttempt || remainingMillis > 0) {
+                "article gate wait exceeded ${MAX_TOTAL_WAIT.toSeconds()}s: host=$host"
+            }
+            firstAttempt = false
             val waitMillis = requireNotNull(
                 redis.execute(ACQUIRE_SCRIPT, listOf(key), intervalMillis.toString()),
             )
             if (waitMillis <= 0) return
-            sleeper(waitMillis.coerceAtLeast(1))
+            sleeper(waitMillis.coerceAtLeast(1).coerceAtMost(remainingMillis.coerceAtLeast(1)))
         }
     }
 
     companion object {
+        val MAX_TOTAL_WAIT: java.time.Duration = java.time.Duration.ofSeconds(10)
+
         private fun sleepPreservingInterrupt(millis: Long) {
             try {
                 Thread.sleep(millis)

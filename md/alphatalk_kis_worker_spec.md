@@ -327,6 +327,8 @@ worker-batch invest_opinion_sync (영업일 07:00~17:50 · 10분 주기)
 
 ## 4. 워커 소유 데이터 스키마 (Liquibase 관리 — `db-migrations` 모듈)
 
+읽기 전용 소비자: core-api(시세·지표 조회) 외에 **worker-llm**이 `daily_candle`·`investor_flow_daily`·`stock_master`를 시장 다이제스트 팩트시트(업종별 등락·수급 집계)용으로 조회한다([뉴스 워커 명세](alphatalk_news_worker_spec.md) §4.3). 쓰기 주체는 변함없이 price/batch 워커뿐이다.
+
 ```
 stock_master(code CHAR(6) PK, name, market, sector_code NULL, shares_outstanding BIGINT,
              is_active BOOL, listed_at NULL, updated_at)

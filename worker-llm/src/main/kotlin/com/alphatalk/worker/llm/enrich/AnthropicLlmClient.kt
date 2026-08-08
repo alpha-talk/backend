@@ -4,12 +4,21 @@ import com.alphatalk.worker.llm.config.LlmProperties
 import com.fasterxml.jackson.databind.JsonNode
 import io.micrometer.core.instrument.MeterRegistry
 import org.springframework.http.MediaType
+import org.springframework.http.client.SimpleClientHttpRequestFactory
 import org.springframework.web.client.RestClient
 
 class AnthropicLlmClient(
     private val props: LlmProperties,
     private val meters: MeterRegistry,
-    private val rest: RestClient = RestClient.builder().baseUrl(props.anthropic.baseUrl).build(),
+    private val rest: RestClient = RestClient.builder()
+        .baseUrl(props.anthropic.baseUrl)
+        .requestFactory(
+            SimpleClientHttpRequestFactory().apply {
+                setConnectTimeout(props.anthropic.connectTimeout)
+                setReadTimeout(props.anthropic.readTimeout)
+            },
+        )
+        .build(),
 ) : LlmClient {
 
     private val mapper = StructuredLlmCodec.mapper
@@ -30,6 +39,15 @@ class AnthropicLlmClient(
             prompt = StructuredLlmCodec.digestPrompt(input),
         )
         return StructuredLlmCodec.parseDigest(toolInput)
+    }
+
+    override fun marketDigest(input: MarketDigestInput): MarketDigestOutput {
+        val toolInput = callTool(
+            model = props.models.digest,
+            tool = MARKET_DIGEST_TOOL,
+            prompt = StructuredLlmCodec.marketDigestPrompt(input.copy(research = false)),
+        )
+        return StructuredLlmCodec.parseMarketDigest(toolInput, research = false)
     }
 
     private fun callTool(model: String, tool: Map<String, Any>, prompt: String): JsonNode {
@@ -72,6 +90,12 @@ class AnthropicLlmClient(
             "name" to "submit_daily_digest",
             "description" to "종목 데일리 브리핑 제출",
             "input_schema" to StructuredLlmCodec.digestSchema,
+        )
+
+        private val MARKET_DIGEST_TOOL = mapOf(
+            "name" to "submit_market_digest",
+            "description" to "시장 데일리 브리핑 제출",
+            "input_schema" to StructuredLlmCodec.marketDigestSchema,
         )
     }
 }
