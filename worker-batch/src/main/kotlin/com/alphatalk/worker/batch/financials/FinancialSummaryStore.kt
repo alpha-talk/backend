@@ -16,7 +16,7 @@ interface FinancialSummaryStore {
 
     fun upsertAll(rows: List<FinancialSummaryRow>)
 
-    fun codesWithRowOnOrBefore(year: Int): Set<String>
+    fun codesWithCoverage(throughYear: Int, minDistinctYears: Int): Set<String>
 }
 
 interface CorpDirectory {

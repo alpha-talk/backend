@@ -281,14 +281,8 @@ class FinancialsSyncJobTest {
 
     @Test
     fun `과거 커버리지가 있는 종목과 corp 매핑이 없는 종목은 백필하지 않는다`() {
-        store.rows += FinancialSummaryRow(
-            code = "005930",
-            year = 2024,
-            reprtCode = "11011",
-            fsDiv = "CFS",
-            figures = FinancialFigures(1, 1, 1, 1, 1, 1),
-            disclosedAt = Instant.parse("2026-03-09T15:00:00Z"),
-        )
+        store.rows += historicalRow("005930", 2023)
+        store.rows += historicalRow("005930", 2024)
         val dart = StubDart(emptyList(), emptyMap())
 
         job(
@@ -302,6 +296,38 @@ class FinancialsSyncJobTest {
         assertEquals(1.0, meters.counter("batch.financials.backfill.unmapped").count())
         assertEquals(listOf("SUCCESS"), runs.finished)
     }
+
+    @Test
+    fun `과거 연도 행 하나로는 커버리지가 아니다 - 정정공시 하나가 백필을 영구히 막지 않는다`() {
+        store.rows += historicalRow("005930", 2024)
+        val dart = StubDart(
+            disclosures = emptyList(),
+            accounts = mapOf("00126380:CFS" to cfsAccounts),
+            corpDisclosures = mapOf(
+                "00126380" to listOf(disclosure(name = "사업보고서 (2023.12)", receipt = "20240310")),
+            ),
+        )
+
+        val stored = job(
+            dart,
+            active = setOf("005930"),
+            backfillPerRun = 10,
+            corps = mapOf("005930" to "00126380"),
+        ).syncOnce()
+
+        assertEquals(1, stored)
+        assertTrue(store.rows.any { it.year == 2023 })
+        assertEquals(listOf("SUCCESS"), runs.finished)
+    }
+
+    private fun historicalRow(code: String, year: Int) = FinancialSummaryRow(
+        code = code,
+        year = year,
+        reprtCode = "11011",
+        fsDiv = "CFS",
+        figures = FinancialFigures(1, 1, 1, 1, 1, 1),
+        disclosedAt = Instant.parse("2026-03-09T15:00:00Z"),
+    )
 
     @Test
     fun `백필은 회차당 상한 개수만 처리하고 나머지는 다음 회차로 미룬다`() {
@@ -675,7 +701,7 @@ class FinancialsSyncJobTest {
         val brokenStore = object : FinancialSummaryStore {
             override fun upsert(row: FinancialSummaryRow) = throw IllegalStateException("db down")
             override fun upsertAll(rows: List<FinancialSummaryRow>) = throw IllegalStateException("db down")
-            override fun codesWithRowOnOrBefore(year: Int): Set<String> = emptySet()
+            override fun codesWithCoverage(throughYear: Int, minDistinctYears: Int): Set<String> = emptySet()
         }
         val job = FinancialsSyncJob(
             dart = dart,
@@ -754,8 +780,11 @@ class FinancialsSyncJobTest {
             rows += row
         }
 
-        override fun codesWithRowOnOrBefore(year: Int): Set<String> =
-            rows.filter { it.year <= year }.mapTo(mutableSetOf(), FinancialSummaryRow::code)
+        override fun codesWithCoverage(throughYear: Int, minDistinctYears: Int): Set<String> =
+            rows.filter { it.year <= throughYear }
+                .groupBy(FinancialSummaryRow::code)
+                .filterValues { group -> group.mapTo(mutableSetOf(), FinancialSummaryRow::year).size >= minDistinctYears }
+                .keys
 
         override fun upsertAll(rows: List<FinancialSummaryRow>) {
             this.rows += rows

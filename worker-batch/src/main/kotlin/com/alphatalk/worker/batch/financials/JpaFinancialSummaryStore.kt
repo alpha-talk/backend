@@ -54,8 +54,15 @@ class FinancialSummaryEntity(
 )
 
 interface FinancialSummaryJpaRepository : JpaRepository<FinancialSummaryEntity, FinancialSummaryId> {
-    @Query("select distinct trim(f.id.code) from FinancialSummaryEntity f where f.id.year <= :year")
-    fun distinctCodesWithYearAtMost(@Param("year") year: Short): List<String>
+    @Query(
+        """
+        select trim(f.id.code) from FinancialSummaryEntity f
+        where f.id.year <= :year
+        group by f.id.code
+        having count(distinct f.id.year) >= :minYears
+        """,
+    )
+    fun codesHavingDistinctYears(@Param("year") year: Short, @Param("minYears") minYears: Long): List<String>
 }
 
 interface FinancialCorpMapJpaRepository : JpaRepository<DartCorpMapEntity, String> {
@@ -89,8 +96,8 @@ class JpaFinancialSummaryStore(
     private val repository: FinancialSummaryJpaRepository,
     private val entityManager: EntityManager,
 ) : FinancialSummaryStore {
-    override fun codesWithRowOnOrBefore(year: Int): Set<String> =
-        repository.distinctCodesWithYearAtMost(year.toShort()).toSet()
+    override fun codesWithCoverage(throughYear: Int, minDistinctYears: Int): Set<String> =
+        repository.codesHavingDistinctYears(throughYear.toShort(), minDistinctYears.toLong()).toSet()
 
     @Transactional
     override fun upsertAll(rows: List<FinancialSummaryRow>) {

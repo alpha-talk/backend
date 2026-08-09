@@ -99,6 +99,12 @@ open class InvestorFlowSyncJob(
                 )
                 return stored
             }
+            if (stored == 0) {
+                meters.counter("batch.investor.empty").increment()
+                runs.failCounted(runId, 0, 0, "zero rows stored on a business day - schema drift suspected", clock())
+                log.error("investor flow sync stored zero rows on a business day - response schema drift suspected")
+                return 0
+            }
             runs.succeed(runId, stored, 0, clock())
             log.info("investor flow sync done: rows={}", stored)
             return stored
