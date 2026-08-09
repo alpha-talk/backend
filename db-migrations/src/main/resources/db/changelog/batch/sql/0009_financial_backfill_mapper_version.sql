@@ -1,0 +1,1 @@
+ALTER TABLE financial_backfill ADD COLUMN IF NOT EXISTS mapper_version SMALLINT NOT NULL DEFAULT 0;
