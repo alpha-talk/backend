@@ -1,10 +1,13 @@
 package com.alphatalk.worker.batch.stockinfo
 
+import com.alphatalk.worker.batch.financials.FinancialCorpMapJpaRepository
 import com.alphatalk.worker.batch.financials.FinancialFigures
 import com.alphatalk.worker.batch.financials.FinancialSummaryId
 import com.alphatalk.worker.batch.financials.FinancialSummaryJpaRepository
 import com.alphatalk.worker.batch.financials.FinancialSummaryRow
+import com.alphatalk.worker.batch.financials.JpaCorpDirectory
 import com.alphatalk.worker.batch.financials.JpaFinancialSummaryStore
+import com.alphatalk.worker.batch.industry.DartCorpMapEntity
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Test
 import org.springframework.beans.factory.annotation.Autowired
@@ -24,7 +27,13 @@ import kotlin.test.assertEquals
 
 @DataJpaTest(properties = ["spring.liquibase.change-log=classpath:db/changelog/db.changelog-master.yaml"])
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
-@Import(JpaValuationStore::class, JpaInvestorFlowStore::class, JpaFinancialSummaryStore::class, JpaStockUniverse::class)
+@Import(
+    JpaValuationStore::class,
+    JpaInvestorFlowStore::class,
+    JpaFinancialSummaryStore::class,
+    JpaCorpDirectory::class,
+    JpaStockUniverse::class,
+)
 @Transactional(propagation = Propagation.NOT_SUPPORTED)
 @Testcontainers(disabledWithoutDocker = true)
 class JpaStockInfoStoresTest {
@@ -55,11 +64,18 @@ class JpaStockInfoStoresTest {
     @Autowired
     private lateinit var financials: FinancialSummaryJpaRepository
 
+    @Autowired
+    private lateinit var corpDirectory: JpaCorpDirectory
+
+    @Autowired
+    private lateinit var corpMap: FinancialCorpMapJpaRepository
+
     @AfterEach
     fun cleanUp() {
         valuations.deleteAll()
         flows.deleteAll()
         financials.deleteAll()
+        corpMap.deleteAll()
     }
 
     @Test
@@ -83,6 +99,35 @@ class JpaStockInfoStoresTest {
         val row = flows.findById(InvestorFlowId("005930", "20260807")).orElseThrow()
         assertEquals(-13000, row.individual)
         assertEquals(8000, row.foreign)
+    }
+
+    @Test
+    fun `재무 과거 커버리지 종목 집합과 corp 매핑을 조회한다 - 백필 대상 산출`() {
+        financialStore.upsert(
+            FinancialSummaryRow(
+                code = "005930",
+                year = 2024,
+                reprtCode = "11011",
+                fsDiv = "CFS",
+                figures = FinancialFigures(1, 1, 1, 1, 1, 1),
+                disclosedAt = Instant.parse("2025-03-09T15:00:00Z"),
+            ),
+        )
+        financialStore.upsert(
+            FinancialSummaryRow(
+                code = "000660",
+                year = 2026,
+                reprtCode = "11013",
+                fsDiv = "CFS",
+                figures = FinancialFigures(1, 1, 1, 1, 1, 1),
+                disclosedAt = Instant.parse("2026-05-14T15:00:00Z"),
+            ),
+        )
+        corpMap.save(DartCorpMapEntity(corpCode = "00126380", code = "005930", corpName = "삼성전자"))
+        corpMap.save(DartCorpMapEntity(corpCode = "00164742", code = null, corpName = "비상장사"))
+
+        assertEquals(setOf("005930"), financialStore.codesWithRowOnOrBefore(2024))
+        assertEquals(mapOf("005930" to "00126380"), corpDirectory.corpCodesFor(listOf("005930", "000660")))
     }
 
     @Test

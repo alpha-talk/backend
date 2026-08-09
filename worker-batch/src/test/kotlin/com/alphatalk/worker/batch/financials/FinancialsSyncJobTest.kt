@@ -40,13 +40,19 @@ class FinancialsSyncJobTest {
         dart: DartClient,
         active: Set<String> = setOf("005930", "000660"),
         lookbackDays: Long = 7,
+        backfillPerRun: Int = 0,
+        failureStreakLimit: Int = 5,
+        corps: Map<String, String> = emptyMap(),
     ) = FinancialsSyncJob(
         dart = dart,
         universe = universe(active),
         store = store,
+        corps = FakeCorps(corps),
         runs = runs,
         meters = meters,
         lookbackDays = lookbackDays,
+        backfillPerRun = backfillPerRun,
+        failureStreakLimit = failureStreakLimit,
         requestInterval = Duration.ZERO,
         today = { today },
         pause = {},
@@ -57,18 +63,24 @@ class FinancialsSyncJobTest {
         override fun activeCodes(): Set<String> = codes
     }
 
+    private class FakeCorps(private val mapping: Map<String, String>) : CorpDirectory {
+        override fun corpCodesFor(codes: Collection<String>): Map<String, String> =
+            mapping.filterKeys { it in codes }
+    }
+
     private open class StubDart(
         private val disclosures: List<DartDisclosure>,
         private val accounts: Map<String, List<DartFinancialAccount>>,
+        private val corpDisclosures: Map<String, List<DartDisclosure>> = emptyMap(),
     ) : DartClient {
         val requested = mutableListOf<String>()
 
         override fun corpCodes(): List<DartCorp> = emptyList()
         override fun company(corpCode: String): DartCompany? = null
 
-        override fun periodicDisclosures(begin: LocalDate, end: LocalDate): List<DartDisclosure> {
-            requested += "list:$begin..$end"
-            return disclosures
+        override fun periodicDisclosures(begin: LocalDate, end: LocalDate, corpCode: String?): List<DartDisclosure> {
+            requested += "list:$begin..$end${corpCode?.let { ":$it" } ?: ""}"
+            return if (corpCode == null) disclosures else corpDisclosures[corpCode].orEmpty()
         }
 
         override fun financialAccounts(
@@ -181,6 +193,357 @@ class FinancialsSyncJobTest {
     }
 
     @Test
+    fun `연속 실패가 한도에 닿으면 회차를 중단한다 - 전면 장애가 전 종목 호출을 소모하지 않게`() {
+        val disclosures = (1..8).map { n -> disclosure(code = "00593$n", corp = "0012638$n") }
+        val dart = object : StubDart(disclosures, emptyMap()) {
+            override fun financialAccounts(
+                corpCode: String,
+                year: Int,
+                reprtCode: String,
+                fsDiv: String,
+            ): List<DartFinancialAccount> {
+                super.financialAccounts(corpCode, year, reprtCode, fsDiv)
+                throw DartApiException("unknown", "connection reset")
+            }
+        }
+
+        job(dart, active = disclosures.mapTo(mutableSetOf()) { it.stockCode!! }, failureStreakLimit = 3).syncOnce()
+
+        assertEquals(listOf("FAILED"), runs.finished)
+        assertEquals(1.0, meters.counter("batch.financials.breaker").count())
+        assertEquals(3, dart.requested.count { it.startsWith("fnltt") && it.endsWith(":CFS") })
+    }
+
+    @Test
+    fun `HTTP 429와 DART 900은 즉시 잡을 실패시킨다`() {
+        listOf("429", "503", "900").forEach { status ->
+            val localRuns = FakeRuns()
+            val dart = object : StubDart(listOf(disclosure()), emptyMap()) {
+                override fun financialAccounts(
+                    corpCode: String,
+                    year: Int,
+                    reprtCode: String,
+                    fsDiv: String,
+                ): List<DartFinancialAccount> = throw DartApiException(status, "operational failure")
+            }
+            val job = FinancialsSyncJob(
+                dart = dart,
+                universe = universe(setOf("005930")),
+                store = store,
+                corps = FakeCorps(emptyMap()),
+                runs = localRuns,
+                meters = meters,
+                requestInterval = Duration.ZERO,
+                today = { today },
+                pause = {},
+            )
+
+            assertFailsWith<DartApiException> { job.syncOnce() }
+            assertEquals(listOf("FAILED"), localRuns.finished)
+        }
+    }
+
+    @Test
+    fun `행이 없는 종목을 회사 단위 3년 창으로 백필한다`() {
+        val dart = StubDart(
+            disclosures = emptyList(),
+            accounts = mapOf("00126380:CFS" to cfsAccounts),
+            corpDisclosures = mapOf(
+                "00126380" to listOf(
+                    disclosure(name = "사업보고서 (2025.12)", receipt = "20260310"),
+                    disclosure(name = "분기보고서 (2026.03)", receipt = "20260515"),
+                ),
+            ),
+        )
+
+        val stored = job(
+            dart,
+            active = setOf("005930"),
+            backfillPerRun = 10,
+            corps = mapOf("005930" to "00126380"),
+        ).syncOnce()
+
+        assertEquals(2, stored)
+        assertEquals(listOf("SUCCESS"), runs.finished)
+        val corpLists = dart.requested.filter { it.startsWith("list:") && it.endsWith(":00126380") }
+        assertEquals(
+            listOf(
+                "list:2023-08-07..2024-08-06:00126380",
+                "list:2024-08-07..2025-08-06:00126380",
+                "list:2025-08-07..2026-08-06:00126380",
+                "list:2026-08-07..2026-08-07:00126380",
+            ),
+            corpLists,
+        )
+        assertEquals(setOf(2025 to "11011", 2026 to "11013"), store.rows.mapTo(mutableSetOf()) { it.year to it.reprtCode })
+        assertEquals(1.0, meters.counter("batch.financials.backfill.stocks").count())
+    }
+
+    @Test
+    fun `과거 커버리지가 있는 종목과 corp 매핑이 없는 종목은 백필하지 않는다`() {
+        store.rows += FinancialSummaryRow(
+            code = "005930",
+            year = 2024,
+            reprtCode = "11011",
+            fsDiv = "CFS",
+            figures = FinancialFigures(1, 1, 1, 1, 1, 1),
+            disclosedAt = Instant.parse("2026-03-09T15:00:00Z"),
+        )
+        val dart = StubDart(emptyList(), emptyMap())
+
+        job(
+            dart,
+            active = setOf("005930", "000660"),
+            backfillPerRun = 10,
+            corps = mapOf("005930" to "00126380"),
+        ).syncOnce()
+
+        assertTrue(dart.requested.none { it.contains(":00126380") })
+        assertEquals(1.0, meters.counter("batch.financials.backfill.unmapped").count())
+        assertEquals(listOf("SUCCESS"), runs.finished)
+    }
+
+    @Test
+    fun `백필은 회차당 상한 개수만 처리하고 나머지는 다음 회차로 미룬다`() {
+        val corps = (1..5).associate { n -> "00000$n" to "0000000$n" }
+        val dart = StubDart(emptyList(), emptyMap())
+
+        job(
+            dart,
+            active = corps.keys,
+            backfillPerRun = 2,
+            corps = corps,
+        ).syncOnce()
+
+        val corpsCalled = dart.requested.mapNotNull { entry ->
+            entry.takeIf { it.startsWith("list:") }?.substringAfterLast(":")?.takeIf { it.startsWith("0000000") }
+        }.toSet()
+        assertEquals(2, corpsCalled.size)
+    }
+
+    @Test
+    fun `백필 창은 날짜로 회전한다 - 영구 부적격 종목이 선두를 점유해도 나머지가 굶지 않는다`() {
+        val corps = (1..5).associate { n -> "00000$n" to "0000000$n" }
+
+        fun corpsCalledOn(date: LocalDate): Set<String> {
+            val dart = StubDart(emptyList(), emptyMap())
+            FinancialsSyncJob(
+                dart = dart,
+                universe = universe(corps.keys),
+                store = FakeFinancialStore(),
+                corps = FakeCorps(corps),
+                runs = FakeRuns(),
+                meters = meters,
+                backfillPerRun = 2,
+                requestInterval = Duration.ZERO,
+                today = { date },
+                pause = {},
+            ).syncOnce()
+            return dart.requested.mapNotNull { entry ->
+                entry.takeIf { it.startsWith("list:") }?.substringAfterLast(":")?.takeIf { it.startsWith("0000000") }
+            }.toSet()
+        }
+
+        assertEquals(corpsCalledOn(today), corpsCalledOn(today))
+        val covered = (0L..4L).flatMapTo(mutableSetOf()) { corpsCalledOn(today.plusDays(it)) }
+        assertEquals(corps.values.toSet(), covered)
+    }
+
+    @Test
+    fun `증분이 오늘 공시를 먼저 적재해도 과거 커버리지가 없으면 백필 대상이다`() {
+        val dart = StubDart(
+            disclosures = listOf(disclosure()),
+            accounts = mapOf("00126380:CFS" to cfsAccounts),
+            corpDisclosures = mapOf(
+                "00126380" to listOf(disclosure(name = "사업보고서 (2024.12)", receipt = "20250310")),
+            ),
+        )
+
+        val stored = job(
+            dart,
+            active = setOf("005930"),
+            backfillPerRun = 10,
+            corps = mapOf("005930" to "00126380"),
+        ).syncOnce()
+
+        assertEquals(2, stored)
+        assertEquals(listOf("SUCCESS"), runs.finished)
+        assertEquals(setOf(2026 to "11012", 2024 to "11011"), store.rows.mapTo(mutableSetOf()) { it.year to it.reprtCode })
+    }
+
+    @Test
+    fun `보고서 하나가 재시도까지 실패하면 종목 통째로 미룬다 - 부분 적재는 공백을 영구히 숨긴다`() {
+        val dart = object : StubDart(
+            disclosures = emptyList(),
+            accounts = mapOf("00126380:CFS" to cfsAccounts),
+            corpDisclosures = mapOf(
+                "00126380" to listOf(
+                    disclosure(name = "사업보고서 (2025.12)", receipt = "20260310"),
+                    disclosure(name = "분기보고서 (2026.03)", receipt = "20260515"),
+                ),
+            ),
+        ) {
+            override fun financialAccounts(
+                corpCode: String,
+                year: Int,
+                reprtCode: String,
+                fsDiv: String,
+            ): List<DartFinancialAccount> {
+                if (reprtCode == "11013") throw DartApiException("unknown", "timeout")
+                return super.financialAccounts(corpCode, year, reprtCode, fsDiv)
+            }
+        }
+
+        job(
+            dart,
+            active = setOf("005930"),
+            backfillPerRun = 10,
+            corps = mapOf("005930" to "00126380"),
+        ).syncOnce()
+
+        assertTrue(store.rows.isEmpty())
+        assertEquals(listOf("FAILED"), runs.finished)
+        assertEquals(1, runs.lastFailCount)
+    }
+
+    @Test
+    fun `한 종목의 다중 보고서 실패는 스트릭 1이다 - 종목 하나가 브레이커로 뒤 종목을 막지 않는다`() {
+        val corps = mapOf("000001" to "00000001", "000002" to "00000002")
+        val dart = object : StubDart(
+            disclosures = emptyList(),
+            accounts = mapOf("00000002:CFS" to cfsAccounts),
+            corpDisclosures = mapOf(
+                "00000001" to (1..6).map { n -> disclosure(name = "사업보고서 (202$n.12)", receipt = "20260310") },
+                "00000002" to listOf(disclosure(name = "사업보고서 (2025.12)", receipt = "20260310")),
+            ),
+        ) {
+            override fun financialAccounts(
+                corpCode: String,
+                year: Int,
+                reprtCode: String,
+                fsDiv: String,
+            ): List<DartFinancialAccount> {
+                if (corpCode == "00000001") throw DartApiException("unknown", "timeout")
+                return super.financialAccounts(corpCode, year, reprtCode, fsDiv)
+            }
+        }
+
+        val stored = job(
+            dart,
+            active = corps.keys,
+            backfillPerRun = 10,
+            failureStreakLimit = 3,
+            corps = corps,
+        ).syncOnce()
+
+        assertEquals(1, stored)
+        assertEquals("000002", store.rows.single().code)
+        assertEquals(listOf("FAILED"), runs.finished)
+        assertEquals(0.0, meters.counter("batch.financials.breaker").count())
+    }
+
+    @Test
+    fun `백필 종목 처리 중에도 데드라인을 확인한다 - 느린 DART가 락 임차를 넘기지 않게`() {
+        var now = Instant.parse("2026-08-06T21:00:00Z")
+        val dart = object : StubDart(
+            disclosures = emptyList(),
+            accounts = mapOf("00126380:CFS" to cfsAccounts),
+            corpDisclosures = mapOf(
+                "00126380" to listOf(
+                    disclosure(name = "사업보고서 (2024.12)", receipt = "20250310"),
+                    disclosure(name = "사업보고서 (2025.12)", receipt = "20260310"),
+                ),
+            ),
+        ) {
+            override fun financialAccounts(
+                corpCode: String,
+                year: Int,
+                reprtCode: String,
+                fsDiv: String,
+            ): List<DartFinancialAccount> {
+                now = now.plusSeconds(101 * 60)
+                return super.financialAccounts(corpCode, year, reprtCode, fsDiv)
+            }
+        }
+        val job = FinancialsSyncJob(
+            dart = dart,
+            universe = universe(setOf("005930")),
+            store = store,
+            corps = FakeCorps(mapOf("005930" to "00126380")),
+            runs = runs,
+            meters = meters,
+            backfillPerRun = 10,
+            requestInterval = Duration.ZERO,
+            deadline = Duration.ofMinutes(100),
+            clock = { now },
+            today = { today },
+            pause = {},
+        )
+
+        job.syncOnce()
+
+        assertEquals(listOf("FAILED"), runs.finished)
+        assertEquals(1.0, meters.counter("batch.financials.deadline").count())
+        assertTrue(store.rows.isEmpty())
+    }
+
+    @Test
+    fun `인터럽트는 종목 실패로 흡수하지 않고 취소로 전파한다`() {
+        var fetchCalls = 0
+        val dart = object : StubDart(
+            disclosures = emptyList(),
+            accounts = emptyMap(),
+            corpDisclosures = mapOf(
+                "00000001" to listOf(disclosure(name = "사업보고서 (2024.12)", receipt = "20250310")),
+                "00000002" to listOf(disclosure(name = "사업보고서 (2024.12)", receipt = "20250310")),
+            ),
+        ) {
+            override fun financialAccounts(
+                corpCode: String,
+                year: Int,
+                reprtCode: String,
+                fsDiv: String,
+            ): List<DartFinancialAccount> {
+                fetchCalls += 1
+                throw InterruptedException("shutdown")
+            }
+        }
+
+        assertFailsWith<InterruptedException> {
+            job(
+                dart,
+                active = setOf("000001", "000002"),
+                backfillPerRun = 10,
+                corps = mapOf("000001" to "00000001", "000002" to "00000002"),
+            ).syncOnce()
+        }
+
+        assertTrue(Thread.interrupted())
+        assertEquals(listOf("FAILED"), runs.finished)
+        assertEquals(1, fetchCalls)
+    }
+
+    @Test
+    fun `백필 목록 조회 실패는 잡을 FAILED로 남긴다 - 행이 없는 채로 남아 다음 회차가 재시도한다`() {
+        val dart = object : StubDart(emptyList(), emptyMap()) {
+            override fun periodicDisclosures(begin: LocalDate, end: LocalDate, corpCode: String?): List<DartDisclosure> {
+                if (corpCode != null) throw DartApiException("unknown", "timeout")
+                return super.periodicDisclosures(begin, end, corpCode)
+            }
+        }
+
+        job(
+            dart,
+            active = setOf("005930"),
+            backfillPerRun = 10,
+            corps = mapOf("005930" to "00126380"),
+        ).syncOnce()
+
+        assertEquals(listOf("FAILED"), runs.finished)
+        assertEquals(1, runs.lastFailCount)
+    }
+
+    @Test
     fun `마스터가 오늘 실패로 남아 있으면 유예한다 - 부분 유니버스로 SUCCESS를 굳히지 않는다`() {
         runs.failedJobs += "stock_master_sync"
         val dart = StubDart(listOf(disclosure()), mapOf("00126380:CFS" to cfsAccounts))
@@ -215,6 +578,7 @@ class FinancialsSyncJobTest {
             dart = dart,
             universe = universe(setOf("005930")),
             store = store,
+            corps = FakeCorps(emptyMap()),
             runs = skipping,
             meters = meters,
             requestInterval = Duration.ZERO,
@@ -278,6 +642,7 @@ class FinancialsSyncJobTest {
             dart = dart,
             universe = universe(setOf("005930", "000660")),
             store = store,
+            corps = FakeCorps(emptyMap()),
             runs = runs,
             meters = meters,
             requestInterval = Duration.ZERO,
@@ -309,11 +674,14 @@ class FinancialsSyncJobTest {
         val dart = StubDart(listOf(disclosure()), mapOf("00126380:CFS" to cfsAccounts))
         val brokenStore = object : FinancialSummaryStore {
             override fun upsert(row: FinancialSummaryRow) = throw IllegalStateException("db down")
+            override fun upsertAll(rows: List<FinancialSummaryRow>) = throw IllegalStateException("db down")
+            override fun codesWithRowOnOrBefore(year: Int): Set<String> = emptySet()
         }
         val job = FinancialsSyncJob(
             dart = dart,
             universe = universe(setOf("005930")),
             store = brokenStore,
+            corps = FakeCorps(emptyMap()),
             runs = runs,
             meters = meters,
             requestInterval = Duration.ZERO,
@@ -384,6 +752,13 @@ class FinancialsSyncJobTest {
 
         override fun upsert(row: FinancialSummaryRow) {
             rows += row
+        }
+
+        override fun codesWithRowOnOrBefore(year: Int): Set<String> =
+            rows.filter { it.year <= year }.mapTo(mutableSetOf(), FinancialSummaryRow::code)
+
+        override fun upsertAll(rows: List<FinancialSummaryRow>) {
+            this.rows += rows
         }
     }
 }

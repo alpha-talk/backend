@@ -1,5 +1,6 @@
 package com.alphatalk.worker.batch.financials
 
+import com.alphatalk.worker.batch.industry.DartCorpMapEntity
 import jakarta.persistence.Column
 import jakarta.persistence.Embeddable
 import jakarta.persistence.EmbeddedId
@@ -9,6 +10,8 @@ import jakarta.persistence.Table
 import org.hibernate.annotations.JdbcTypeCode
 import org.hibernate.type.SqlTypes
 import org.springframework.data.jpa.repository.JpaRepository
+import org.springframework.data.jpa.repository.Query
+import org.springframework.data.repository.query.Param
 import org.springframework.stereotype.Repository
 import org.springframework.transaction.annotation.Transactional
 import java.io.Serializable
@@ -50,13 +53,50 @@ class FinancialSummaryEntity(
     var disclosedAt: Instant = Instant.EPOCH,
 )
 
-interface FinancialSummaryJpaRepository : JpaRepository<FinancialSummaryEntity, FinancialSummaryId>
+interface FinancialSummaryJpaRepository : JpaRepository<FinancialSummaryEntity, FinancialSummaryId> {
+    @Query("select distinct trim(f.id.code) from FinancialSummaryEntity f where f.id.year <= :year")
+    fun distinctCodesWithYearAtMost(@Param("year") year: Short): List<String>
+}
+
+interface FinancialCorpMapJpaRepository : JpaRepository<DartCorpMapEntity, String> {
+    @Query(
+        """
+        select m from DartCorpMapEntity m
+        where m.code in :codes
+        """,
+    )
+    fun findByCodes(@Param("codes") codes: Collection<String>): List<DartCorpMapEntity>
+}
+
+@Repository
+class JpaCorpDirectory(
+    private val repository: FinancialCorpMapJpaRepository,
+) : CorpDirectory {
+    override fun corpCodesFor(codes: Collection<String>): Map<String, String> {
+        if (codes.isEmpty()) return emptyMap()
+        return codes.chunked(CHUNK).flatMap(repository::findByCodes)
+            .mapNotNull { entity -> entity.code?.let { it.trim() to entity.corpCode } }
+            .toMap()
+    }
+
+    private companion object {
+        const val CHUNK = 1000
+    }
+}
 
 @Repository
 class JpaFinancialSummaryStore(
     private val repository: FinancialSummaryJpaRepository,
     private val entityManager: EntityManager,
 ) : FinancialSummaryStore {
+    override fun codesWithRowOnOrBefore(year: Int): Set<String> =
+        repository.distinctCodesWithYearAtMost(year.toShort()).toSet()
+
+    @Transactional
+    override fun upsertAll(rows: List<FinancialSummaryRow>) {
+        rows.forEach(::upsert)
+    }
+
     @Transactional
     override fun upsert(row: FinancialSummaryRow) {
         val id = FinancialSummaryId(code = row.code, year = row.year.toShort(), reprtCode = row.reprtCode)

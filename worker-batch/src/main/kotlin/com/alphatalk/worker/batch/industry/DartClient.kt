@@ -42,7 +42,7 @@ interface DartClient {
 
     fun company(corpCode: String): DartCompany?
 
-    fun periodicDisclosures(begin: LocalDate, end: LocalDate): List<DartDisclosure>
+    fun periodicDisclosures(begin: LocalDate, end: LocalDate, corpCode: String? = null): List<DartDisclosure>
 
     fun financialAccounts(corpCode: String, year: Int, reprtCode: String, fsDiv: String): List<DartFinancialAccount>
 }

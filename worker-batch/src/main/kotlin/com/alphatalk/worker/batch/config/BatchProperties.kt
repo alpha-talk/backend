@@ -61,6 +61,9 @@ data class BatchProperties(
         val cron: String = "0 0 6 * * *",
         val retryCron: String = "0 0 9,13,17 * * *",
         val lookbackDays: Long = 7,
+        val backfillYears: Long = 3,
+        val backfillPerRun: Int = 100,
+        val failureStreakLimit: Int = 5,
     )
 
     data class Dart(
