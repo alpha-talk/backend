@@ -12,7 +12,9 @@ interface BatchJobRunStore {
         fail(id, error, finishedAt)
     }
 
-    fun hasSucceeded(job: String, runDate: String): Boolean = true
+    fun startOrRepair(job: String, runDate: String, startedAt: Instant): Long? = start(job, runDate, startedAt)
 
-    fun hasFailedRun(job: String, runDate: String): Boolean = false
+    fun hasCleanSuccess(job: String, runDate: String): Boolean = true
+
+    fun hasIncompleteRun(job: String, runDate: String): Boolean = false
 }

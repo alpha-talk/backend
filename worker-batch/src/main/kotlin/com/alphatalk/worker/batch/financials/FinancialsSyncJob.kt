@@ -61,7 +61,7 @@ open class FinancialsSyncJob(
             return 0
         }
         try {
-            if (prerequisiteJob != null && runs.hasFailedRun(prerequisiteJob, runDate)) {
+            if (prerequisiteJob != null && runs.hasIncompleteRun(prerequisiteJob, runDate)) {
                 log.error("financials sync defers: {} ran today but is not SUCCESS - universe may be partial", prerequisiteJob)
                 runs.failCounted(runId, 0, 0, "$prerequisiteJob incomplete today", clock())
                 return 0

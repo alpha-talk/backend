@@ -38,7 +38,7 @@ open class StockMasterSyncJob(
 
     fun syncOnce(): Int {
         val runDate = today().format(DateTimeFormatter.BASIC_ISO_DATE)
-        val runId = runs.start(JOB_NAME, runDate, clock())
+        val runId = runs.startOrRepair(JOB_NAME, runDate, clock())
         if (runId == null) {
             log.info("stock master sync skipped, already succeeded today: runDate={}", runDate)
             return 0
