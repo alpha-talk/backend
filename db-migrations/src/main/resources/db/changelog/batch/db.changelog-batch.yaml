@@ -48,3 +48,10 @@ databaseChangeLog:
         - sqlFile:
             path: sql/0007_invest_opinion.sql
             relativeToChangelogFile: true
+  - changeSet:
+      id: 0008-financial-backfill
+      author: worker-batch
+      changes:
+        - sqlFile:
+            path: sql/0008_financial_backfill.sql
+            relativeToChangelogFile: true
