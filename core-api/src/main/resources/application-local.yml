@@ -10,3 +10,9 @@ alphatalk:
       secret: insecure-local-dev-only-secret-0123456789abcdef
   stockinfo:
     minute-refresh-url: http://localhost:8082   # worker-price 분봉 신선화 내부 API — 미설정이면 저장분만 반환 (워커 명세 §2.6)
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, metrics, prometheus   # prometheus는 로컬 전용 노출 — 운영은 별도 보호 경계 뒤에서 opt-in
