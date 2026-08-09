@@ -126,7 +126,18 @@ class JpaStockInfoStoresTest {
         corpMap.save(DartCorpMapEntity(corpCode = "00126380", code = "005930", corpName = "삼성전자"))
         corpMap.save(DartCorpMapEntity(corpCode = "00164742", code = null, corpName = "비상장사"))
 
-        assertEquals(setOf("005930"), financialStore.codesWithRowOnOrBefore(2024))
+        assertEquals(emptySet<String>(), financialStore.codesWithCoverage(2024, 2))
+        financialStore.upsert(
+            FinancialSummaryRow(
+                code = "005930",
+                year = 2023,
+                reprtCode = "11011",
+                fsDiv = "CFS",
+                figures = FinancialFigures(1, 1, 1, 1, 1, 1),
+                disclosedAt = Instant.parse("2024-03-09T15:00:00Z"),
+            ),
+        )
+        assertEquals(setOf("005930"), financialStore.codesWithCoverage(2024, 2))
         assertEquals(mapOf("005930" to "00126380"), corpDirectory.corpCodesFor(listOf("005930", "000660")))
     }
 

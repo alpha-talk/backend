@@ -91,6 +91,15 @@ class InvestorFlowSyncJobTest {
     }
 
     @Test
+    fun `영업일 전체 0행 적재는 FAILED다 - 날짜 필드 드리프트가 성공으로 굳지 않게`() {
+        val stored = job(fetcher = { emptyList() }).syncOnce()
+
+        assertEquals(0, stored)
+        assertEquals(listOf("FAILED"), runs.finished)
+        assertEquals(1.0, meters.counter("batch.investor.empty").count())
+    }
+
+    @Test
     fun `주말과 휴장일은 실행하지 않는다`() {
         assertEquals(0, job(fetcher = { flows(it) }, date = LocalDate.parse("2026-08-09")).syncOnce())
         assertEquals(0, job(fetcher = { flows(it) }, holidays = setOf(weekday)).syncOnce())
