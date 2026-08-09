@@ -47,6 +47,19 @@ class MarketCalendarTest {
     }
 
     @Test
+    fun `임의 날짜의 영업일 판정은 enforced와 무관하게 주말·휴장일을 거른다`() {
+        val calendar = MarketCalendar(
+            holidays = setOf(LocalDate.of(2026, 8, 6)),
+            enforced = false,
+            clock = at(2026, 8, 12, 14, 0),
+        )
+        assertEquals(true, calendar.isBusinessDay(LocalDate.of(2026, 8, 11)))
+        assertEquals(false, calendar.isBusinessDay(LocalDate.of(2026, 8, 9)))
+        assertEquals(false, calendar.isBusinessDay(LocalDate.of(2026, 8, 8)))
+        assertEquals(false, calendar.isBusinessDay(LocalDate.of(2026, 8, 6)))
+    }
+
+    @Test
     fun `거래일 여부는 주말·휴장일만 거른다`() {
         assertEquals(true, MarketCalendar(clock = at(2026, 7, 27, 16, 30)).isTradingDay())
         assertEquals(false, MarketCalendar(clock = at(2026, 7, 26, 16, 30)).isTradingDay())

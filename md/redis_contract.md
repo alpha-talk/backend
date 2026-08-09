@@ -1,4 +1,6 @@
-# Alpha Talk — Redis 계약 (`:contracts`) v0.18
+# Alpha Talk — Redis 계약 (`:contracts`) v0.19
+
+> v0.19 (2026-08-09): worker-price 내부 키 1종 추가 — 분봉 과거 백필의 종목별 인스턴스 간 중복 방지 락 `lock:minute-backfill:{code}`(SET NX PX). `minute_candle_backfill`([KIS 워커 명세](alphatalk_kis_worker_spec.md) §2.6 소유)이 조회 트리거에 편승해 직전 7영업일의 빈 날짜를 비동기로 채울 때, 여러 인스턴스가 같은 종목을 동시에 백필해 KIS 콜을 중복 소진하는 것을 막는다. 미획득 인스턴스는 no-op(다음 트리거가 재시도). worker-price 전용이며 다른 서버는 접근하지 않는다. `:contracts`의 `Keys.minuteBackfillLock` 생성 함수 사용.
 
 > v0.18 (2026-08-07): digest 엔트리(§2.3)의 `codes`에 의사코드 `MARKET` 허용 — 시장 다이제스트 잡. ingest 스케줄러가 매일 17:40 KST에 `sourceId=digest:MARKET:{yyyy-MM-dd}` 1건을 적재하고 llm-worker가 시장 매크로 브리핑을 생성해 `market_digest` 테이블에 기록한다(발행 없음 — 방이 없다. 재실행 교체 규칙·휴장일 무브리핑 ACK 포함 상세는 [뉴스 워커 명세](alphatalk_news_worker_spec.md) §4.3). 적재 원자성·멱등·보충은 종목 digest와 동일 규약이며, 트리거는 소비자(N7 분기) 전체 배포 후 켠다.
 
@@ -182,6 +184,7 @@ ingest-worker 스케줄러(싱글턴)가 매일 적재하고 — 종목 잡은 1
 | `kis:token:issued:{keyId}` | String (epoch ms) | 마지막 발급 시각 — KIS 재발급 최소 간격(1분) 준수 판정 | price/batch-worker | price/batch-worker | 없음 |
 | `job-lock:alphatalk:{job}` | String | worker-batch ShedLock 잡 락(라이브러리 규칙 키 — `Keys` 생성 함수 없음). 다중 기동 시 같은 잡의 동시 실행 방지 | batch-worker | batch-worker | 잡별 `lockAtMostFor` |
 | `lock:minute-refresh:{code}` | String (`SET NX PX`) | 분봉 신선화의 종목별 인스턴스 간 single-flight 락(KIS 워커 명세 §2.6) — 미획득 인스턴스는 no-op | worker-price | worker-price | 페치 데드라인+여유 (기본 90s·일 확정 시 200s) |
+| `lock:minute-backfill:{code}` | String (`SET NX PX`) | 분봉 과거 백필(`minute_candle_backfill`, KIS 워커 명세 §2.6)의 종목별 인스턴스 간 중복 방지 락 — 미획득 인스턴스는 no-op(다음 트리거가 재시도) | worker-price | worker-price | 백필 실행 예산+여유 (기본 200s) |
 | `minute:through:{code}:{date}` | String (`HHmm`) | 그 종목·일자를 몇 시까지 조회 완료했는지(완주 워터마크, §2.6) — 인스턴스 간 공유해 재기동·리더 전환 후 전 구간 재조회를 막는다 | worker-price | worker-price | **2일** |
 | `market-div:{code}` | String (`UN`\|`J`) | 그 종목의 시계열 API가 통합(`UN`)을 받는지 KRX 전용(`J`)이어야 하는지 — **NXT 상장 여부의 단일 소유자**(KIS 워커 명세 §2.3·§2.6). 분봉·실시간 구독·현재가 폴백이 모두 이 키를 읽는다. 쓰기는 확정 판정만: 분봉의 `acml_vol>0 && 봉 전부 0` → `J`, 정상 봉 → `UN`; 실시간의 통합 틱 수신 → `UN`(**실시간은 `J`를 쓰지 않는다** — 침묵은 "통합이 안 준다"와 "체결이 없었다"를 구분하지 못한다. 또한 체결 TR의 틱만 근거로 쓴다 — 시간외 `H0STOUP0`은 구분과 무관하게 항상 등록되는 KRX 채널이라 통합 체결의 증거가 아니다). **KRX 조회가 성공했다는 사실만으로는 쓰지 않는다**(`J`는 모든 종목에서 동작하므로 NXT 미상장의 증거가 아니다) | worker-price | worker-price | **7일** |
 | `minute:market-div:{code}:{date}` | String (`UN`\|`J`) | 그 종목·일자의 분봉을 어느 시장 구분으로 적재했는지(KIS 워커 명세 §2.6) — NXT 지원이면 `UN`, 미지원이면 `J`. 기록이 있으면 그 구분으로 1콜만 조회한다. 판별·전환은 **그날 적재분이 0이고 `acml_vol > 0`일 때만** 일어나며(하루 안 구분 혼입 방지), 전환 시 `minute:through:{code}:{date}`를 **먼저** 지운 뒤 이 키를 기록한다(크래시가 "둘 다 없음"으로 수렴해 재판정이 멱등). 적재된 분봉은 어떤 경우에도 삭제하지 않는다 | worker-price | worker-price | **2일** |
