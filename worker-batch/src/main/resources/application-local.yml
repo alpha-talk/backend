@@ -6,9 +6,19 @@ spring:
 
 alphatalk:
   batch:
-    stock-master:
-      cron: "-"                                 # 로컬은 자동 실행하지 않는다 — 필요할 때 테스트·수동 호출로 적재
+    stock-master:                               # 로컬은 자동 실행하지 않는다 — 필요할 때 테스트·수동 호출로 적재
+      cron: "-"
+      retry-cron: "-"                           # 재실행 크론도 함께 끈다 — 하나만 끄면 나머지가 KIS를 내려받고 DB를 바꾼다
     dart:
       cron: "-"                                 # 로컬은 자동 실행하지 않는다 — 외부 API 호출·DB 변경은 수동 트리거로만
     opinion:
       cron: "-"                                 # 로컬은 자동 실행하지 않는다 — 켜더라도(secrets.yml) 수동 트리거로만
+    valuation:                                  # 켜더라도(secrets.yml) 수동 트리거로만
+      cron: "-"
+      retry-cron: "-"
+    investor:
+      cron: "-"
+      retry-cron: "-"
+    financials:
+      cron: "-"
+      retry-cron: "-"

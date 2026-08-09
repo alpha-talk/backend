@@ -30,9 +30,15 @@ open class StockMasterSyncJob(
         syncOnce()
     }
 
+    @Scheduled(cron = "\${alphatalk.batch.stock-master.retry-cron:0 0 9,10,12 * * *}", zone = "Asia/Seoul")
+    @SchedulerLock(name = JOB_NAME, lockAtMostFor = "PT30M", lockAtLeastFor = "PT1M")
+    open fun scheduledRetry() {
+        syncOnce()
+    }
+
     fun syncOnce(): Int {
         val runDate = today().format(DateTimeFormatter.BASIC_ISO_DATE)
-        val runId = runs.start(JOB_NAME, runDate, clock())
+        val runId = runs.startOrRepair(JOB_NAME, runDate, clock())
         if (runId == null) {
             log.info("stock master sync skipped, already succeeded today: runDate={}", runDate)
             return 0
@@ -56,8 +62,24 @@ open class StockMasterSyncJob(
             val stored = stocks.upsertAll(collected)
             retireMissing(collected, failedMarkets, incompleteMarkets)
             meters.counter("batch.stock.master.synced").increment(stored.toDouble())
-            runs.succeed(runId, stored, failedMarkets.size, clock())
-            log.info("stock master sync done: stored={} failedMarkets={}", stored, failedMarkets.size)
+            if (failedMarkets.isNotEmpty() || incompleteMarkets > 0) {
+                runs.failCounted(
+                    runId,
+                    stored,
+                    failedMarkets.size + incompleteMarkets,
+                    "partial universe: failedMarkets=$failedMarkets incompleteMarkets=$incompleteMarkets",
+                    clock(),
+                )
+                log.error(
+                    "stock master sync incomplete - universe is partial until a rerun succeeds. stored={} failedMarkets={} incompleteMarkets={}",
+                    stored,
+                    failedMarkets,
+                    incompleteMarkets,
+                )
+                return stored
+            }
+            runs.succeed(runId, stored, 0, clock())
+            log.info("stock master sync done: stored={}", stored)
             return stored
         } catch (e: Exception) {
             runs.fail(runId, e.toString(), clock())

@@ -15,8 +15,10 @@ import org.testcontainers.junit.jupiter.Testcontainers
 import java.time.Instant
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 
 @DataJpaTest(properties = ["spring.liquibase.change-log=classpath:db/changelog/db.changelog-master.yaml"])
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
@@ -59,6 +61,64 @@ class JpaBatchJobRunStoreTest {
         assertEquals("RUNNING", row.status)
         assertEquals(0, row.okCount)
         assertNull(row.finishedAt)
+    }
+
+    @Test
+    fun `failCounted는 FAILED로 남기면서 성공·실패 카운트를 보존한다`() {
+        val id = runs.start("valuation_daily", "20260807", Instant.now())
+        assertNotNull(id)
+        runs.failCounted(id, 2500, 100, "partial failure: failed=100", Instant.now())
+
+        val row = repository.findById(id).orElseThrow()
+        assertEquals("FAILED", row.status)
+        assertEquals(2500, row.okCount)
+        assertEquals(100, row.failCount)
+        assertEquals("partial failure: failed=100", row.error)
+        assertNotNull(runs.start("valuation_daily", "20260807", Instant.now()))
+    }
+
+    @Test
+    fun `선행 완전 성공 판정은 오늘 SUCCESS에 실패 0인 행을 요구한다`() {
+        assertFalse(runs.hasCleanSuccess("stock_master_sync", "20260807"))
+        assertFalse(runs.hasIncompleteRun("stock_master_sync", "20260807"))
+
+        val id = runs.start("stock_master_sync", "20260807", Instant.now())
+        assertNotNull(id)
+        assertFalse(runs.hasCleanSuccess("stock_master_sync", "20260807"))
+        assertTrue(runs.hasIncompleteRun("stock_master_sync", "20260807"))
+
+        runs.failCounted(id, 3, 1, "partial universe", Instant.now())
+        assertFalse(runs.hasCleanSuccess("stock_master_sync", "20260807"))
+
+        runs.succeed(id, 3, 1, Instant.now())
+        assertFalse(runs.hasCleanSuccess("stock_master_sync", "20260807"))
+        assertTrue(runs.hasIncompleteRun("stock_master_sync", "20260807"))
+
+        runs.succeed(id, 4, 0, Instant.now())
+        assertTrue(runs.hasCleanSuccess("stock_master_sync", "20260807"))
+        assertFalse(runs.hasIncompleteRun("stock_master_sync", "20260807"))
+    }
+
+    @Test
+    fun `startOrRepair는 부분 성공 행을 다시 연다 - 롤링 배포가 남긴 SUCCESS도 복구된다`() {
+        val id = runs.start("stock_master_sync", "20260807", Instant.now())
+        assertNotNull(id)
+        runs.succeed(id, 3, 1, Instant.now())
+
+        assertNull(runs.start("stock_master_sync", "20260807", Instant.now()))
+        val repaired = runs.startOrRepair("stock_master_sync", "20260807", Instant.now())
+
+        assertEquals(id, repaired)
+        assertEquals("RUNNING", repository.findById(id).orElseThrow().status)
+    }
+
+    @Test
+    fun `startOrRepair는 완전 성공한 날은 다시 열지 않는다`() {
+        val id = runs.start("stock_master_sync", "20260807", Instant.now())
+        assertNotNull(id)
+        runs.succeed(id, 4, 0, Instant.now())
+
+        assertNull(runs.startOrRepair("stock_master_sync", "20260807", Instant.now()))
     }
 
     @Test

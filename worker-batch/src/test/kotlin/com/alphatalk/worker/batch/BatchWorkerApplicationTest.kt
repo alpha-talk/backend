@@ -1,5 +1,6 @@
 package com.alphatalk.worker.batch
 
+import com.alphatalk.worker.batch.job.StartupCatchUp
 import com.alphatalk.worker.batch.master.StockMasterSyncJob
 import org.junit.jupiter.api.Test
 import org.springframework.beans.factory.annotation.Autowired
@@ -10,9 +11,15 @@ import org.testcontainers.containers.PostgreSQLContainer
 import org.testcontainers.junit.jupiter.Container
 import org.testcontainers.junit.jupiter.Testcontainers
 import org.testcontainers.utility.DockerImageName
+import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 
-@SpringBootTest(properties = ["alphatalk.batch.stock-master.cron=-"])
+@SpringBootTest(
+    properties = [
+        "alphatalk.batch.stock-master.cron=-",
+        "alphatalk.batch.stock-master.retry-cron=-",
+    ],
+)
 @Testcontainers(disabledWithoutDocker = true)
 class BatchWorkerApplicationTest {
     companion object {
@@ -32,8 +39,17 @@ class BatchWorkerApplicationTest {
     @Autowired
     private lateinit var job: StockMasterSyncJob
 
+    @Autowired
+    private lateinit var catchUp: StartupCatchUp
+
     @Test
     fun `컨텍스트가 뜨고 마스터 동기화 잡이 조립된다`() {
         assertNotNull(job)
+    }
+
+    @Test
+    fun `켜진 잡만 따라잡기에 등록된다 - 꺼진 KIS·DART 잡은 빠진다`() {
+        assertNotNull(catchUp)
+        assertEquals(listOf(StockMasterSyncJob.JOB_NAME), catchUp.registeredJobs())
     }
 }

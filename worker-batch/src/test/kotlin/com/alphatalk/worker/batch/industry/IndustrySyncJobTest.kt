@@ -335,6 +335,19 @@ class IndustrySyncJobTest {
 
         override fun corpCodes(): List<DartCorp> = corps
 
+        override fun periodicDisclosures(
+            begin: java.time.LocalDate,
+            end: java.time.LocalDate,
+            corpCode: String?,
+        ): List<DartDisclosure> = emptyList()
+
+        override fun financialAccounts(
+            corpCode: String,
+            year: Int,
+            reprtCode: String,
+            fsDiv: String,
+        ): List<DartFinancialAccount> = emptyList()
+
         override fun company(corpCode: String): DartCompany? {
             companyCalls += 1
             if (transientFailFirstCall && companyCalls == 1) throw DartApiException("013", "일시 실패")

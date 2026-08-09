@@ -11,6 +11,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 class StockMasterSyncJobTest {
@@ -63,6 +64,7 @@ class StockMasterSyncJobTest {
     private class RecordingRuns(private val startResult: Long?) : BatchJobRunStore {
         var succeeded: Triple<Long, Int, Int>? = null
         var failed: Pair<Long, String>? = null
+        var failedCounts: Triple<Long, Int, Int>? = null
 
         override fun start(job: String, runDate: String, startedAt: Instant): Long? = startResult
 
@@ -74,6 +76,11 @@ class StockMasterSyncJobTest {
 
         override fun fail(id: Long, error: String, finishedAt: Instant) {
             failed = id to error
+        }
+
+        override fun failCounted(id: Long, okCount: Int, failCount: Int, error: String, finishedAt: Instant) {
+            failed = id to error
+            failedCounts = Triple(id, okCount, failCount)
         }
     }
 
@@ -128,7 +135,7 @@ class StockMasterSyncJobTest {
     }
 
     @Test
-    fun `재시도까지 실패하면 그 시장만 실패로 남는다`() {
+    fun `재시도까지 실패하면 부분 유니버스라 회차를 FAILED로 남긴다`() {
         val files = RecordingFetcher(failing = setOf(KisMarket.KOSDAQ))
         val runs = RecordingRuns(startResult = 1L)
 
@@ -136,7 +143,8 @@ class StockMasterSyncJobTest {
 
         assertEquals(3, ok)
         assertEquals(2, files.requested.count { it == KisMarket.KOSDAQ })
-        assertEquals(Triple(1L, 3, 1), runs.succeeded)
+        assertEquals(null, runs.succeeded)
+        assertEquals(Triple(1L, 3, 1), runs.failedCounts)
     }
 
     @Test
@@ -149,13 +157,35 @@ class StockMasterSyncJobTest {
     }
 
     @Test
-    fun `읽지 못한 행이 있으면 상장폐지 정리를 건너뛴다`() {
+    fun `재실행 진입점은 FAILED 회차를 같은 날 다시 채운다`() {
+        val files = RecordingFetcher()
         val store = RecordingStockStore()
 
-        job(RecordingFetcher(corrupt = setOf(KisMarket.KOSPI)), store, RecordingRuns(startResult = 1L)).syncOnce()
+        job(files, store, RecordingRuns(startResult = 1L)).scheduledRetry()
+
+        assertTrue(store.upserted.isNotEmpty())
+    }
+
+    @Test
+    fun `재실행 진입점도 이미 성공한 날은 내려받지 않는다`() {
+        val files = RecordingFetcher()
+
+        job(files, RecordingStockStore(), RecordingRuns(startResult = null)).scheduledRetry()
+
+        assertTrue(files.requested.isEmpty())
+    }
+
+    @Test
+    fun `읽지 못한 행이 있으면 상장폐지 정리를 건너뛰고 회차도 FAILED로 남긴다`() {
+        val store = RecordingStockStore()
+        val runs = RecordingRuns(startResult = 1L)
+
+        job(RecordingFetcher(corrupt = setOf(KisMarket.KOSPI)), store, runs).syncOnce()
 
         assertEquals(0, store.deactivateCalls)
         assertTrue(store.upserted.isNotEmpty())
+        assertEquals(null, runs.succeeded)
+        assertNotNull(runs.failedCounts)
     }
 
     @Test
