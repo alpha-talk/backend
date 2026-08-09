@@ -81,7 +81,7 @@ backend/
 
 > **에이전트 실행 허용**: `./gradlew` 테스트·빌드 명령(`build`, `:모듈:test`, `check`, `compileKotlin`, `assemble` 등)은 확인 없이 실행해도 된다. 변경한 코드는 관련 모듈 테스트로 검증하는 것을 기본으로 한다. `bootRun`·`docker compose` 같은 장기 실행·외부 부작용 명령은 예외로 사용자에게 먼저 확인한다.
 
-로컬 인프라는 루트 `docker-compose.yml`(Redis). 통합 테스트는 Testcontainers가 자체 기동하므로 별도 준비 불요.
+로컬 인프라는 루트 `docker-compose.yml`(Redis·PostgreSQL). 통합 테스트는 Testcontainers가 자체 기동하므로 별도 준비 불요. 모니터링은 `docker compose --profile monitoring up -d`로 opt-in 기동 — Prometheus(127.0.0.1:9090)가 각 서버의 `/actuator/prometheus`를 스크레이프하고 Grafana(127.0.0.1:3000, admin/admin)에 데이터소스·대시보드가 프로비저닝된다(설정은 `infra/monitoring/`). `/actuator/prometheus`는 모든 서버가 local 프로파일에서만 노출한다(fail-closed — 운영은 보호 경계를 갖춘 뒤 환경변수로 opt-in).
 
 **로컬 시크릿**은 저장소 루트 `secrets.yml`에 모은다 — `cp secrets.yml.example secrets.yml` 후 값을 채운다. 각 서버의 `application-local.yml`(local 프로파일)이 `spring.config.import`로 optional 로 읽는다 — local 프로파일을 켜지 않는 테스트·운영 기동에서는 읽히지 않고, 파일이 없으면 무시되고 환경변수 경로로 동작한다. import된 파일이 우선이라 `secrets.yml` 값이 `application-local.yml`의 같은 키를 덮어쓴다. `secrets.yml`은 `.gitignore` 대상이며 **절대 커밋하지 않는다**. 운영은 이 파일이 아니라 환경변수·시크릿 매니저로 주입한다. import를 기본 `application.yml`로 옮기지 않는다 — 테스트 JVM의 작업 디렉터리가 모듈 디렉터리라 개발자 로컬 시크릿이 테스트 컨텍스트에 스며든다.
 

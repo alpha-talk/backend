@@ -22,3 +22,9 @@ alphatalk:
     financials:
       cron: "-"
       retry-cron: "-"
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, metrics, prometheus   # prometheus는 로컬 전용 노출 — 운영은 별도 보호 경계 뒤에서 opt-in
