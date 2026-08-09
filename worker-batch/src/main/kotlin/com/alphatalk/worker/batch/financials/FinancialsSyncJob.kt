@@ -49,9 +49,8 @@ open class FinancialsSyncJob(
         require(failureStreakLimit >= 1) {
             "alphatalk.batch.financials.failure-streak-limit는 1 이상이어야 한다: $failureStreakLimit"
         }
-        require(backfillYears >= COVERAGE_MIN_DISTINCT_YEARS) {
-            "alphatalk.batch.financials.backfill-years는 커버리지 판정 연도 수($COVERAGE_MIN_DISTINCT_YEARS) 이상이어야 한다 — " +
-                "작으면 백필 창이 판정을 채울 보고서를 못 잡아 같은 종목을 매 회차 재시도한다: $backfillYears"
+        require(backfillYears >= 1) {
+            "alphatalk.batch.financials.backfill-years는 1 이상이어야 한다: $backfillYears"
         }
     }
 
@@ -158,7 +157,7 @@ open class FinancialsSyncJob(
             }
             when (outcome) {
                 is BackfillOutcome.Done -> {
-                    store.upsertAll(outcome.rows)
+                    store.completeBackfill(code, backfillYears.toInt(), outcome.rows, clock())
                     tally.stored += outcome.rows.size
                     tally.streak = 0
                 }
@@ -244,8 +243,7 @@ open class FinancialsSyncJob(
 
     private fun backfillCandidates(active: Set<String>, date: LocalDate): List<Pair<String, String>> {
         if (backfillPerRun <= 0) return emptyList()
-        val covered = store.codesWithCoverage(date.year - COVERAGE_THROUGH_YEAR_OFFSET, COVERAGE_MIN_DISTINCT_YEARS)
-        val missing = (active - covered).sorted()
+        val missing = (active - store.backfilledCodes(backfillYears.toInt())).sorted()
         if (missing.isEmpty()) return emptyList()
         val corpByCode = corps.corpCodesFor(missing)
         val mapped = missing.mapNotNull { code -> corpByCode[code]?.let { code to it } }
@@ -418,8 +416,6 @@ open class FinancialsSyncJob(
         const val JOB_NAME = "financials_sync"
         const val CONSOLIDATED = "CFS"
         const val SEPARATE = "OFS"
-        const val COVERAGE_THROUGH_YEAR_OFFSET = 1
-        const val COVERAGE_MIN_DISTINCT_YEARS = 2
         private val SEOUL: ZoneId = ZoneId.of("Asia/Seoul")
         private val FATAL_STATUSES = setOf("010", "011", "012", "020", "021", "100", "101", "800", "900", "901")
     }

@@ -82,11 +82,21 @@ class KisRestClient(
         return KisValuationSnapshot(
             code = code,
             price = output.path("stck_prpr").asText().trim().toLong(),
-            per = ratioOrNull(output.path("per").asText("")),
-            pbr = ratioOrNull(output.path("pbr").asText("")),
-            eps = amountOrNull(output.path("eps").asText("")),
-            bps = amountOrNull(output.path("bps").asText("")),
+            per = ratioOrNull(metricField(output, "per", account, code)),
+            pbr = ratioOrNull(metricField(output, "pbr", account, code)),
+            eps = amountOrNull(metricField(output, "eps", account, code)),
+            bps = amountOrNull(metricField(output, "bps", account, code)),
         )
+    }
+
+    private fun metricField(output: JsonNode, field: String, account: KisAccount, code: String): String {
+        val node = output.path(field)
+        if (node.isMissingNode) {
+            throw KisClientException(
+                "inquire-price valuation field missing - schema drift suspected: keyId=${account.keyId} code=$code field=$field",
+            )
+        }
+        return node.asText("")
     }
 
     fun investorFlows(account: KisAccount, code: String): List<KisInvestorFlow> {

@@ -280,9 +280,8 @@ class FinancialsSyncJobTest {
     }
 
     @Test
-    fun `과거 커버리지가 있는 종목과 corp 매핑이 없는 종목은 백필하지 않는다`() {
-        store.rows += historicalRow("005930", 2023)
-        store.rows += historicalRow("005930", 2024)
+    fun `백필 완료 마커가 있는 종목과 corp 매핑이 없는 종목은 백필하지 않는다`() {
+        store.backfilled["005930"] = 3
         val dart = StubDart(emptyList(), emptyMap())
 
         job(
@@ -298,8 +297,9 @@ class FinancialsSyncJobTest {
     }
 
     @Test
-    fun `과거 연도 행 하나로는 커버리지가 아니다 - 정정공시 하나가 백필을 영구히 막지 않는다`() {
+    fun `증분이 먼저 적재한 과거 행은 완료가 아니다 - 마커 없는 종목은 백필된다`() {
         store.rows += historicalRow("005930", 2024)
+        store.rows += historicalRow("005930", 2023)
         val dart = StubDart(
             disclosures = emptyList(),
             accounts = mapOf("00126380:CFS" to cfsAccounts),
@@ -395,6 +395,58 @@ class FinancialsSyncJobTest {
         assertEquals(2, stored)
         assertEquals(listOf("SUCCESS"), runs.finished)
         assertEquals(setOf(2026 to "11012", 2024 to "11011"), store.rows.mapTo(mutableSetOf()) { it.year to it.reprtCode })
+    }
+
+    @Test
+    fun `백필 창을 넓히면 좁은 창으로 완료된 종목을 다시 백필한다`() {
+        store.backfilled["005930"] = 3
+        val dart = StubDart(
+            disclosures = emptyList(),
+            accounts = mapOf("00126380:CFS" to cfsAccounts),
+            corpDisclosures = mapOf(
+                "00126380" to listOf(disclosure(name = "사업보고서 (2021.12)", receipt = "20220310")),
+            ),
+        )
+        val job = FinancialsSyncJob(
+            dart = dart,
+            universe = universe(setOf("005930")),
+            store = store,
+            corps = FakeCorps(mapOf("005930" to "00126380")),
+            runs = runs,
+            meters = meters,
+            backfillYears = 5,
+            backfillPerRun = 10,
+            requestInterval = Duration.ZERO,
+            today = { today },
+            pause = {},
+        )
+
+        val stored = job.syncOnce()
+
+        assertEquals(1, stored)
+        assertEquals(5, store.backfilled["005930"])
+    }
+
+    @Test
+    fun `정기공시가 없는 종목도 1회 시도 후 마커로 완료된다 - 스팩이 매 회차 재시도되지 않는다`() {
+        val dart = StubDart(
+            disclosures = emptyList(),
+            accounts = emptyMap(),
+            corpDisclosures = mapOf("00126380" to emptyList()),
+        )
+
+        val stored = job(
+            dart,
+            active = setOf("005930"),
+            backfillPerRun = 10,
+            corps = mapOf("005930" to "00126380"),
+        ).syncOnce()
+
+        assertEquals(0, stored)
+        assertEquals(listOf("SUCCESS"), runs.finished)
+        assertTrue("005930" in store.backfilled)
+        assertEquals(3, store.backfilled["005930"])
+        assertTrue(store.rows.isEmpty())
     }
 
     @Test
@@ -700,8 +752,9 @@ class FinancialsSyncJobTest {
         val dart = StubDart(listOf(disclosure()), mapOf("00126380:CFS" to cfsAccounts))
         val brokenStore = object : FinancialSummaryStore {
             override fun upsert(row: FinancialSummaryRow) = throw IllegalStateException("db down")
-            override fun upsertAll(rows: List<FinancialSummaryRow>) = throw IllegalStateException("db down")
-            override fun codesWithCoverage(throughYear: Int, minDistinctYears: Int): Set<String> = emptySet()
+            override fun completeBackfill(code: String, windowYears: Int, rows: List<FinancialSummaryRow>, completedAt: Instant) =
+                throw IllegalStateException("db down")
+            override fun backfilledCodes(minWindowYears: Int): Set<String> = emptySet()
         }
         val job = FinancialsSyncJob(
             dart = dart,
@@ -780,14 +833,14 @@ class FinancialsSyncJobTest {
             rows += row
         }
 
-        override fun codesWithCoverage(throughYear: Int, minDistinctYears: Int): Set<String> =
-            rows.filter { it.year <= throughYear }
-                .groupBy(FinancialSummaryRow::code)
-                .filterValues { group -> group.mapTo(mutableSetOf(), FinancialSummaryRow::year).size >= minDistinctYears }
-                .keys
+        val backfilled = mutableMapOf<String, Int>()
 
-        override fun upsertAll(rows: List<FinancialSummaryRow>) {
+        override fun completeBackfill(code: String, windowYears: Int, rows: List<FinancialSummaryRow>, completedAt: Instant) {
             this.rows += rows
+            backfilled[code] = windowYears
         }
+
+        override fun backfilledCodes(minWindowYears: Int): Set<String> =
+            backfilled.filterValues { it >= minWindowYears }.keys
     }
 }
