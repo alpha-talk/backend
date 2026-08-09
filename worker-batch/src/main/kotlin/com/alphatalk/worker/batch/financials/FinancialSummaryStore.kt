@@ -14,9 +14,9 @@ data class FinancialSummaryRow(
 interface FinancialSummaryStore {
     fun upsert(row: FinancialSummaryRow)
 
-    fun upsertAll(rows: List<FinancialSummaryRow>)
+    fun completeBackfill(code: String, windowYears: Int, rows: List<FinancialSummaryRow>, completedAt: Instant)
 
-    fun codesWithCoverage(throughYear: Int, minDistinctYears: Int): Set<String>
+    fun backfilledCodes(minWindowYears: Int): Set<String>
 }
 
 interface CorpDirectory {

@@ -6,6 +6,7 @@ import jakarta.persistence.Embeddable
 import jakarta.persistence.EmbeddedId
 import jakarta.persistence.Entity
 import jakarta.persistence.EntityManager
+import jakarta.persistence.Id
 import jakarta.persistence.Table
 import org.hibernate.annotations.JdbcTypeCode
 import org.hibernate.type.SqlTypes
@@ -53,16 +54,24 @@ class FinancialSummaryEntity(
     var disclosedAt: Instant = Instant.EPOCH,
 )
 
-interface FinancialSummaryJpaRepository : JpaRepository<FinancialSummaryEntity, FinancialSummaryId> {
-    @Query(
-        """
-        select trim(f.id.code) from FinancialSummaryEntity f
-        where f.id.year <= :year
-        group by f.id.code
-        having count(distinct f.id.year) >= :minYears
-        """,
-    )
-    fun codesHavingDistinctYears(@Param("year") year: Short, @Param("minYears") minYears: Long): List<String>
+interface FinancialSummaryJpaRepository : JpaRepository<FinancialSummaryEntity, FinancialSummaryId>
+
+@Entity
+@Table(name = "financial_backfill")
+class FinancialBackfillEntity(
+    @Id
+    @JdbcTypeCode(SqlTypes.CHAR)
+    @Column(name = "code", nullable = false, length = 6)
+    val code: String = "",
+    @Column(name = "window_years", nullable = false)
+    var windowYears: Short = 0,
+    @Column(name = "completed_at", nullable = false)
+    var completedAt: Instant = Instant.EPOCH,
+)
+
+interface FinancialBackfillJpaRepository : JpaRepository<FinancialBackfillEntity, String> {
+    @Query("select trim(b.code) from FinancialBackfillEntity b where b.windowYears >= :minWindowYears")
+    fun codesWithWindowAtLeast(@Param("minWindowYears") minWindowYears: Short): List<String>
 }
 
 interface FinancialCorpMapJpaRepository : JpaRepository<DartCorpMapEntity, String> {
@@ -94,14 +103,18 @@ class JpaCorpDirectory(
 @Repository
 class JpaFinancialSummaryStore(
     private val repository: FinancialSummaryJpaRepository,
+    private val backfills: FinancialBackfillJpaRepository,
     private val entityManager: EntityManager,
 ) : FinancialSummaryStore {
-    override fun codesWithCoverage(throughYear: Int, minDistinctYears: Int): Set<String> =
-        repository.codesHavingDistinctYears(throughYear.toShort(), minDistinctYears.toLong()).toSet()
+    override fun backfilledCodes(minWindowYears: Int): Set<String> =
+        backfills.codesWithWindowAtLeast(minWindowYears.toShort()).toSet()
 
     @Transactional
-    override fun upsertAll(rows: List<FinancialSummaryRow>) {
+    override fun completeBackfill(code: String, windowYears: Int, rows: List<FinancialSummaryRow>, completedAt: Instant) {
         rows.forEach(::upsert)
+        backfills.save(
+            FinancialBackfillEntity(code = code, windowYears = windowYears.toShort(), completedAt = completedAt),
+        )
     }
 
     @Transactional

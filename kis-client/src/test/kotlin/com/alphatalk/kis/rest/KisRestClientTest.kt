@@ -142,6 +142,21 @@ class KisRestClientTest {
     }
 
     @Test
+    fun `밸류에이션 지표 필드가 응답에 없으면 스키마 드리프트로 보고 예외를 던진다 - 0과 필드 부재는 다르다`() {
+        server.enqueue("/oauth2/tokenP", 200, tokenBody("T1"))
+        server.enqueue(
+            "/uapi/domestic-stock/v1/quotations/inquire-price",
+            200,
+            """
+            {"rt_cd":"0","msg_cd":"MCA00000","output":{
+              "stck_prpr":"71200","per_ratio":"12.10","pbr":"1.35","eps":"5771.00","bps":"52002.00"}}
+            """.trimIndent(),
+        )
+
+        assertFailsWith<KisClientException> { client.valuationSnapshot(account, "005930") }
+    }
+
+    @Test
     fun `밸류에이션 스냅샷은 적자 음수 EPS를 보존한다`() {
         server.enqueue("/oauth2/tokenP", 200, tokenBody("T1"))
         server.enqueue(
