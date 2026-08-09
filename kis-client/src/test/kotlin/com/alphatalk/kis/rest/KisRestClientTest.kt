@@ -162,7 +162,7 @@ class KisRestClientTest {
     }
 
     @Test
-    fun `투자자별 순매수를 파싱하고 결측 행은 건너뛴다`() {
+    fun `투자자별 순매수를 파싱하고 빈 날짜의 패딩 행만 건너뛴다`() {
         server.enqueue("/oauth2/tokenP", 200, tokenBody("T1"))
         server.enqueue(
             "/uapi/domestic-stock/v1/quotations/inquire-investor",
@@ -171,8 +171,7 @@ class KisRestClientTest {
             {"rt_cd":"0","msg_cd":"MCA00000","output":[
               {"stck_bsop_date":"20260807","prsn_ntby_tr_pbmn":"-12000","frgn_ntby_tr_pbmn":"8000","orgn_ntby_tr_pbmn":"4000"},
               {"stck_bsop_date":"20260806","prsn_ntby_tr_pbmn":"1500","frgn_ntby_tr_pbmn":"-900","orgn_ntby_tr_pbmn":"-600"},
-              {"stck_bsop_date":"","prsn_ntby_tr_pbmn":"1","frgn_ntby_tr_pbmn":"1","orgn_ntby_tr_pbmn":"1"},
-              {"stck_bsop_date":"20260805","prsn_ntby_tr_pbmn":"","frgn_ntby_tr_pbmn":"1","orgn_ntby_tr_pbmn":"1"}]}
+              {"stck_bsop_date":"","prsn_ntby_tr_pbmn":"","frgn_ntby_tr_pbmn":"","orgn_ntby_tr_pbmn":""}]}
             """.trimIndent(),
         )
 
@@ -187,6 +186,21 @@ class KisRestClientTest {
         assertEquals("FHKST01010900", call.headers["tr_id"])
         assertTrue("FID_COND_MRKT_DIV_CODE=J" in call.query)
         assertTrue("FID_INPUT_ISCD=005930" in call.query)
+    }
+
+    @Test
+    fun `날짜가 있는 행의 금액 결측은 스키마 드리프트로 보고 예외를 던진다 - 0행 적재가 성공으로 굳지 않게`() {
+        server.enqueue("/oauth2/tokenP", 200, tokenBody("T1"))
+        server.enqueue(
+            "/uapi/domestic-stock/v1/quotations/inquire-investor",
+            200,
+            """
+            {"rt_cd":"0","msg_cd":"MCA00000","output":[
+              {"stck_bsop_date":"20260807","prsn_ntby_amt":"-12000","frgn_ntby_amt":"8000","orgn_ntby_amt":"4000"}]}
+            """.trimIndent(),
+        )
+
+        assertFailsWith<KisClientException> { client.investorFlows(account, "005930") }
     }
 
     @Test
