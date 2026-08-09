@@ -107,7 +107,14 @@ class KisRestClient(
         }
         return json.path("output").mapNotNull { row ->
             val date = row.path("stck_bsop_date").asText("").trim()
-            if (date.isEmpty()) return@mapNotNull null
+            if (date.isEmpty()) {
+                if (FLOW_AMOUNT_FIELDS.any { row.path(it).asText("").trim().isNotEmpty() }) {
+                    throw KisClientException(
+                        "inquire-investor row has amounts without a date - schema drift suspected: keyId=${account.keyId} code=$code",
+                    )
+                }
+                return@mapNotNull null
+            }
             KisInvestorFlow(
                 code = code,
                 date = date,
@@ -314,6 +321,7 @@ class KisRestClient(
         const val TR_DAILY_CHART = "FHKST03010100"
         const val TR_MINUTE_CHART = "FHKST03010200"
         const val TR_INQUIRE_INVESTOR = "FHKST01010900"
+        private val FLOW_AMOUNT_FIELDS = listOf("prsn_ntby_tr_pbmn", "frgn_ntby_tr_pbmn", "orgn_ntby_tr_pbmn")
         const val TR_INVEST_OPINION = "FHKST663400C0"
         const val INVEST_OPINION_QUERY_CODE_LENGTH = 3
         const val INVEST_OPINION_PAGE_CAP = 100
