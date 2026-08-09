@@ -14,6 +14,7 @@ import org.springframework.web.server.ResponseStatusException
 )
 class MinuteCandleRefreshController(
     private val service: MinuteCandleRefreshService,
+    private val backfill: MinuteCandleBackfillService,
     private val universe: MinuteRefreshUniverse,
 ) {
     @PostMapping("/internal/minute-candles/{code}/refresh")
@@ -24,6 +25,7 @@ class MinuteCandleRefreshController(
         if (!universe.contains(code)) {
             throw ResponseStatusException(HttpStatus.NOT_FOUND, "상장 종목이 아니다")
         }
+        backfill.requestAsync(code)
         return mapOf("synced" to service.refresh(code))
     }
 

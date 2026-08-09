@@ -366,6 +366,70 @@ class KisRestClientTest {
         }
     }
     @Test
+    fun `과거 일자 분봉을 파싱하고 행별 날짜를 보존한다 - 응답이 날짜 경계를 넘을 수 있다`() {
+        server.enqueue("/oauth2/tokenP", 200, tokenBody("T1"))
+        server.enqueue(
+            "/uapi/domestic-stock/v1/quotations/inquire-time-dailychartprice",
+            200,
+            """
+            {"rt_cd":"0","output1":{"acml_vol":"20546010"},"output2":[
+              {"stck_bsop_date":"20260807","stck_cntg_hour":"090100","stck_oprc":"235000","stck_hgpr":"235500",
+               "stck_lwpr":"234000","stck_prpr":"235250","cntg_vol":"122060","acml_tr_pbmn":"225292604750"},
+              {"stck_bsop_date":"20260807","stck_cntg_hour":"090000","stck_oprc":"235000","stck_hgpr":"236000",
+               "stck_lwpr":"233500","stck_prpr":"235000","cntg_vol":"836360","acml_tr_pbmn":"196613623750"},
+              {"stck_bsop_date":"20260806","stck_cntg_hour":"153000","stck_oprc":"230500","stck_hgpr":"230500",
+               "stck_lwpr":"230500","stck_prpr":"230500","cntg_vol":"2526291","acml_tr_pbmn":"6088764912000"},
+              {"stck_bsop_date":""}]}
+            """.trimIndent(),
+        )
+
+        val candles = client.dailyMinuteCandles(
+            account,
+            "005930",
+            java.time.LocalDate.of(2026, 8, 7),
+            java.time.LocalTime.of(9, 1),
+            KisRestClient.MARKET_DIV_KRX,
+        )
+
+        assertEquals(3, candles.size)
+        assertEquals("20260807", candles[0].date)
+        assertEquals("0901", candles[0].time)
+        assertEquals(235250, candles[0].close)
+        assertEquals(122060, candles[0].volume)
+        assertEquals(225292604750, candles[0].accValue)
+        assertEquals("20260806", candles[2].date)
+        assertEquals("1530", candles[2].time)
+        val call = server.received.single { it.path.endsWith("inquire-time-dailychartprice") }
+        assertEquals("FHKST03010230", call.headers["tr_id"])
+        assertTrue("FID_COND_MRKT_DIV_CODE=J" in call.query)
+        assertTrue("FID_INPUT_ISCD=005930" in call.query)
+        assertTrue("FID_INPUT_DATE_1=20260807" in call.query)
+        assertTrue("FID_INPUT_HOUR_1=090100" in call.query)
+        assertTrue("FID_PW_DATA_INCU_YN=Y" in call.query)
+        assertTrue("FID_FAKE_TICK_INCU_YN=N" in call.query)
+    }
+
+    @Test
+    fun `과거 일자 분봉 rt_cd가 0이 아니면 예외를 던진다`() {
+        server.enqueue("/oauth2/tokenP", 200, tokenBody("T1"))
+        server.enqueue(
+            "/uapi/domestic-stock/v1/quotations/inquire-time-dailychartprice",
+            200,
+            """{"rt_cd":"1","msg_cd":"EGW00123"}""",
+        )
+
+        assertFailsWith<KisClientException> {
+            client.dailyMinuteCandles(
+                account,
+                "005930",
+                java.time.LocalDate.of(2026, 8, 7),
+                java.time.LocalTime.of(15, 30),
+                KisRestClient.MARKET_DIV_UNIFIED,
+            )
+        }
+    }
+
+    @Test
     fun `투자의견을 파싱한다 - 목표가 0과 빈 직전의견은 null`() {
         server.enqueue("/oauth2/tokenP", 200, tokenBody("T1"))
         server.enqueue(

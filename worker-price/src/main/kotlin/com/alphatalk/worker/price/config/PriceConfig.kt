@@ -15,7 +15,10 @@ import com.alphatalk.worker.price.candle.CandleSyncJob
 import com.alphatalk.worker.price.candle.CandleUniverse
 import com.alphatalk.worker.price.candle.DailyCandleFetcher
 import com.alphatalk.worker.price.candle.DailyCandleStore
+import com.alphatalk.worker.price.candle.DailyMinuteCandleFetcher
 import com.alphatalk.worker.price.candle.MasterCandleUniverse
+import com.alphatalk.worker.price.candle.MinuteBackfillLock
+import com.alphatalk.worker.price.candle.MinuteCandleBackfillService
 import com.alphatalk.worker.price.candle.MinuteCandleDailySyncJob
 import com.alphatalk.worker.price.candle.MinuteCandleFetcher
 import com.alphatalk.worker.price.candle.MinuteCandlePurgeJob
@@ -25,6 +28,7 @@ import com.alphatalk.worker.price.candle.MinuteMarketDivStore
 import com.alphatalk.worker.price.candle.MinuteRefreshLock
 import com.alphatalk.worker.price.candle.MinuteRefreshUniverse
 import com.alphatalk.worker.price.candle.MinuteRefreshWatermarkStore
+import com.alphatalk.worker.price.candle.RedisMinuteBackfillLock
 import com.alphatalk.worker.price.candle.RedisMinuteMarketDivStore
 import com.alphatalk.worker.price.candle.RedisMinuteRefreshLock
 import com.alphatalk.worker.price.candle.RedisMinuteRefreshWatermarkStore
@@ -294,6 +298,62 @@ class PriceConfig {
         name = ["alphatalk.price.enabled", "alphatalk.price.minute-candle-enabled"],
         havingValue = "true",
     )
+    fun dailyMinuteCandleFetcher(
+        props: PriceProperties,
+        tokens: KisTokenManager,
+        gate: KisRateGate,
+    ): DailyMinuteCandleFetcher {
+        val accounts = parseAccounts(props.accountsJson)
+        check(accounts.isNotEmpty()) {
+            "alphatalk.price.minute-candle-enabled=true에는 KIS_ACCOUNTS 계정이 최소 1개 필요하다"
+        }
+        val account = accounts.first()
+        val backfillLimiters = KisRateLimiters(
+            KisLimits.REST_CALLS_PER_SECOND,
+            props.rateFactor * (1 - props.pollBudgetFactor) * BACKFILL_BUDGET_SHARE,
+            CANDLE_ACQUIRE_TIMEOUT,
+        )
+        val rest = KisRestClient(KisApi.REST_BASE_URL, tokens, backfillLimiters, gate)
+        return DailyMinuteCandleFetcher { code, date, to, marketDiv ->
+            rest.dailyMinuteCandles(account, code, date, to, marketDiv)
+        }
+    }
+
+    @Bean
+    @ConditionalOnProperty(
+        name = ["alphatalk.price.enabled", "alphatalk.price.minute-candle-enabled"],
+        havingValue = "true",
+    )
+    fun minuteBackfillLock(redis: StringRedisTemplate): MinuteBackfillLock =
+        RedisMinuteBackfillLock(redis, instanceId = ManagementFactory.getRuntimeMXBean().name)
+
+    @Bean
+    @ConditionalOnProperty(
+        name = ["alphatalk.price.enabled", "alphatalk.price.minute-candle-enabled"],
+        havingValue = "true",
+    )
+    fun minuteCandleBackfillService(
+        fetcher: DailyMinuteCandleFetcher,
+        store: MinuteCandleStore,
+        calendar: MarketCalendar,
+        backfillLock: MinuteBackfillLock,
+        props: PriceProperties,
+        meters: MeterRegistry,
+    ): MinuteCandleBackfillService = MinuteCandleBackfillService(
+        fetcher = fetcher,
+        store = store,
+        calendar = calendar,
+        backfillLock = backfillLock,
+        backfillDays = props.minuteCandleBackfillDays,
+        meters = meters,
+        cooldownMillis = props.minuteCandleBackfillCooldownSec * 1_000,
+    )
+
+    @Bean
+    @ConditionalOnProperty(
+        name = ["alphatalk.price.enabled", "alphatalk.price.minute-candle-enabled"],
+        havingValue = "true",
+    )
     fun minuteMarketDivStore(redis: StringRedisTemplate): MinuteMarketDivStore =
         RedisMinuteMarketDivStore(redis)
 
@@ -387,6 +447,7 @@ class PriceConfig {
         val TICK_TR_IDS: List<String> =
             listOf(KisFrameParser.TR_ID_TICK_TOTAL, KisFrameParser.TR_ID_TICK_OVERTIME)
         val CANDLE_ACQUIRE_TIMEOUT: Duration = Duration.ofSeconds(10)
+        const val BACKFILL_BUDGET_SHARE = 0.25
     }
 
     internal fun parseAccounts(accountsJson: String): List<KisAccount> = try {
