@@ -55,7 +55,7 @@ open class ValuationSyncJob(
             return 0
         }
         try {
-            if (prerequisiteJob != null && !runs.hasSucceeded(prerequisiteJob, runDate)) {
+            if (prerequisiteJob != null && !runs.hasCleanSuccess(prerequisiteJob, runDate)) {
                 log.error("valuation sync refuses a stale universe: {} has no SUCCESS today", prerequisiteJob)
                 runs.failCounted(runId, 0, 0, "$prerequisiteJob has no SUCCESS today", clock())
                 return 0

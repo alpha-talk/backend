@@ -376,7 +376,7 @@ class FinancialsSyncJobTest {
             lastFailCount = failCount
         }
 
-        override fun hasFailedRun(job: String, runDate: String): Boolean = job in failedJobs
+        override fun hasIncompleteRun(job: String, runDate: String): Boolean = job in failedJobs
     }
 
     private class FakeFinancialStore : FinancialSummaryStore {

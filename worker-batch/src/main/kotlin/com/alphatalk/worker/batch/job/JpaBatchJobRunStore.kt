@@ -71,6 +71,25 @@ interface BatchJobRunJpaRepository : JpaRepository<BatchJobRunEntity, Long> {
         set r.status = :running, r.startedAt = :startedAt,
             r.finishedAt = null, r.error = null, r.okCount = 0, r.failCount = 0
         where r.job = :job and r.runDate = :runDate
+          and not (r.status = :success and r.failCount = 0)
+        """,
+    )
+    fun restartUnlessCleanSuccess(
+        @Param("job") job: String,
+        @Param("runDate") runDate: String,
+        @Param("startedAt") startedAt: Instant,
+        @Param("running") running: String,
+        @Param("success") success: String,
+    ): Int
+
+    @Transactional
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
+    @Query(
+        """
+        update BatchJobRunEntity r
+        set r.status = :running, r.startedAt = :startedAt,
+            r.finishedAt = null, r.error = null, r.okCount = 0, r.failCount = 0
+        where r.job = :job and r.runDate = :runDate
         """,
     )
     fun restartAlways(
@@ -143,6 +162,12 @@ class JpaBatchJobRunStore(
         return if (restarted(job, runDate, startedAt)) existing.id else null
     }
 
+    override fun startOrRepair(job: String, runDate: String, startedAt: Instant): Long? {
+        val existing = repository.findByJobAndRunDate(job, runDate)
+            ?: return insertRunning(job, runDate, startedAt) ?: repairAfterLostRace(job, runDate, startedAt)
+        return if (repaired(job, runDate, startedAt)) existing.id else null
+    }
+
     override fun restart(job: String, runDate: String, startedAt: Instant): Long {
         if (repository.restartAlways(job, runDate, startedAt, RUNNING) == 1) {
             return requireNotNull(repository.findByJobAndRunDate(job, runDate)?.id)
@@ -167,12 +192,12 @@ class JpaBatchJobRunStore(
     }
 
     @Transactional(readOnly = true)
-    override fun hasSucceeded(job: String, runDate: String): Boolean =
-        repository.findByJobAndRunDate(job, runDate)?.status == SUCCESS
+    override fun hasCleanSuccess(job: String, runDate: String): Boolean =
+        repository.findByJobAndRunDate(job, runDate)?.let { it.status == SUCCESS && it.failCount == 0 } ?: false
 
     @Transactional(readOnly = true)
-    override fun hasFailedRun(job: String, runDate: String): Boolean =
-        repository.findByJobAndRunDate(job, runDate)?.let { it.status != SUCCESS } ?: false
+    override fun hasIncompleteRun(job: String, runDate: String): Boolean =
+        repository.findByJobAndRunDate(job, runDate)?.let { it.status != SUCCESS || it.failCount > 0 } ?: false
 
     private fun insertRunning(job: String, runDate: String, startedAt: Instant): Long? =
         try {
@@ -189,6 +214,12 @@ class JpaBatchJobRunStore(
 
     private fun restarted(job: String, runDate: String, startedAt: Instant): Boolean =
         repository.restartUnlessSucceeded(job, runDate, startedAt, RUNNING, SUCCESS) == 1
+
+    private fun repairAfterLostRace(job: String, runDate: String, startedAt: Instant): Long? =
+        if (repaired(job, runDate, startedAt)) repository.findByJobAndRunDate(job, runDate)?.id else null
+
+    private fun repaired(job: String, runDate: String, startedAt: Instant): Boolean =
+        repository.restartUnlessCleanSuccess(job, runDate, startedAt, RUNNING, SUCCESS) == 1
 
     companion object {
         private const val RUNNING = "RUNNING"

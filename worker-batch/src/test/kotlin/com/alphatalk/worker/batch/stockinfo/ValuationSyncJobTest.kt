@@ -209,7 +209,7 @@ internal class FakeRuns : BatchJobRunStore {
     var lastOkCount = -1
     var lastFailCount = -1
 
-    override fun hasSucceeded(job: String, runDate: String): Boolean = job !in unsucceededJobs
+    override fun hasCleanSuccess(job: String, runDate: String): Boolean = job !in unsucceededJobs
 
     override fun start(job: String, runDate: String, startedAt: Instant): Long = 1L
     override fun restart(job: String, runDate: String, startedAt: Instant): Long = 1L
