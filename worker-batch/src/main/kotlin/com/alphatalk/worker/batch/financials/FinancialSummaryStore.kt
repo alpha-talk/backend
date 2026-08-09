@@ -14,10 +14,26 @@ data class FinancialSummaryRow(
 interface FinancialSummaryStore {
     fun upsert(row: FinancialSummaryRow)
 
-    fun completeBackfill(code: String, windowYears: Int, rows: List<FinancialSummaryRow>, completedAt: Instant)
+    fun completeBackfill(
+        code: String,
+        marker: BackfillMarker,
+        rows: List<FinancialSummaryRow>,
+        obsolete: List<ReportKey>,
+        completedAt: Instant,
+    )
 
-    fun backfilledCodes(minWindowYears: Int): Set<String>
+    fun backfilledCodes(atLeast: BackfillMarker): Set<String>
 }
+
+data class BackfillMarker(
+    val windowYears: Int,
+    val mapperVersion: Int,
+)
+
+data class ReportKey(
+    val year: Int,
+    val reprtCode: String,
+)
 
 interface CorpDirectory {
     fun corpCodesFor(codes: Collection<String>): Map<String, String>
