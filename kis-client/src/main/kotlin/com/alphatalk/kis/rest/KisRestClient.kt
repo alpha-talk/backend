@@ -236,6 +236,53 @@ class KisRestClient(
         return KisMinuteChart(dailyVolume = dailyVolume, candles = candles)
     }
 
+    fun dailyMinuteCandles(
+        account: KisAccount,
+        code: String,
+        date: LocalDate,
+        toTime: LocalTime,
+        marketDiv: String,
+    ): List<KisMinuteCandle> {
+        val json = getJson(
+            account,
+            DAILY_MINUTE_CHART_PATH,
+            TR_DAILY_MINUTE_CHART,
+            mapOf(
+                "FID_COND_MRKT_DIV_CODE" to marketDiv,
+                "FID_INPUT_ISCD" to code,
+                "FID_INPUT_DATE_1" to date.format(DateTimeFormatter.BASIC_ISO_DATE),
+                "FID_INPUT_HOUR_1" to toTime.format(DateTimeFormatter.ofPattern("HHmmss")),
+                "FID_PW_DATA_INCU_YN" to "Y",
+                "FID_FAKE_TICK_INCU_YN" to "N",
+            ),
+        )
+        val rtCd = json.path("rt_cd").asText("")
+        if (rtCd != "0") {
+            throw KisClientException(
+                "daily minute chart failed: keyId=${account.keyId} code=$code rt_cd=$rtCd msg_cd=${json.path("msg_cd").asText("")}",
+            )
+        }
+        return json.path("output2").mapNotNull { row ->
+            val rowDate = row.path("stck_bsop_date").asText("")
+            val hour = row.path("stck_cntg_hour").asText("")
+            if (rowDate.isBlank() || hour.length < 4) {
+                null
+            } else {
+                KisMinuteCandle(
+                    code = code,
+                    date = rowDate,
+                    time = hour.take(4),
+                    open = row.path("stck_oprc").asText().trim().toLong(),
+                    high = row.path("stck_hgpr").asText().trim().toLong(),
+                    low = row.path("stck_lwpr").asText().trim().toLong(),
+                    close = row.path("stck_prpr").asText().trim().toLong(),
+                    volume = row.path("cntg_vol").asText().trim().toLong(),
+                    accValue = row.path("acml_tr_pbmn").asText().trim().toLong(),
+                )
+            }
+        }
+    }
+
     fun investOpinions(
         account: KisAccount,
         brokerQueryCode: String,
@@ -330,6 +377,7 @@ class KisRestClient(
         const val TR_INQUIRE_PRICE = "FHKST01010100"
         const val TR_DAILY_CHART = "FHKST03010100"
         const val TR_MINUTE_CHART = "FHKST03010200"
+        const val TR_DAILY_MINUTE_CHART = "FHKST03010230"
         const val TR_INQUIRE_INVESTOR = "FHKST01010900"
         private val FLOW_AMOUNT_FIELDS = listOf("prsn_ntby_tr_pbmn", "frgn_ntby_tr_pbmn", "orgn_ntby_tr_pbmn")
         const val TR_INVEST_OPINION = "FHKST663400C0"
@@ -338,6 +386,7 @@ class KisRestClient(
         private const val INQUIRE_PRICE_PATH = "/uapi/domestic-stock/v1/quotations/inquire-price"
         private const val DAILY_CHART_PATH = "/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice"
         private const val MINUTE_CHART_PATH = "/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice"
+        private const val DAILY_MINUTE_CHART_PATH = "/uapi/domestic-stock/v1/quotations/inquire-time-dailychartprice"
         private const val INQUIRE_INVESTOR_PATH = "/uapi/domestic-stock/v1/quotations/inquire-investor"
         private const val INVEST_OPINION_PATH = "/uapi/domestic-stock/v1/quotations/invest-opbysec"
     }

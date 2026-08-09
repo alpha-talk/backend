@@ -49,9 +49,11 @@ alphatalk:
     candle-backfill-days: 90              # 최초 백필 조회 구간 — 1콜 100봉 한도 안쪽 (§2.6)
     candle-sync-on-startup: false         # 기동 직후 1회 수동 백필 — 16:30 크론을 기다리지 않는 로컬 검증용. 리더락을 거치지 않으므로 다중 인스턴스 운영에서 켜지 않는다
     tick-silence-ms: ${TICK_SILENCE_MS:20000}          # 통합 등록 후 침묵 임계 — 초과 시 KRX 전용 재등록 (§2.3)
-    minute-candle-enabled: false          # 분봉 read-through 신선화 내부 API + 16:00 확정·04:30 퍼지 (§2.6)
+    minute-candle-enabled: false          # 분봉 read-through 신선화 내부 API + 20:05 확정·04:30 퍼지 (§2.6)
     minute-candle-fresh-sec: ${MINUTE_CANDLE_FRESH_SEC:60}              # 신선 임계 — 이 안에서는 KIS 재조회 없이 no-op (§2.6)
     minute-candle-retention-days: ${MINUTE_CANDLE_RETENTION_DAYS:30}    # 보존 일수 — 초과분은 새벽 퍼지 (§2.6)
+    minute-candle-backfill-days: ${MINUTE_CANDLE_BACKFILL_DAYS:7}       # 조회 트리거 과거 백필 범위(영업일) — 0이면 백필 없음 (§2.6)
+    minute-candle-backfill-cooldown-sec: ${MINUTE_CANDLE_BACKFILL_COOLDOWN_SEC:600}  # 종목별 백필 재검사 최소 간격 (§2.6)
 
 management:
   endpoints:

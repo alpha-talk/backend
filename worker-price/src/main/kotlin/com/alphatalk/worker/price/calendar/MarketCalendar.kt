@@ -32,7 +32,7 @@ class MarketCalendar(
         return isBusinessDay(ZonedDateTime.ofInstant(clock(), zone).toLocalDate())
     }
 
-    private fun isBusinessDay(date: LocalDate): Boolean =
+    fun isBusinessDay(date: LocalDate): Boolean =
         date.dayOfWeek != DayOfWeek.SATURDAY && date.dayOfWeek != DayOfWeek.SUNDAY && date !in holidays
 
     companion object {
