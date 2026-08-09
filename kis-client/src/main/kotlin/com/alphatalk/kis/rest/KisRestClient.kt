@@ -9,6 +9,8 @@ import com.alphatalk.kis.rate.KisRateLimiters
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
+import java.math.BigDecimal
+import java.math.RoundingMode
 import java.net.URI
 import java.net.URLEncoder
 import java.net.http.HttpClient
@@ -59,6 +61,94 @@ class KisRestClient(
             volume = output.path("acml_vol").asText().trim().toLong(),
         )
     }
+
+    fun valuationSnapshot(account: KisAccount, code: String): KisValuationSnapshot {
+        val json = getJson(
+            account,
+            INQUIRE_PRICE_PATH,
+            TR_INQUIRE_PRICE,
+            mapOf(
+                "FID_COND_MRKT_DIV_CODE" to MARKET_DIV_KRX,
+                "FID_INPUT_ISCD" to code,
+            ),
+        )
+        val rtCd = json.path("rt_cd").asText("")
+        if (rtCd != "0") {
+            throw KisClientException(
+                "inquire-price failed: keyId=${account.keyId} code=$code rt_cd=$rtCd msg_cd=${json.path("msg_cd").asText("")}",
+            )
+        }
+        val output = json.path("output")
+        return KisValuationSnapshot(
+            code = code,
+            price = output.path("stck_prpr").asText().trim().toLong(),
+            per = ratioOrNull(metricField(output, "per", account, code)),
+            pbr = ratioOrNull(metricField(output, "pbr", account, code)),
+            eps = amountOrNull(metricField(output, "eps", account, code)),
+            bps = amountOrNull(metricField(output, "bps", account, code)),
+        )
+    }
+
+    private fun metricField(output: JsonNode, field: String, account: KisAccount, code: String): String {
+        val node = output.path(field)
+        if (node.isMissingNode) {
+            throw KisClientException(
+                "inquire-price valuation field missing - schema drift suspected: keyId=${account.keyId} code=$code field=$field",
+            )
+        }
+        return node.asText("")
+    }
+
+    fun investorFlows(account: KisAccount, code: String): List<KisInvestorFlow> {
+        val json = getJson(
+            account,
+            INQUIRE_INVESTOR_PATH,
+            TR_INQUIRE_INVESTOR,
+            mapOf(
+                "FID_COND_MRKT_DIV_CODE" to MARKET_DIV_KRX,
+                "FID_INPUT_ISCD" to code,
+            ),
+        )
+        val rtCd = json.path("rt_cd").asText("")
+        if (rtCd != "0") {
+            throw KisClientException(
+                "inquire-investor failed: keyId=${account.keyId} code=$code rt_cd=$rtCd msg_cd=${json.path("msg_cd").asText("")}",
+            )
+        }
+        return json.path("output").mapNotNull { row ->
+            val date = row.path("stck_bsop_date").asText("").trim()
+            if (date.isEmpty()) {
+                if (FLOW_AMOUNT_FIELDS.any { row.path(it).asText("").trim().isNotEmpty() }) {
+                    throw KisClientException(
+                        "inquire-investor row has amounts without a date - schema drift suspected: keyId=${account.keyId} code=$code",
+                    )
+                }
+                return@mapNotNull null
+            }
+            KisInvestorFlow(
+                code = code,
+                date = date,
+                individual = requireFlowAmount(row, "prsn_ntby_tr_pbmn", account, code, date),
+                foreign = requireFlowAmount(row, "frgn_ntby_tr_pbmn", account, code, date),
+                institution = requireFlowAmount(row, "orgn_ntby_tr_pbmn", account, code, date),
+            )
+        }
+    }
+
+    private fun requireFlowAmount(row: JsonNode, field: String, account: KisAccount, code: String, date: String): Long =
+        row.path(field).asText("").trim().toLongOrNull()
+            ?: throw KisClientException(
+                "inquire-investor row malformed - schema drift suspected: keyId=${account.keyId} code=$code date=$date field=$field",
+            )
+
+    private fun ratioOrNull(raw: String): BigDecimal? =
+        raw.trim().toBigDecimalOrNull()?.takeIf { it.signum() != 0 }
+
+    private fun amountOrNull(raw: String): Int? =
+        raw.trim().toBigDecimalOrNull()
+            ?.takeIf { it.signum() != 0 }
+            ?.setScale(0, RoundingMode.DOWN)
+            ?.intValueExact()
 
     fun dailyCandles(account: KisAccount, code: String, from: LocalDate, to: LocalDate): List<KisDailyCandle> {
         val json = getJson(
@@ -240,12 +330,15 @@ class KisRestClient(
         const val TR_INQUIRE_PRICE = "FHKST01010100"
         const val TR_DAILY_CHART = "FHKST03010100"
         const val TR_MINUTE_CHART = "FHKST03010200"
+        const val TR_INQUIRE_INVESTOR = "FHKST01010900"
+        private val FLOW_AMOUNT_FIELDS = listOf("prsn_ntby_tr_pbmn", "frgn_ntby_tr_pbmn", "orgn_ntby_tr_pbmn")
         const val TR_INVEST_OPINION = "FHKST663400C0"
         const val INVEST_OPINION_QUERY_CODE_LENGTH = 3
         const val INVEST_OPINION_PAGE_CAP = 100
         private const val INQUIRE_PRICE_PATH = "/uapi/domestic-stock/v1/quotations/inquire-price"
         private const val DAILY_CHART_PATH = "/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice"
         private const val MINUTE_CHART_PATH = "/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice"
+        private const val INQUIRE_INVESTOR_PATH = "/uapi/domestic-stock/v1/quotations/inquire-investor"
         private const val INVEST_OPINION_PATH = "/uapi/domestic-stock/v1/quotations/invest-opbysec"
     }
 }

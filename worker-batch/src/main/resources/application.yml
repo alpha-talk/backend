@@ -32,9 +32,15 @@ server:
 alphatalk:
   batch:
     enabled: true
+    catch-up:
+      enabled: true                           # 기동 시 오늘 크론 시각이 이미 지난 일 1회 잡을 순차 실행 (명세 §3.2) — 이미 성공했으면 잡이 스스로 스킵
+      passes: 3                               # 재확인 횟수 — 앞 프로세스가 남긴 스테일 ShedLock이 첫 패스를 통째로 스킵시킬 수 있다
+      pass-interval: 20m                      # 지평 40분 > valuation_daily의 lockAtMostFor 30분. 더 늘리면 부분 실패한 회차의 전 종목 재조회만 배가된다 (명세 §3.2)
+      stop-timeout: 5s                        # 종료 시 따라잡기 스레드를 join하는 상한 — 남은 잡은 다음 기동/크론이 회수한다
     stock-master:
       enabled: true
       cron: "0 0 8 * * *"                       # 매일 08:00 KST — 원본이 07:40경 갱신된다 (명세 §3.1)
+      retry-cron: "0 0 9,10,12 * * *"           # FAILED 회차 재실행 — 유니버스가 부분이면 valuation·investor가 그날 통째로 막힌다 (명세 §3.2). SUCCESS면 내려받지 않는다
       base-url: https://new.real.download.dws.co.kr/common/master
     dart:                                       # OpenDART 기업개황 → KSIC 업종축 (뉴스 명세 §3.6)
       enabled: true
@@ -56,6 +62,25 @@ alphatalk:
       calls-per-second: 4.0                     # 잡 자체 상한 4콜/s (명세 §3.1)
       request-interval: 250ms
       scan-limit: 500                           # 회차당 미통보 스캔 상한
+    valuation:                                  # PER·PBR·EPS·BPS + 시총 일일 적재 (명세 §3.1)
+      enabled: false                            # KIS 계정이 있는 환경에서만 켠다 — 켜면 계정 필수(fail-closed)
+      cron: "0 50 16 * * MON-FRI"               # 영업일 16:50 — 종가 확정 후, 휴장일은 잡 내부 캘린더가 스킵
+      retry-cron: "0 20 17,18 * * MON-FRI"      # 부분 실패(FAILED) 회차 재실행 — 날짜 키 스냅샷이라 당일 안에만 채울 수 있다. SUCCESS면 no-op
+      calls-per-second: 8.0                     # 전 종목 ~2,600콜 ≈ 5.5분 — 공용 gate가 계정 합산 상한을 지킨다
+      chunk-size: 200                           # 트랜잭션당 upsert 행 수 — 중단 시 부분 진행 보존
+    investor:                                   # 투자자별 순매수 확정치 일일 적재 (명세 §3.1)
+      enabled: false                            # KIS 계정이 있는 환경에서만 켠다 — 켜면 계정 필수(fail-closed)
+      cron: "0 10 17 * * MON-FRI"               # 영업일 17:10 — 장마감 후 확정치
+      retry-cron: "0 40 17,18 * * MON-FRI"      # 부분 실패(FAILED) 회차 재실행 — 전량 실패(스키마 드리프트)가 SUCCESS로 굳으면 당일 복구가 막힌다. SUCCESS면 no-op
+      calls-per-second: 8.0
+    financials:                                 # OpenDART 정기공시 → 재무 요약 (명세 §3.1)
+      enabled: false                            # DART 키가 있는 환경에서만 켠다 — 켜면 키 필수(fail-closed)
+      cron: "0 0 6 * * *"                       # 매일 06:00 — 공시 시즌 증분
+      retry-cron: "0 0 9,13,17 * * *"           # FAILED 회차 재실행 — 창 끝에서 실패한 공시는 다음 날 감지 창을 벗어난다 (명세 §3.2). SUCCESS면 no-op
+      lookback-days: 7                          # list.json 감지 창 — 잡이 며칠 실패해도 창 안에서 자가 회복
+      backfill-years: 3                         # 초기 백필 조회 창 — core-api 재무 API의 기본 3년과 맞춘다 (명세 §3.2)
+      backfill-per-run: 100                     # 회차당 백필 종목 상한 — 완료 마커(financial_backfill) 없는 종목만 대상, 며칠에 걸쳐 수렴 (0=끔)
+      failure-streak-limit: 5                   # 연속 실패가 이 수에 닿으면 회차를 FAILED로 중단 — DART 전면 장애 시 호출량 소진 방지
 
 management:
   endpoints:
