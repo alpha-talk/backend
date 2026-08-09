@@ -10,3 +10,9 @@ alphatalk:
     candle-enabled: true           # 일봉 수집 활성 — 기본 프로파일은 fail-closed(off)
     candle-sync-on-startup: true   # 로컬 기동 시 일봉 백필 1회 — stock_master 활성 종목 전체 대상, 종목당 1콜
     minute-candle-enabled: true    # 분봉 신선화 내부 API 활성 — core-api 분봉 조회가 트리거
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, metrics, prometheus   # prometheus는 로컬 전용 노출 — 운영은 별도 보호 경계 뒤에서 opt-in
