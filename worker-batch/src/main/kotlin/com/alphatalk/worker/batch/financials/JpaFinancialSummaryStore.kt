@@ -65,13 +65,23 @@ class FinancialBackfillEntity(
     val code: String = "",
     @Column(name = "window_years", nullable = false)
     var windowYears: Short = 0,
+    @Column(name = "mapper_version", nullable = false)
+    var mapperVersion: Short = 0,
     @Column(name = "completed_at", nullable = false)
     var completedAt: Instant = Instant.EPOCH,
 )
 
 interface FinancialBackfillJpaRepository : JpaRepository<FinancialBackfillEntity, String> {
-    @Query("select trim(b.code) from FinancialBackfillEntity b where b.windowYears >= :minWindowYears")
-    fun codesWithWindowAtLeast(@Param("minWindowYears") minWindowYears: Short): List<String>
+    @Query(
+        """
+        select trim(b.code) from FinancialBackfillEntity b
+        where b.windowYears >= :minWindowYears and b.mapperVersion >= :minMapperVersion
+        """,
+    )
+    fun codesMarkedAtLeast(
+        @Param("minWindowYears") minWindowYears: Short,
+        @Param("minMapperVersion") minMapperVersion: Short,
+    ): List<String>
 }
 
 interface FinancialCorpMapJpaRepository : JpaRepository<DartCorpMapEntity, String> {
@@ -106,14 +116,28 @@ class JpaFinancialSummaryStore(
     private val backfills: FinancialBackfillJpaRepository,
     private val entityManager: EntityManager,
 ) : FinancialSummaryStore {
-    override fun backfilledCodes(minWindowYears: Int): Set<String> =
-        backfills.codesWithWindowAtLeast(minWindowYears.toShort()).toSet()
+    override fun backfilledCodes(atLeast: BackfillMarker): Set<String> =
+        backfills.codesMarkedAtLeast(atLeast.windowYears.toShort(), atLeast.mapperVersion.toShort()).toSet()
 
     @Transactional
-    override fun completeBackfill(code: String, windowYears: Int, rows: List<FinancialSummaryRow>, completedAt: Instant) {
+    override fun completeBackfill(
+        code: String,
+        marker: BackfillMarker,
+        rows: List<FinancialSummaryRow>,
+        obsolete: List<ReportKey>,
+        completedAt: Instant,
+    ) {
+        obsolete.forEach { key ->
+            repository.deleteById(FinancialSummaryId(code = code, year = key.year.toShort(), reprtCode = key.reprtCode))
+        }
         rows.forEach(::upsert)
         backfills.save(
-            FinancialBackfillEntity(code = code, windowYears = windowYears.toShort(), completedAt = completedAt),
+            FinancialBackfillEntity(
+                code = code,
+                windowYears = marker.windowYears.toShort(),
+                mapperVersion = marker.mapperVersion.toShort(),
+                completedAt = completedAt,
+            ),
         )
     }
 

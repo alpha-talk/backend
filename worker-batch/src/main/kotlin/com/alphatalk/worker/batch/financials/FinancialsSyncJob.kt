@@ -35,6 +35,7 @@ open class FinancialsSyncJob(
     private val lookbackDays: Long = 7,
     private val backfillYears: Long = 3,
     private val backfillPerRun: Int = 100,
+    private val mapperVersion: Int = FinancialAccountMapper.MAPPING_VERSION,
     private val failureStreakLimit: Int = 5,
     private val prerequisiteJob: String? = StockMasterSyncJob.JOB_NAME,
     private val requestInterval: Duration = Duration.ofMillis(50),
@@ -157,7 +158,7 @@ open class FinancialsSyncJob(
             }
             when (outcome) {
                 is BackfillOutcome.Done -> {
-                    store.completeBackfill(code, backfillYears.toInt(), outcome.rows, clock())
+                    store.completeBackfill(code, currentMarker(), outcome.rows, outcome.obsolete, clock())
                     tally.stored += outcome.rows.size
                     tally.streak = 0
                 }
@@ -216,7 +217,9 @@ open class FinancialsSyncJob(
                 }
             }
         }
-        return BackfillOutcome.Done(rows)
+        val resolved = rows.mapTo(mutableSetOf()) { ReportKey(it.year, it.reprtCode) }
+        val obsolete = targets.map { ReportKey(it.year, it.reprtCode) }.filter { it !in resolved }
+        return BackfillOutcome.Done(rows, obsolete)
     }
 
     private fun backfillTargetsFor(code: String, corpCode: String, date: LocalDate, deadlineAt: Instant): List<FinancialTarget>? {
@@ -243,7 +246,7 @@ open class FinancialsSyncJob(
 
     private fun backfillCandidates(active: Set<String>, date: LocalDate): List<Pair<String, String>> {
         if (backfillPerRun <= 0) return emptyList()
-        val missing = (active - store.backfilledCodes(backfillYears.toInt())).sorted()
+        val missing = (active - store.backfilledCodes(currentMarker())).sorted()
         if (missing.isEmpty()) return emptyList()
         val corpByCode = corps.corpCodesFor(missing)
         val mapped = missing.mapNotNull { code -> corpByCode[code]?.let { code to it } }
@@ -377,6 +380,9 @@ open class FinancialsSyncJob(
     private fun isFatal(status: String): Boolean =
         status in FATAL_STATUSES || status.toIntOrNull()?.let { it == 429 || it in 500..599 } == true
 
+    private fun currentMarker(): BackfillMarker =
+        BackfillMarker(windowYears = backfillYears.toInt(), mapperVersion = mapperVersion)
+
     private fun disclosedAt(receiptDate: String): Instant =
         LocalDate.parse(receiptDate, DateTimeFormatter.BASIC_ISO_DATE).atStartOfDay(SEOUL).toInstant()
 
@@ -405,7 +411,7 @@ open class FinancialsSyncJob(
     }
 
     private sealed interface BackfillOutcome {
-        data class Done(val rows: List<FinancialSummaryRow>) : BackfillOutcome
+        data class Done(val rows: List<FinancialSummaryRow>, val obsolete: List<ReportKey>) : BackfillOutcome
         data object StockFailed : BackfillOutcome
         data object DeadlineReached : BackfillOutcome
     }

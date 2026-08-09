@@ -16,6 +16,8 @@ data class FinancialFigures(
 }
 
 object FinancialAccountMapper {
+    const val MAPPING_VERSION = 1
+
     private const val KRW = "KRW"
     private val BALANCE_SHEET = setOf("BS")
     private val INCOME_STATEMENT = setOf("IS", "CIS")

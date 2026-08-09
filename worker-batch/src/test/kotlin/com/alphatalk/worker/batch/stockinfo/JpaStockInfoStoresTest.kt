@@ -1,5 +1,6 @@
 package com.alphatalk.worker.batch.stockinfo
 
+import com.alphatalk.worker.batch.financials.BackfillMarker
 import com.alphatalk.worker.batch.financials.FinancialBackfillJpaRepository
 import com.alphatalk.worker.batch.financials.FinancialCorpMapJpaRepository
 import com.alphatalk.worker.batch.financials.FinancialFigures
@@ -132,11 +133,11 @@ class JpaStockInfoStoresTest {
         corpMap.save(DartCorpMapEntity(corpCode = "00126380", code = "005930", corpName = "삼성전자"))
         corpMap.save(DartCorpMapEntity(corpCode = "00164742", code = null, corpName = "비상장사"))
 
-        assertEquals(emptySet<String>(), financialStore.backfilledCodes(3))
+        assertEquals(emptySet<String>(), financialStore.backfilledCodes(BackfillMarker(3, 1)))
         financialStore.completeBackfill(
             "005930",
-            3,
-            listOf(
+            BackfillMarker(3, 1),
+            rows = listOf(
                 FinancialSummaryRow(
                     code = "005930",
                     year = 2023,
@@ -146,10 +147,12 @@ class JpaStockInfoStoresTest {
                     disclosedAt = Instant.parse("2024-03-09T15:00:00Z"),
                 ),
             ),
-            Instant.parse("2026-08-07T00:00:00Z"),
+            obsolete = emptyList(),
+            completedAt = Instant.parse("2026-08-07T00:00:00Z"),
         )
-        assertEquals(setOf("005930"), financialStore.backfilledCodes(3))
-        assertEquals(emptySet<String>(), financialStore.backfilledCodes(5))
+        assertEquals(setOf("005930"), financialStore.backfilledCodes(BackfillMarker(3, 1)))
+        assertEquals(emptySet<String>(), financialStore.backfilledCodes(BackfillMarker(5, 1)))
+        assertEquals(emptySet<String>(), financialStore.backfilledCodes(BackfillMarker(3, 2)))
         assertTrue(financials.findAll().any { it.id.code.trim() == "005930" && it.id.year.toInt() == 2023 })
         assertEquals(mapOf("005930" to "00126380"), corpDirectory.corpCodesFor(listOf("005930", "000660")))
     }
