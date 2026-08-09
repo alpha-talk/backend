@@ -54,7 +54,7 @@ class HttpDartClient(
         )
     }
 
-    override fun periodicDisclosures(begin: LocalDate, end: LocalDate): List<DartDisclosure> {
+    override fun periodicDisclosures(begin: LocalDate, end: LocalDate, corpCode: String?): List<DartDisclosure> {
         val disclosures = mutableListOf<DartDisclosure>()
         var page = 1
         while (true) {
@@ -62,6 +62,7 @@ class HttpDartClient(
                 "$baseUrl/list.json?crtfc_key=$apiKey" +
                     "&bgn_de=${begin.format(DateTimeFormatter.BASIC_ISO_DATE)}" +
                     "&end_de=${end.format(DateTimeFormatter.BASIC_ISO_DATE)}" +
+                    (corpCode?.let { "&corp_code=$it" } ?: "") +
                     "&pblntf_ty=$PERIODIC_DISCLOSURE_TYPE&page_no=$page&page_count=$LIST_PAGE_SIZE",
                 HttpResponse.BodyHandlers.ofString(),
             )

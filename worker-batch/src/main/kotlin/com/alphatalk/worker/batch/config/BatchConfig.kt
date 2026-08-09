@@ -21,6 +21,7 @@ import com.alphatalk.worker.batch.kis.RedisKisTokenStore
 import com.alphatalk.worker.batch.master.MasterFileFetcher
 import com.alphatalk.worker.batch.master.StockMasterStore
 import com.alphatalk.worker.batch.master.StockMasterSyncJob
+import com.alphatalk.worker.batch.financials.CorpDirectory
 import com.alphatalk.worker.batch.financials.FinancialSummaryStore
 import com.alphatalk.worker.batch.financials.FinancialsSyncJob
 import com.alphatalk.worker.batch.opinion.InvestOpinionStore
@@ -220,6 +221,7 @@ class BatchConfig {
         props: BatchProperties,
         universe: StockUniverse,
         store: FinancialSummaryStore,
+        corps: CorpDirectory,
         runs: BatchJobRunStore,
         meters: MeterRegistry,
         mapper: ObjectMapper,
@@ -233,9 +235,13 @@ class BatchConfig {
             dart = client,
             universe = universe,
             store = store,
+            corps = corps,
             runs = runs,
             meters = meters,
             lookbackDays = props.financials.lookbackDays,
+            backfillYears = props.financials.backfillYears,
+            backfillPerRun = props.financials.backfillPerRun,
+            failureStreakLimit = props.financials.failureStreakLimit,
             prerequisiteJob = masterJobNameIfEnabled(master),
             requestInterval = props.dart.requestInterval,
         )

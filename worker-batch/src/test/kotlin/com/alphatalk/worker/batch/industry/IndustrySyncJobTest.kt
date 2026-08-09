@@ -335,8 +335,11 @@ class IndustrySyncJobTest {
 
         override fun corpCodes(): List<DartCorp> = corps
 
-        override fun periodicDisclosures(begin: java.time.LocalDate, end: java.time.LocalDate): List<DartDisclosure> =
-            emptyList()
+        override fun periodicDisclosures(
+            begin: java.time.LocalDate,
+            end: java.time.LocalDate,
+            corpCode: String?,
+        ): List<DartDisclosure> = emptyList()
 
         override fun financialAccounts(
             corpCode: String,

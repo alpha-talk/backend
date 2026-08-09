@@ -13,4 +13,12 @@ data class FinancialSummaryRow(
 
 interface FinancialSummaryStore {
     fun upsert(row: FinancialSummaryRow)
+
+    fun upsertAll(rows: List<FinancialSummaryRow>)
+
+    fun codesWithRowOnOrBefore(year: Int): Set<String>
+}
+
+interface CorpDirectory {
+    fun corpCodesFor(codes: Collection<String>): Map<String, String>
 }
