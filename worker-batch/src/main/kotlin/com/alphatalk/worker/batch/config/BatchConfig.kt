@@ -115,7 +115,7 @@ class BatchConfig {
     }
 
     @Bean
-    @ConditionalOnProperty("alphatalk.batch.opinion.enabled", havingValue = "true")
+    @ConditionalOnExpression(OPINION_JOB_ENABLED)
     fun investOpinionSyncJob(
         props: BatchProperties,
         tokens: KisTokenManager,
@@ -299,6 +299,9 @@ class BatchConfig {
     }
 
     companion object {
+        private const val OPINION_JOB_ENABLED =
+            "\${alphatalk.batch.enabled:true} and \${alphatalk.batch.opinion.enabled:false}"
+
         private const val KIS_JOB_ENABLED =
             "\${alphatalk.batch.opinion.enabled:false} or \${alphatalk.batch.valuation.enabled:false}" +
                 " or \${alphatalk.batch.investor.enabled:false}"
