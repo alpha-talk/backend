@@ -2,6 +2,7 @@ package com.alphatalk.worker.batch.stockinfo
 
 import com.alphatalk.kis.rest.KisInvestorFlow
 import com.alphatalk.worker.batch.job.BatchJobRunStore
+import com.alphatalk.worker.batch.master.StockMasterSyncJob
 import io.micrometer.core.instrument.MeterRegistry
 import net.javacrumbs.shedlock.spring.annotation.SchedulerLock
 import org.slf4j.LoggerFactory
@@ -24,6 +25,7 @@ open class InvestorFlowSyncJob(
     private val runs: BatchJobRunStore,
     private val meters: MeterRegistry,
     private val holidays: Set<LocalDate> = emptySet(),
+    private val prerequisiteJob: String? = StockMasterSyncJob.JOB_NAME,
     private val deadline: Duration = Duration.ofMinutes(25),
     private val clock: () -> Instant = Instant::now,
     private val today: () -> LocalDate = { LocalDate.now(SEOUL) },
@@ -46,6 +48,11 @@ open class InvestorFlowSyncJob(
             return 0
         }
         try {
+            if (prerequisiteJob != null && !runs.hasSucceeded(prerequisiteJob, runDate)) {
+                log.error("investor flow sync refuses a stale universe: {} has no SUCCESS today", prerequisiteJob)
+                runs.failCounted(runId, 0, 0, "$prerequisiteJob has no SUCCESS today", clock())
+                return 0
+            }
             val stocks = universe.activeStocks()
             if (stocks.isEmpty()) {
                 log.error("investor flow sync has no universe: stock_master is empty - stock_master_sync must land first")

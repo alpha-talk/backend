@@ -40,6 +40,7 @@ alphatalk:
     stock-master:
       enabled: true
       cron: "0 0 8 * * *"                       # 매일 08:00 KST — 원본이 07:40경 갱신된다 (명세 §3.1)
+      retry-cron: "0 0 9,10,12 * * *"           # FAILED 회차 재실행 — 유니버스가 부분이면 valuation·investor가 그날 통째로 막힌다 (명세 §3.2). SUCCESS면 내려받지 않는다
       base-url: https://new.real.download.dws.co.kr/common/master
     dart:                                       # OpenDART 기업개황 → KSIC 업종축 (뉴스 명세 §3.6)
       enabled: true
@@ -74,6 +75,7 @@ alphatalk:
     financials:                                 # OpenDART 정기공시 → 재무 요약 (명세 §3.1)
       enabled: false                            # DART 키가 있는 환경에서만 켠다 — 켜면 키 필수(fail-closed)
       cron: "0 0 6 * * *"                       # 매일 06:00 — 공시 시즌 증분
+      retry-cron: "0 0 9,13,17 * * *"           # FAILED 회차 재실행 — 창 끝에서 실패한 공시는 다음 날 감지 창을 벗어난다 (명세 §3.2). SUCCESS면 no-op
       lookback-days: 7                          # list.json 감지 창 — 잡이 며칠 실패해도 창 안에서 자가 회복
 
 management:

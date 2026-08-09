@@ -181,6 +181,71 @@ class FinancialsSyncJobTest {
     }
 
     @Test
+    fun `마스터가 오늘 실패로 남아 있으면 유예한다 - 부분 유니버스로 SUCCESS를 굳히지 않는다`() {
+        runs.failedJobs += "stock_master_sync"
+        val dart = StubDart(listOf(disclosure()), mapOf("00126380:CFS" to cfsAccounts))
+
+        val stored = job(dart).syncOnce()
+
+        assertEquals(0, stored)
+        assertEquals(listOf("FAILED"), runs.finished)
+        assertTrue(dart.requested.isEmpty())
+    }
+
+    @Test
+    fun `마스터 행이 아직 없으면 진행한다 - 06시 정규 회차는 마스터보다 이르다`() {
+        val dart = StubDart(listOf(disclosure()), mapOf("00126380:CFS" to cfsAccounts))
+
+        val stored = job(dart).syncOnce()
+
+        assertEquals(1, stored)
+        assertEquals(listOf("SUCCESS"), runs.finished)
+    }
+
+    @Test
+    fun `재실행 진입점도 이미 성공한 날은 조회하지 않는다`() {
+        val dart = StubDart(listOf(disclosure()), mapOf("00126380:CFS" to cfsAccounts))
+        val skipping = object : BatchJobRunStore {
+            override fun start(job: String, runDate: String, startedAt: Instant): Long? = null
+            override fun restart(job: String, runDate: String, startedAt: Instant): Long = 1L
+            override fun succeed(id: Long, okCount: Int, failCount: Int, finishedAt: Instant) = Unit
+            override fun fail(id: Long, error: String, finishedAt: Instant) = Unit
+        }
+        val job = FinancialsSyncJob(
+            dart = dart,
+            universe = universe(setOf("005930")),
+            store = store,
+            runs = skipping,
+            meters = meters,
+            requestInterval = Duration.ZERO,
+            today = { today },
+            pause = {},
+        )
+
+        job.scheduledRetry()
+
+        assertTrue(dart.requested.isEmpty())
+    }
+
+    @Test
+    fun `재시도까지 실패한 공시가 남으면 FAILED다 - 다음 날엔 감지 창을 벗어난다`() {
+        val dart = object : StubDart(listOf(disclosure()), emptyMap()) {
+            override fun financialAccounts(
+                corpCode: String,
+                year: Int,
+                reprtCode: String,
+                fsDiv: String,
+            ): List<DartFinancialAccount> = throw DartApiException("unknown", "timeout")
+        }
+
+        val stored = job(dart).syncOnce()
+
+        assertEquals(0, stored)
+        assertEquals(listOf("FAILED"), runs.finished)
+        assertEquals(1, runs.lastFailCount)
+    }
+
+    @Test
     fun `감지한 보고서 코드 그대로만 조회한다 - 다른 분기로 대체하지 않는다`() {
         val dart = StubDart(listOf(disclosure(name = "분기보고서 (2026.09)")), emptyMap())
 
@@ -291,6 +356,7 @@ class FinancialsSyncJobTest {
 
     private class FakeRuns : BatchJobRunStore {
         val finished = mutableListOf<String>()
+        val failedJobs = mutableSetOf<String>()
         var lastFailCount = -1
 
         override fun start(job: String, runDate: String, startedAt: Instant): Long = 1L
@@ -304,6 +370,13 @@ class FinancialsSyncJobTest {
         override fun fail(id: Long, error: String, finishedAt: Instant) {
             finished += "FAILED"
         }
+
+        override fun failCounted(id: Long, okCount: Int, failCount: Int, error: String, finishedAt: Instant) {
+            finished += "FAILED"
+            lastFailCount = failCount
+        }
+
+        override fun hasFailedRun(job: String, runDate: String): Boolean = job in failedJobs
     }
 
     private class FakeFinancialStore : FinancialSummaryStore {

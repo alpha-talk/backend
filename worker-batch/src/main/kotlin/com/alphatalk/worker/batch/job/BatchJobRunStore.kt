@@ -11,4 +11,8 @@ interface BatchJobRunStore {
     fun failCounted(id: Long, okCount: Int, failCount: Int, error: String, finishedAt: Instant) {
         fail(id, error, finishedAt)
     }
+
+    fun hasSucceeded(job: String, runDate: String): Boolean = true
+
+    fun hasFailedRun(job: String, runDate: String): Boolean = false
 }

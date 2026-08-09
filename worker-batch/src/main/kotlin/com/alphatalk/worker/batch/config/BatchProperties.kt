@@ -21,6 +21,7 @@ data class BatchProperties(
         val enabled: Boolean = true,
         val baseUrl: String = KisMasterClient.DEFAULT_BASE_URL,
         val cron: String = "0 0 8 * * *",
+        val retryCron: String = "0 0 9,10,12 * * *",
     )
 
     data class CatchUp(
@@ -58,6 +59,7 @@ data class BatchProperties(
     data class Financials(
         val enabled: Boolean = false,
         val cron: String = "0 0 6 * * *",
+        val retryCron: String = "0 0 9,13,17 * * *",
         val lookbackDays: Long = 7,
     )
 

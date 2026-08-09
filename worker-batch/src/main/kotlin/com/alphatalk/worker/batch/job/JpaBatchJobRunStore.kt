@@ -166,6 +166,14 @@ class JpaBatchJobRunStore(
         repository.finishWithErrorCounted(id, FAILED, okCount, failCount, error.take(ERROR_MAX_LENGTH), finishedAt)
     }
 
+    @Transactional(readOnly = true)
+    override fun hasSucceeded(job: String, runDate: String): Boolean =
+        repository.findByJobAndRunDate(job, runDate)?.status == SUCCESS
+
+    @Transactional(readOnly = true)
+    override fun hasFailedRun(job: String, runDate: String): Boolean =
+        repository.findByJobAndRunDate(job, runDate)?.let { it.status != SUCCESS } ?: false
+
     private fun insertRunning(job: String, runDate: String, startedAt: Instant): Long? =
         try {
             repository.save(

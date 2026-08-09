@@ -15,8 +15,10 @@ import org.testcontainers.junit.jupiter.Testcontainers
 import java.time.Instant
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 
 @DataJpaTest(properties = ["spring.liquibase.change-log=classpath:db/changelog/db.changelog-master.yaml"])
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
@@ -73,6 +75,21 @@ class JpaBatchJobRunStoreTest {
         assertEquals(100, row.failCount)
         assertEquals("partial failure: failed=100", row.error)
         assertNotNull(runs.start("valuation_daily", "20260807", Instant.now()))
+    }
+
+    @Test
+    fun `선행 성공 판정은 오늘 SUCCESS 행을 요구한다 - 행이 없으면 성공이 아니다`() {
+        assertFalse(runs.hasSucceeded("stock_master_sync", "20260807"))
+
+        val id = runs.start("stock_master_sync", "20260807", Instant.now())
+        assertNotNull(id)
+        assertFalse(runs.hasSucceeded("stock_master_sync", "20260807"))
+
+        runs.failCounted(id, 3, 1, "partial universe", Instant.now())
+        assertFalse(runs.hasSucceeded("stock_master_sync", "20260807"))
+
+        runs.succeed(id, 3, 1, Instant.now())
+        assertTrue(runs.hasSucceeded("stock_master_sync", "20260807"))
     }
 
     @Test
