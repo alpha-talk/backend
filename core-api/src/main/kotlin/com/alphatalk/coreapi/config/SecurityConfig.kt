@@ -8,6 +8,8 @@ import com.alphatalk.coreapi.support.ErrorCode
 import com.fasterxml.jackson.databind.ObjectMapper
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
+import org.springframework.core.env.Environment
+import org.springframework.core.env.Profiles
 import org.springframework.http.MediaType
 import org.springframework.security.config.annotation.web.builders.HttpSecurity
 import org.springframework.security.config.annotation.web.configurers.AbstractHttpConfigurer
@@ -27,6 +29,7 @@ class SecurityConfig {
         http: HttpSecurity,
         verifier: TokenVerifier,
         mapper: ObjectMapper,
+        environment: Environment,
     ): SecurityFilterChain = http
         .csrf { it.disable() }
         .httpBasic { it.disable() }
@@ -34,7 +37,10 @@ class SecurityConfig {
         .sessionManagement { it.sessionCreationPolicy(SessionCreationPolicy.STATELESS) }
         .authorizeHttpRequests {
             it.requestMatchers(*PUBLIC_PATHS).permitAll()
-                .anyRequest().authenticated()
+            if (environment.acceptsProfiles(Profiles.of("local"))) {
+                it.requestMatchers("/actuator/prometheus").permitAll()
+            }
+            it.anyRequest().authenticated()
         }
         .exceptionHandling { handling ->
             handling.authenticationEntryPoint { _, response, _ ->

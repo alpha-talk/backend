@@ -1,4 +1,5 @@
 # 로컬 개발 인프라 — Redis(ws·워커) · PostgreSQL+pgvector(뉴스 워커·core-api).
+# 모니터링(Prometheus·Grafana)은 monitoring 프로파일 opt-in: docker compose --profile monitoring up -d
 services:
   redis:
     image: redis:7-alpine
@@ -25,3 +26,41 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    container_name: alphatalk-prometheus
+    profiles: ["monitoring"]
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./infra/monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # 앱은 호스트(bootRun)에서 뜬다 — Linux 호환용, macOS는 기본 제공
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/healthy"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  grafana:
+    image: grafana/grafana:11.6.1
+    container_name: alphatalk-grafana
+    profiles: ["monitoring"]
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin       # 로컬 전용 — 운영 배포 시 시크릿 주입으로 교체
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./infra/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+
+volumes:
+  prometheus-data:
+  grafana-data:
