@@ -189,6 +189,21 @@ class KisRestClientTest {
     }
 
     @Test
+    fun `날짜 없는 행에 금액이 있으면 날짜 필드 드리프트로 보고 예외를 던진다`() {
+        server.enqueue("/oauth2/tokenP", 200, tokenBody("T1"))
+        server.enqueue(
+            "/uapi/domestic-stock/v1/quotations/inquire-investor",
+            200,
+            """
+            {"rt_cd":"0","msg_cd":"MCA00000","output":[
+              {"bsop_date":"20260807","prsn_ntby_tr_pbmn":"-12000","frgn_ntby_tr_pbmn":"8000","orgn_ntby_tr_pbmn":"4000"}]}
+            """.trimIndent(),
+        )
+
+        assertFailsWith<KisClientException> { client.investorFlows(account, "005930") }
+    }
+
+    @Test
     fun `날짜가 있는 행의 금액 결측은 스키마 드리프트로 보고 예외를 던진다 - 0행 적재가 성공으로 굳지 않게`() {
         server.enqueue("/oauth2/tokenP", 200, tokenBody("T1"))
         server.enqueue(
