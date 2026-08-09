@@ -166,6 +166,17 @@ class ValuationSyncJobTest {
     }
 
     @Test
+    fun `오늘 마스터 동기화가 온전하지 않으면 부분 유니버스를 처리하지 않는다`() {
+        runs.unsucceededJobs += "stock_master_sync"
+
+        val stored = job(fetcher = { snapshot(it) }).syncOnce()
+
+        assertEquals(0, stored)
+        assertEquals(listOf("FAILED"), runs.finished)
+        assertTrue(store.rows.isEmpty())
+    }
+
+    @Test
     fun `유니버스가 비면 FAILED다 - 선행 마스터 동기화 부재는 성공이 아니다`() {
         val stored = job(fetcher = { snapshot(it) }, stocks = emptyList()).syncOnce()
 
@@ -194,8 +205,11 @@ internal class FakeValuationStore : ValuationStore {
 
 internal class FakeRuns : BatchJobRunStore {
     val finished = mutableListOf<String>()
+    val unsucceededJobs = mutableSetOf<String>()
     var lastOkCount = -1
     var lastFailCount = -1
+
+    override fun hasSucceeded(job: String, runDate: String): Boolean = job !in unsucceededJobs
 
     override fun start(job: String, runDate: String, startedAt: Instant): Long = 1L
     override fun restart(job: String, runDate: String, startedAt: Instant): Long = 1L

@@ -14,7 +14,12 @@ import org.testcontainers.utility.DockerImageName
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 
-@SpringBootTest(properties = ["alphatalk.batch.stock-master.cron=-"])
+@SpringBootTest(
+    properties = [
+        "alphatalk.batch.stock-master.cron=-",
+        "alphatalk.batch.stock-master.retry-cron=-",
+    ],
+)
 @Testcontainers(disabledWithoutDocker = true)
 class BatchWorkerApplicationTest {
     companion object {

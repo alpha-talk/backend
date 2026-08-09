@@ -4,6 +4,7 @@ import com.alphatalk.worker.batch.industry.DartApiException
 import com.alphatalk.worker.batch.industry.DartClient
 import com.alphatalk.worker.batch.industry.DartFinancialAccount
 import com.alphatalk.worker.batch.job.BatchJobRunStore
+import com.alphatalk.worker.batch.master.StockMasterSyncJob
 import com.alphatalk.worker.batch.stockinfo.StockUniverse
 import io.micrometer.core.instrument.MeterRegistry
 import net.javacrumbs.shedlock.spring.annotation.SchedulerLock
@@ -30,6 +31,7 @@ open class FinancialsSyncJob(
     private val runs: BatchJobRunStore,
     private val meters: MeterRegistry,
     private val lookbackDays: Long = 7,
+    private val prerequisiteJob: String? = StockMasterSyncJob.JOB_NAME,
     private val requestInterval: Duration = Duration.ofMillis(50),
     private val deadline: Duration = Duration.ofMinutes(100),
     private val clock: () -> Instant = Instant::now,
@@ -44,6 +46,12 @@ open class FinancialsSyncJob(
         syncOnce()
     }
 
+    @Scheduled(cron = "\${alphatalk.batch.financials.retry-cron:0 0 9,13,17 * * *}", zone = "Asia/Seoul")
+    @SchedulerLock(name = JOB_NAME, lockAtMostFor = "PT2H", lockAtLeastFor = "PT1M")
+    open fun scheduledRetry() {
+        syncOnce()
+    }
+
     fun syncOnce(): Int {
         val date = today()
         val runDate = date.format(DateTimeFormatter.BASIC_ISO_DATE)
@@ -53,6 +61,11 @@ open class FinancialsSyncJob(
             return 0
         }
         try {
+            if (prerequisiteJob != null && runs.hasFailedRun(prerequisiteJob, runDate)) {
+                log.error("financials sync defers: {} ran today but is not SUCCESS - universe may be partial", prerequisiteJob)
+                runs.failCounted(runId, 0, 0, "$prerequisiteJob incomplete today", clock())
+                return 0
+            }
             val deadlineAt = clock().plus(deadline)
             val targets = detectTargets(date)
             var stored = 0
@@ -83,9 +96,19 @@ open class FinancialsSyncJob(
                 }
             }
             meters.counter("batch.financials.synced").increment(stored.toDouble())
-            if (failCount > 0) meters.counter("batch.financials.failed").increment(failCount.toDouble())
-            runs.succeed(runId, stored, failCount, clock())
-            log.info("financials sync done: targets={} stored={} failed={}", targets.size, stored, failCount)
+            if (failCount > 0) {
+                meters.counter("batch.financials.failed").increment(failCount.toDouble())
+                runs.failCounted(runId, stored, failCount, "unresolved targets=$failCount", clock())
+                log.error(
+                    "financials sync left targets unresolved - they leave the {}d detection window on later runs. stored={} failed={}",
+                    lookbackDays,
+                    stored,
+                    failCount,
+                )
+                return stored
+            }
+            runs.succeed(runId, stored, 0, clock())
+            log.info("financials sync done: targets={} stored={}", targets.size, stored)
             return stored
         } catch (e: Exception) {
             runs.fail(runId, e.toString(), clock())

@@ -163,6 +163,7 @@ class BatchConfig {
         store: ValuationStore,
         runs: BatchJobRunStore,
         meters: MeterRegistry,
+        master: ObjectProvider<StockMasterSyncJob>,
     ): ValuationSyncJob {
         val account = requireAccount(props, "alphatalk.batch.valuation.enabled")
         val rest = KisRestClient(
@@ -178,6 +179,7 @@ class BatchConfig {
             runs = runs,
             meters = meters,
             holidays = props.holidays.map(LocalDate::parse).toSet(),
+            prerequisiteJob = masterJobNameIfEnabled(master),
             chunkSize = props.valuation.chunkSize,
         )
     }
@@ -192,6 +194,7 @@ class BatchConfig {
         store: InvestorFlowStore,
         runs: BatchJobRunStore,
         meters: MeterRegistry,
+        master: ObjectProvider<StockMasterSyncJob>,
     ): InvestorFlowSyncJob {
         val account = requireAccount(props, "alphatalk.batch.investor.enabled")
         val rest = KisRestClient(
@@ -207,6 +210,7 @@ class BatchConfig {
             runs = runs,
             meters = meters,
             holidays = props.holidays.map(LocalDate::parse).toSet(),
+            prerequisiteJob = masterJobNameIfEnabled(master),
         )
     }
 
@@ -219,6 +223,7 @@ class BatchConfig {
         runs: BatchJobRunStore,
         meters: MeterRegistry,
         mapper: ObjectMapper,
+        master: ObjectProvider<StockMasterSyncJob>,
     ): FinancialsSyncJob {
         check(props.dart.apiKey.isNotBlank()) {
             "alphatalk.batch.financials.enabled=true에는 DART API 키가 필요하다"
@@ -231,6 +236,7 @@ class BatchConfig {
             runs = runs,
             meters = meters,
             lookbackDays = props.financials.lookbackDays,
+            prerequisiteJob = masterJobNameIfEnabled(master),
             requestInterval = props.dart.requestInterval,
         )
     }
@@ -269,6 +275,9 @@ class BatchConfig {
             stopTimeout = props.catchUp.stopTimeout,
         )
     }
+
+    private fun masterJobNameIfEnabled(master: ObjectProvider<StockMasterSyncJob>): String? =
+        master.ifAvailable?.let { StockMasterSyncJob.JOB_NAME }
 
     private fun requireAccount(props: BatchProperties, flag: String): KisAccount {
         val accounts = parseAccounts(props.kis.accountsJson)
