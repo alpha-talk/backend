@@ -53,6 +53,7 @@ data class BatchProperties(
     data class Investor(
         val enabled: Boolean = false,
         val cron: String = "0 10 17 * * MON-FRI",
+        val retryCron: String = "0 40 17,18 * * MON-FRI",
         val callsPerSecond: Double = 8.0,
     )
 

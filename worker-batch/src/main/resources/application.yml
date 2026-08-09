@@ -71,6 +71,7 @@ alphatalk:
     investor:                                   # 투자자별 순매수 확정치 일일 적재 (명세 §3.1)
       enabled: false                            # KIS 계정이 있는 환경에서만 켠다 — 켜면 계정 필수(fail-closed)
       cron: "0 10 17 * * MON-FRI"               # 영업일 17:10 — 장마감 후 확정치
+      retry-cron: "0 40 17,18 * * MON-FRI"      # 부분 실패(FAILED) 회차 재실행 — 전량 실패(스키마 드리프트)가 SUCCESS로 굳으면 당일 복구가 막힌다. SUCCESS면 no-op
       calls-per-second: 8.0
     financials:                                 # OpenDART 정기공시 → 재무 요약 (명세 §3.1)
       enabled: false                            # DART 키가 있는 환경에서만 켠다 — 켜면 키 필수(fail-closed)

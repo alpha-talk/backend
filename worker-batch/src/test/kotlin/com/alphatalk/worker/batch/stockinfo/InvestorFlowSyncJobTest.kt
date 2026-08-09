@@ -46,22 +46,29 @@ class InvestorFlowSyncJobTest {
     }
 
     @Test
-    fun `실패 종목은 말미에 1회 재시도하고 잔여 실패는 fail_count로 남긴다`() {
+    fun `잔여 실패는 FAILED로 남겨 당일 재실행이 채울 수 있게 한다 - 전량 실패가 SUCCESS로 굳지 않게`() {
         val attempts = mutableMapOf<String, Int>()
-        val stored = job(
-            fetcher = { code ->
-                attempts.merge(code, 1, Int::plus)
-                when {
-                    code == "005930" && attempts.getValue(code) == 1 -> throw IllegalStateException("transient")
-                    code == "000660" -> throw IllegalStateException("permanent")
-                    else -> flows(code)
-                }
-            },
-        ).syncOnce()
+        var brokenCode: String? = "000660"
+        val fetcher = InvestorFlowFetcher { code ->
+            attempts.merge(code, 1, Int::plus)
+            when {
+                code == "005930" && attempts.getValue(code) == 1 -> throw IllegalStateException("transient")
+                code == brokenCode -> throw IllegalStateException("schema drift")
+                else -> flows(code)
+            }
+        }
+
+        val stored = job(fetcher = fetcher).syncOnce()
 
         assertEquals(2, stored)
         assertEquals(1, runs.lastFailCount)
-        assertEquals(listOf("SUCCESS"), runs.finished)
+        assertEquals(listOf("FAILED"), runs.finished)
+
+        brokenCode = null
+        job(fetcher = fetcher).syncOnce()
+
+        assertEquals(listOf("FAILED", "SUCCESS"), runs.finished)
+        assertTrue(store.rows.any { it.code == "000660" })
     }
 
     @Test
