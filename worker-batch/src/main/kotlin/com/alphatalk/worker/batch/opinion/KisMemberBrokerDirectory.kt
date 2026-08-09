@@ -34,16 +34,20 @@ class KisMemberBrokerDirectory(
             throw e
         }
         val brokers = parsed.members.filterNot { it.aggregate }.map { Broker(it.code, it.name) }
-        check(brokers.isNotEmpty()) { "KIS 회원사 마스터가 비어 있다 (skipped=${parsed.skippedLines})" }
-        if (parsed.skippedLines > 0) {
+        if (brokers.isEmpty() || parsed.skippedLines > 0) {
             if (previous != null) {
                 log.warn(
-                    "member master refresh is partial (skipped={}), keeping list from {}",
-                    parsed.skippedLines, previous.date,
+                    "member master refresh is incomplete (brokers={} skipped={}), keeping list from {}",
+                    brokers.size, parsed.skippedLines, previous.date,
                 )
                 return previous.brokers
             }
-            log.warn("member master is partial with no previous list, using it anyway: skipped={}", parsed.skippedLines)
+            check(brokers.isNotEmpty()) { "KIS 회원사 마스터가 비어 있다 (skipped=${parsed.skippedLines})" }
+            log.warn(
+                "member master is partial with no previous list, using it without caching: skipped={}",
+                parsed.skippedLines,
+            )
+            return brokers
         }
         cached = Cached(date, brokers)
         return brokers
