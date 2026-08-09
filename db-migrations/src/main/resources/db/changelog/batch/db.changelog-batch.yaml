@@ -55,3 +55,10 @@ databaseChangeLog:
         - sqlFile:
             path: sql/0008_financial_backfill.sql
             relativeToChangelogFile: true
+  - changeSet:
+      id: 0009-financial-backfill-mapper-version
+      author: worker-batch
+      changes:
+        - sqlFile:
+            path: sql/0009_financial_backfill_mapper_version.sql
+            relativeToChangelogFile: true
