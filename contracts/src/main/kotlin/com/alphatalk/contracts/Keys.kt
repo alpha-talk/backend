@@ -23,6 +23,8 @@ object Keys {
 
     fun minuteRefreshLock(code: String) = "lock:minute-refresh:$code"
 
+    fun minuteBackfillLock(code: String) = "lock:minute-backfill:$code"
+
     fun kisRestRate(keyId: String) = "rate:kis-rest:$keyId"
 
     fun kisToken(keyId: String) = "kis:token:$keyId"

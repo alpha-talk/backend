@@ -21,4 +21,6 @@ data class PriceProperties(
     val minuteCandleEnabled: Boolean = false,
     val minuteCandleFreshSec: Long = 60,
     val minuteCandleRetentionDays: Long = 30,
+    val minuteCandleBackfillDays: Int = 7,
+    val minuteCandleBackfillCooldownSec: Long = 600,
 )
