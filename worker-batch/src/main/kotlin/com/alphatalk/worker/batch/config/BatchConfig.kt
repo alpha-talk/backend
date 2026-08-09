@@ -149,6 +149,7 @@ class BatchConfig {
             locks = locks,
             meters = meters,
             holidays = props.holidays.map(LocalDate::parse).toSet(),
+            businessDayEnforced = props.opinion.businessDayEnforced,
             requestInterval = props.opinion.requestInterval,
             scanLimit = props.opinion.scanLimit,
         )
