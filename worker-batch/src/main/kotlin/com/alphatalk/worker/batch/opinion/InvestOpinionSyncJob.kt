@@ -24,6 +24,7 @@ open class InvestOpinionSyncJob(
     private val locks: LockProvider,
     private val meters: MeterRegistry,
     private val holidays: Set<LocalDate> = emptySet(),
+    private val businessDayEnforced: Boolean = true,
     private val requestInterval: Duration = Duration.ofMillis(250),
     private val scanLimit: Int = 500,
     private val clock: () -> Instant = Instant::now,
@@ -38,7 +39,7 @@ open class InvestOpinionSyncJob(
 
     open fun syncOnce(): Int {
         val today = LocalDate.ofInstant(clock(), SEOUL)
-        if (!isBusinessDay(today)) return 0
+        if (businessDayEnforced && !isBusinessDay(today)) return 0
         val lock = locks.lock(LockConfiguration(clock(), JOB_NAME, LOCK_AT_MOST_FOR, LOCK_AT_LEAST_FOR)).orElse(null)
         if (lock == null) {
             meters.counter("batch.opinion.overrun").increment()
@@ -181,7 +182,7 @@ open class InvestOpinionSyncJob(
     companion object {
         const val JOB_NAME = "invest_opinion_sync"
         private val SEOUL: ZoneId = ZoneId.of("Asia/Seoul")
-        private val LOCK_AT_MOST_FOR: Duration = Duration.ofMinutes(9)
+        private val LOCK_AT_MOST_FOR: Duration = Duration.ofMinutes(15)
         private val LOCK_AT_LEAST_FOR: Duration = Duration.ofSeconds(5)
         private val COLLECT_DEADLINE: Duration = Duration.ofMinutes(6)
         private val PUBLISH_DEADLINE: Duration = Duration.ofMinutes(8)
