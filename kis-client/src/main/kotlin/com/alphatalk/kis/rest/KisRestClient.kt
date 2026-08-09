@@ -107,22 +107,22 @@ class KisRestClient(
         }
         return json.path("output").mapNotNull { row ->
             val date = row.path("stck_bsop_date").asText("").trim()
-            val individual = row.path("prsn_ntby_tr_pbmn").asText("").trim().toLongOrNull()
-            val foreign = row.path("frgn_ntby_tr_pbmn").asText("").trim().toLongOrNull()
-            val institution = row.path("orgn_ntby_tr_pbmn").asText("").trim().toLongOrNull()
-            if (date.isEmpty() || individual == null || foreign == null || institution == null) {
-                null
-            } else {
-                KisInvestorFlow(
-                    code = code,
-                    date = date,
-                    individual = individual,
-                    foreign = foreign,
-                    institution = institution,
-                )
-            }
+            if (date.isEmpty()) return@mapNotNull null
+            KisInvestorFlow(
+                code = code,
+                date = date,
+                individual = requireFlowAmount(row, "prsn_ntby_tr_pbmn", account, code, date),
+                foreign = requireFlowAmount(row, "frgn_ntby_tr_pbmn", account, code, date),
+                institution = requireFlowAmount(row, "orgn_ntby_tr_pbmn", account, code, date),
+            )
         }
     }
+
+    private fun requireFlowAmount(row: JsonNode, field: String, account: KisAccount, code: String, date: String): Long =
+        row.path(field).asText("").trim().toLongOrNull()
+            ?: throw KisClientException(
+                "inquire-investor row malformed - schema drift suspected: keyId=${account.keyId} code=$code date=$date field=$field",
+            )
 
     private fun ratioOrNull(raw: String): BigDecimal? =
         raw.trim().toBigDecimalOrNull()?.takeIf { it.signum() != 0 }
