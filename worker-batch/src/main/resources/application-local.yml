@@ -18,6 +18,7 @@ alphatalk:
       retry-cron: "-"
     investor:
       cron: "-"
+      retry-cron: "-"
     financials:
       cron: "-"
       retry-cron: "-"

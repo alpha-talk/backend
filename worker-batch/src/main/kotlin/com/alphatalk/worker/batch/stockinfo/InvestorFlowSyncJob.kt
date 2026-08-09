@@ -38,6 +38,12 @@ open class InvestorFlowSyncJob(
         syncOnce()
     }
 
+    @Scheduled(cron = "\${alphatalk.batch.investor.retry-cron:0 40 17,18 * * MON-FRI}", zone = "Asia/Seoul")
+    @SchedulerLock(name = JOB_NAME, lockAtMostFor = "PT30M", lockAtLeastFor = "PT1M")
+    open fun scheduledRetry() {
+        syncOnce()
+    }
+
     fun syncOnce(): Int {
         val date = today()
         if (!isBusinessDay(date)) return 0
@@ -83,9 +89,18 @@ open class InvestorFlowSyncJob(
                 }
             }
             meters.counter("batch.investor.synced").increment(stored.toDouble())
-            if (failCount > 0) meters.counter("batch.investor.failed").increment(failCount.toDouble())
-            runs.succeed(runId, stored, failCount, clock())
-            log.info("investor flow sync done: rows={} failed={}", stored, failCount)
+            if (failCount > 0) {
+                meters.counter("batch.investor.failed").increment(failCount.toDouble())
+                runs.failCounted(runId, stored, failCount, "unresolved codes=$failCount", clock())
+                log.error(
+                    "investor flow sync incomplete - retry cron reruns today, tomorrow's response also heals. stored={} failed={}",
+                    stored,
+                    failCount,
+                )
+                return stored
+            }
+            runs.succeed(runId, stored, 0, clock())
+            log.info("investor flow sync done: rows={}", stored)
             return stored
         } catch (e: Exception) {
             runs.fail(runId, e.toString(), clock())
