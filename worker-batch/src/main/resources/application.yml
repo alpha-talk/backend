@@ -79,7 +79,7 @@ alphatalk:
       retry-cron: "0 0 9,13,17 * * *"           # FAILED 회차 재실행 — 창 끝에서 실패한 공시는 다음 날 감지 창을 벗어난다 (명세 §3.2). SUCCESS면 no-op
       lookback-days: 7                          # list.json 감지 창 — 잡이 며칠 실패해도 창 안에서 자가 회복
       backfill-years: 3                         # 초기 백필 조회 창 — core-api 재무 API의 기본 3년과 맞춘다 (명세 §3.2)
-      backfill-per-run: 100                     # 회차당 백필 종목 상한 — 행이 없는 종목만 대상, 며칠에 걸쳐 수렴 (0=끔)
+      backfill-per-run: 100                     # 회차당 백필 종목 상한 — 완료 마커(financial_backfill) 없는 종목만 대상, 며칠에 걸쳐 수렴 (0=끔)
       failure-streak-limit: 5                   # 연속 실패가 이 수에 닿으면 회차를 FAILED로 중단 — DART 전면 장애 시 호출량 소진 방지
 
 management:
