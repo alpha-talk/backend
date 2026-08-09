@@ -132,6 +132,31 @@ class InvestOpinionSyncJobTest {
     }
 
     @Test
+    fun `businessDayEnforced가 false면 주말에도 수집한다 - 창 밖 스모크`() {
+        var range: Pair<java.time.LocalDate, java.time.LocalDate>? = null
+        InvestOpinionSyncJob(
+            brokers = { listOf(brokers.first()) },
+            fetcher = { _, from, to ->
+                range = from to to
+                emptyList()
+            },
+            store = store,
+            binder = binder,
+            publisher = publisher,
+            runs = runs,
+            locks = grantingLocks(),
+            meters = meters,
+            businessDayEnforced = false,
+            requestInterval = Duration.ZERO,
+            clock = { Instant.parse("2026-08-08T01:00:00Z") },
+            pause = {},
+        ).syncOnce()
+
+        assertEquals(listOf("SUCCESS"), runs.finished)
+        assertEquals(java.time.LocalDate.of(2026, 8, 7) to java.time.LocalDate.of(2026, 8, 8), range)
+    }
+
+    @Test
     fun `조회 시작일은 직전 영업일이다 - 주말·휴장일을 건너뛴다`() {
         var range: Pair<java.time.LocalDate, java.time.LocalDate>? = null
         job(

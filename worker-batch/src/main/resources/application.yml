@@ -53,6 +53,7 @@ alphatalk:
     opinion:                                    # 증권사 투자의견 수집·발행 (명세 §3.3)
       enabled: false                            # KIS 계정이 있는 환경에서만 켠다 — 켜면 계정 필수(fail-closed)
       cron: "0 0/10 7-17 * * MON-FRI"           # 영업일 07:00~17:50 10분 주기 — 휴장일은 잡 내부 캘린더가 스킵
+      business-day-enforced: true               # 잡 내부 영업일 판정 — 창 밖 스모크만 false로 완화(cron도 함께 덮어써야 한다)
       calls-per-second: 4.0                     # 잡 자체 상한 4콜/s (명세 §3.1)
       request-interval: 250ms
       scan-limit: 500                           # 회차당 미통보 스캔 상한

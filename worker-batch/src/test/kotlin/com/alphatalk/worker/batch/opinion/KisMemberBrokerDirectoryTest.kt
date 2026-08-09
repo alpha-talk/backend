@@ -73,11 +73,39 @@ class KisMemberBrokerDirectoryTest {
     }
 
     @Test
-    fun `직전 목록이 없으면 부분 마스터라도 쓴다`() {
-        val partial = master("00005미래에셋            0", "깨진줄")
-        val directory = KisMemberBrokerDirectory(download = { partial }, today = { LocalDate.of(2026, 8, 7) })
+    fun `내용이 비어 돌아와도 직전 목록을 유지한다`() {
+        var today = LocalDate.of(2026, 8, 7)
+        var content = master
+        val directory = KisMemberBrokerDirectory(download = { content }, today = { today })
+        directory.brokers()
+
+        today = LocalDate.of(2026, 8, 8)
+        content = master("99999외국계합            1")
+        assertEquals(listOf("00005", "00003"), directory.brokers().map { it.code })
+    }
+
+    @Test
+    fun `직전 목록이 없으면 부분 마스터라도 쓰되 캐시하지 않아 다음 회차가 다시 받는다`() {
+        var downloads = 0
+        var content = master("00005미래에셋            0", "깨진줄")
+        val directory = KisMemberBrokerDirectory(
+            download = {
+                downloads++
+                content
+            },
+            today = { LocalDate.of(2026, 8, 7) },
+        )
 
         assertEquals(listOf("00005"), directory.brokers().map { it.code })
+        assertEquals(1, downloads)
+
+        assertEquals(listOf("00005"), directory.brokers().map { it.code })
+        assertEquals(2, downloads)
+
+        content = master
+        assertEquals(listOf("00005", "00003"), directory.brokers().map { it.code })
+        directory.brokers()
+        assertEquals(3, downloads)
     }
 
     @Test

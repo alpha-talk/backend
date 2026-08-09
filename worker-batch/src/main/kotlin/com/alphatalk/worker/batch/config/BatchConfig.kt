@@ -82,16 +82,16 @@ class BatchConfig {
     ): StockMasterSyncJob = StockMasterSyncJob(files, stocks, runs, meters)
 
     @Bean
-    @ConditionalOnProperty("alphatalk.batch.opinion.enabled", havingValue = "true")
+    @ConditionalOnExpression(OPINION_ENABLED)
     fun batchKisTokenStore(redis: StringRedisTemplate): KisTokenStore = RedisKisTokenStore(redis)
 
     @Bean
-    @ConditionalOnProperty("alphatalk.batch.opinion.enabled", havingValue = "true")
+    @ConditionalOnExpression(OPINION_ENABLED)
     fun batchKisTokenManager(store: KisTokenStore): KisTokenManager =
         KisTokenManager(KisApi.REST_BASE_URL, store)
 
     @Bean
-    @ConditionalOnProperty("alphatalk.batch.opinion.enabled", havingValue = "true")
+    @ConditionalOnExpression(OPINION_ENABLED)
     fun batchKisRateGate(props: BatchProperties, redis: StringRedisTemplate): KisRateGate {
         val rate = KisLimits.REST_CALLS_PER_SECOND * props.kis.rateFactor
         return RedisKisRateGate(
@@ -102,7 +102,7 @@ class BatchConfig {
     }
 
     @Bean
-    @ConditionalOnProperty("alphatalk.batch.opinion.enabled", havingValue = "true")
+    @ConditionalOnExpression(OPINION_ENABLED)
     fun investOpinionSyncJob(
         props: BatchProperties,
         tokens: KisTokenManager,
@@ -136,6 +136,7 @@ class BatchConfig {
             locks = locks,
             meters = meters,
             holidays = props.holidays.map(LocalDate::parse).toSet(),
+            businessDayEnforced = props.opinion.businessDayEnforced,
             requestInterval = props.opinion.requestInterval,
             scanLimit = props.opinion.scanLimit,
         )
@@ -145,5 +146,10 @@ class BatchConfig {
         jacksonObjectMapper().readValue(accountsJson)
     } catch (e: Exception) {
         throw IllegalStateException("alphatalk.batch.kis.accounts-json 파싱 실패", e)
+    }
+
+    companion object {
+        private const val OPINION_ENABLED =
+            "\${alphatalk.batch.enabled:true} and \${alphatalk.batch.opinion.enabled:false}"
     }
 }

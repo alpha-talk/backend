@@ -25,6 +25,7 @@ data class BatchProperties(
 
     data class Opinion(
         val enabled: Boolean = false,
+        val businessDayEnforced: Boolean = true,
         val callsPerSecond: Double = 4.0,
         val requestInterval: Duration = Duration.ofMillis(250),
         val scanLimit: Int = 500,
