@@ -82,10 +82,12 @@ WS 구독 용량이 유한하므로(§1.3) 전 종목이 아니라 수요가 있
 | `demand:room:{gwId}` | Hash `{code: refCount}` | 게이트웨이(스냅샷 전체 재기록) | worker-price | 방 토픽 구독(입장) 기준 — trade/depth·우선순위 판단 |
 | `demand:updated` | Pub/Sub | 게이트웨이 | worker-price | `{"kind":"quote|room","code":"005930","active":true,"ts":...}` — 종목 참조수 0↔1 전이 시만 발행 |
 | `gw:alive:{gwId}` | String TTL 15s | 게이트웨이(하트비트) | worker-price | 살아있는 게이트웨이 식별. 죽은 gwId의 해시는 수요 합산에서 제외(스테일 정리) |
+| `gw:registry` | Set `{gwId}` | 게이트웨이(하트비트 주기 `SADD`·종료 시 `SREM`) | worker-price | 확인할 gwId 목록. 죽은 멤버는 worker-price가 `EXISTS` 재확인과 같은 Lua 안에서 `SREM`으로 청소 |
 
 - 게이트웨이 인메모리 수요 변경 시점: CONNECT 후 첫 SUBSCRIBE에서 관심목록 부착 / 마지막 세션 DISCONNECT에서 관심목록 제거 / `watchlist:updated` diff 반영 / 방 토픽 SUBSCRIBE·UNSUBSCRIBE에서 room 증감. 종목 수요의 0↔1 전이는 즉시 동기화를 트리거하고, 5초 주기 동기화가 refcount 변화와 실패·유실을 보정한다.
-- worker-price 소비는 두 경로다. ① `demand:updated` 구독으로 즉시 반영한다. ② **60초마다 전체 리컨실**(`gw:alive` 스캔 → 살아있는 gw들의 해시 HGETALL 합산 → 목표 구독 집합 재계산)로 메시지 유실·스테일을 자기치유한다.
+- worker-price 소비는 두 경로다. ① `demand:updated` 구독으로 즉시 반영한다. ② **주기 전체 리컨실**(`gw:registry` SMEMBERS → `gw:alive` MGET으로 생존 확인 → 살아있는 gw들의 해시 HGETALL 합산 → 목표 구독 집합 재계산)로 메시지 유실·스테일을 자기치유한다. 주기는 `alphatalk.price.demand-reconcile-ms`(기본 10s)이며 **게이트웨이 재등록 지연(하트비트 주기 5s) + 리컨실 주기 < 구독 해제 유예(`removal-grace-ms`, 기본 30s)** 를 기동 시 검증한다 — 이 부등식이 깨지면 수요를 한 번 놓쳤을 때 복구 전에 KIS 구독이 끊긴다.
 - **구현 확정(v0.12)**: `{gwId}`는 생략하지 않고 게이트웨이 부팅마다 새로 발급한다. 단일 동기화 스레드가 5초 주기와 0↔1 전이 트리거마다 `DemandRegistry` 스냅샷을 Lua `DEL+HSET`으로 원자적 전체 재기록하고 해시 TTL 60초·`gw:alive` TTL 15초를 갱신한다. worker-price는 `demand:updated`를 리컨실 트리거로만 쓰고 목표 집합은 항상 alive gw 해시 합산으로 재계산한다.
+- **구현 확정(v0.20)**: 게이트웨이 열거는 `gw:registry`(Set)가 유일한 출처다. 이전에는 `SCAN MATCH gw:alive:*`로 찾았는데 `SCAN` 비용이 매칭 키 수가 아니라 전체 키스페이스에 비례해, 수요 전이가 몰릴 때 리컨실마다 키스페이스를 훑었다. 생존 판정 권한은 여전히 `gw:alive` TTL에 있고 레지스트리는 후보 목록일 뿐이다.
 
 ### 2.2 세션 풀 & 구독 배정
 
@@ -422,7 +424,7 @@ OpenDART 응답 상태는 **세 갈래로 나눈다**. ① 데이터 없음(`013
 | `KIS_ACCOUNTS` | `[{"keyId":"a1b2c3d4","appkey":"...","appsecret":"..."}]` | 세션풀 계정 목록(시크릿 매니저 주입) |
 | `KIS_RATE_FACTOR` | `0.75` | 공식 유량 대비 내부 한도 비율 |
 | `DART_API_KEY` | — | OpenDART |
-| `DEMAND_RECONCILE_SEC` / `CONFLATION_MS` | `60` / `200` | §2 파라미터 |
+| `DEMAND_RECONCILE_SEC` / `CONFLATION_MS` | `10` / `200` | §2 파라미터 — 리컨실은 재등록 지연 + 주기 < `removal-grace-ms` 를 만족해야 한다 |
 | `MINUTE_CANDLE_FRESH_SEC` / `MINUTE_CANDLE_RETENTION_DAYS` | `60` / `30` | §2.6 분봉 신선화 임계·보존 |
 | `TICK_SILENCE_MS` | `20000` | §2.3 등록 후 이 시간 동안 체결 틱이 없으면 degraded로 강등해 REST 폴링에 넘긴다 |
 | `MARKET_HOLIDAYS_FILE` | `holidays-2026.yml` | 휴장일 |
