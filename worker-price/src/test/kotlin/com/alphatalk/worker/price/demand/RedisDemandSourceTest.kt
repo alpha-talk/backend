@@ -48,6 +48,7 @@ class RedisDemandSourceTest {
 
     @Test
     fun `alive 게이트웨이의 quote·room 수요를 합산한다 - 0 카운트는 제외`() {
+        register("gw1")
         markAlive("gw1")
         template.opsForHash<String, String>().put(Keys.demandQuote("gw1"), "000660", "2")
         template.opsForHash<String, String>().put(Keys.demandQuote("gw1"), "999999", "0")
@@ -61,6 +62,7 @@ class RedisDemandSourceTest {
 
     @Test
     fun `gw alive가 없는 게이트웨이의 수요는 스테일로 보고 제외한다`() {
+        register("gw-dead")
         template.opsForHash<String, String>().put(Keys.demandQuote("gw-dead"), "000660", "3")
 
         val source = RedisDemandSource(template, factory)
@@ -70,7 +72,20 @@ class RedisDemandSourceTest {
     }
 
     @Test
+    fun `레지스트리에 없는 게이트웨이의 수요는 보지 않는다`() {
+        markAlive("gw-unregistered")
+        template.opsForHash<String, String>().put(Keys.demandQuote("gw-unregistered"), "000660", "1")
+
+        val source = RedisDemandSource(template, factory)
+        source.refresh()
+
+        assertEquals(emptySet(), source.targetSymbols())
+    }
+
+    @Test
     fun `여러 게이트웨이 수요를 합산한다`() {
+        register("gw1")
+        register("gw2")
         markAlive("gw1")
         markAlive("gw2")
         template.opsForHash<String, String>().put(Keys.demandQuote("gw1"), "000660", "1")
@@ -120,72 +135,32 @@ class RedisDemandSourceTest {
     }
 
     @Test
-    fun `레지스트리가 비어도 SCAN으로 alive 게이트웨이를 찾는다 - 배포 순서 방어`() {
+    fun `새로 등록된 게이트웨이는 다음 리컨실에 바로 보인다`() {
+        val source = RedisDemandSource(template, factory)
+        source.refresh()
+        assertEquals(emptySet(), source.targetSymbols())
+
+        register("gw-new")
+        markAlive("gw-new")
+        template.opsForHash<String, String>().put(Keys.demandQuote("gw-new"), "000660", "1")
+        source.refresh()
+
+        assertEquals(setOf("000660"), source.targetSymbols())
+    }
+
+    @Test
+    fun `레지스트리가 비면 수요도 비고 이전 값을 붙들지 않는다`() {
+        register("gw1")
         markAlive("gw1")
         template.opsForHash<String, String>().put(Keys.demandQuote("gw1"), "000660", "1")
-
         val source = RedisDemandSource(template, factory)
         source.refresh()
-
         assertEquals(setOf("000660"), source.targetSymbols())
-    }
 
-    @Test
-    fun `등록된 게이트웨이와 미등록 게이트웨이의 수요를 합집합한다 - 롤링 배포 버전 혼재`() {
-        register("gw-new")
-        markAlive("gw-new")
-        markAlive("gw-legacy")
-        template.opsForHash<String, String>().put(Keys.demandQuote("gw-new"), "000660", "1")
-        template.opsForHash<String, String>().put(Keys.demandQuote("gw-legacy"), "035420", "1")
-
-        val source = RedisDemandSource(template, factory)
-        source.refresh()
-
-        assertEquals(setOf("000660", "035420"), source.targetSymbols())
-    }
-
-    @Test
-    fun `미등록 게이트웨이가 죽으면 SCAN 결과가 캐시돼 있어도 gw alive로 걸러진다`() {
-        markAlive("gw-legacy")
-        template.opsForHash<String, String>().put(Keys.demandQuote("gw-legacy"), "035420", "1")
-        val source = RedisDemandSource(template, factory, scanIntervalMs = 600_000)
-        source.refresh()
-        assertEquals(setOf("035420"), source.targetSymbols())
-
-        template.delete(Keys.gwAlive("gw-legacy"))
+        template.delete(Keys.GW_REGISTRY)
         source.refresh()
 
         assertEquals(emptySet(), source.targetSymbols())
-    }
-
-    @Test
-    fun `SCAN 결과는 주기 안에서 재사용되고 주기가 지나면 갱신된다`() {
-        var now = 0L
-        val source = RedisDemandSource(template, factory, scanIntervalMs = 60_000, clock = { now })
-        source.refresh()
-
-        markAlive("gw-legacy")
-        template.opsForHash<String, String>().put(Keys.demandQuote("gw-legacy"), "035420", "1")
-        source.refresh()
-        assertEquals(emptySet(), source.targetSymbols())
-
-        now += 60_000
-        source.refresh()
-        assertEquals(setOf("035420"), source.targetSymbols())
-    }
-
-    @Test
-    fun `레지스트리 등록은 SCAN 주기를 기다리지 않고 즉시 반영된다`() {
-        var now = 0L
-        val source = RedisDemandSource(template, factory, scanIntervalMs = 600_000, clock = { now })
-        source.refresh()
-
-        register("gw-new")
-        markAlive("gw-new")
-        template.opsForHash<String, String>().put(Keys.demandQuote("gw-new"), "000660", "1")
-        source.refresh()
-
-        assertEquals(setOf("000660"), source.targetSymbols())
     }
 
     @Test

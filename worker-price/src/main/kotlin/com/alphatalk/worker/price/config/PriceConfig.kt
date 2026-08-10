@@ -70,9 +70,10 @@ class PriceConfig {
     @Bean
     @ConditionalOnProperty("alphatalk.price.enabled", havingValue = "true")
     fun demandSource(
+        props: PriceProperties,
         redis: StringRedisTemplate,
         connectionFactory: RedisConnectionFactory,
-    ): DemandSource = RedisDemandSource(redis, connectionFactory)
+    ): DemandSource = RedisDemandSource(redis, connectionFactory, props.demandReconcileMs)
 
     @Bean
     @ConditionalOnProperty("alphatalk.price.enabled", havingValue = "true")

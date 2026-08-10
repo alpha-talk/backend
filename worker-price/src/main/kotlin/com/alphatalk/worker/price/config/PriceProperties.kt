@@ -1,5 +1,6 @@
 package com.alphatalk.worker.price.config
 
+import com.alphatalk.contracts.DemandTiming
 import org.springframework.boot.context.properties.ConfigurationProperties
 
 @ConfigurationProperties("alphatalk.price")
@@ -10,6 +11,7 @@ data class PriceProperties(
     val rateFactor: Double = 0.75,
     val maintainIntervalMs: Long = 1_000,
     val removalGraceMs: Long = 30_000,
+    val demandReconcileMs: Long = 10_000,
     val marketHoursEnforced: Boolean = true,
     val holidays: List<String> = emptyList(),
     val pollIntervalMs: Long = 30_000,
@@ -23,4 +25,13 @@ data class PriceProperties(
     val minuteCandleRetentionDays: Long = 30,
     val minuteCandleBackfillDays: Int = 7,
     val minuteCandleBackfillCooldownSec: Long = 600,
-)
+) {
+    init {
+        val reregisterMs = DemandTiming.GATEWAY_HEARTBEAT_SECONDS * 1_000
+        require(demandReconcileMs > 0 && reregisterMs + demandReconcileMs < removalGraceMs) {
+            "게이트웨이 재등록 지연(${reregisterMs}ms) + alphatalk.price.demand-reconcile-ms는 " +
+                "removal-grace-ms보다 짧아야 수요 유실이 구독 해제 전에 복구된다: " +
+                "demandReconcileMs=$demandReconcileMs removalGraceMs=$removalGraceMs"
+        }
+    }
+}
