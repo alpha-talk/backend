@@ -1,4 +1,6 @@
-# Alpha Talk — Redis 계약 (`:contracts`) v0.19
+# Alpha Talk — Redis 계약 (`:contracts`) v0.20
+
+> v0.20 (2026-08-11): **살아있는 게이트웨이 열거를 `gw:registry`(Set) 기반으로 바꾼다.** worker-price는 리컨실마다 `SCAN MATCH gw:alive:*`로 게이트웨이를 찾았는데, `SCAN`의 비용은 매칭 키 수가 아니라 **전체 키스페이스 크기**에 비례한다(`MATCH`는 슬롯에서 꺼낸 뒤 걸러낼 뿐이다). `cursor:{userId}:{code}`가 유저×종목으로 늘고 `watchlist:{userId}`는 TTL이 없어 키스페이스는 단조 증가하는데, 정작 찾는 `gw:alive:*`는 게이트웨이 수(한 자릿수)뿐이라 낭비 비율이 규모에 비례해 나빠진다. 게이트웨이가 자기 `gwId`를 `gw:registry` Set에 등록하면 조회가 `SMEMBERS` + `MGET` **왕복 2회 고정**이 된다. **생존 판정은 여전히 `gw:alive:{gwId}` TTL이 소유한다** — Set은 멤버별 TTL이 없고 비정상 종료 시 `SREM` 기회가 없으므로 부정확할 수 있는 **후보 목록**일 뿐이고, worker-price가 `gw:alive` 존재로 걸러낸 뒤 죽은 멤버를 `SREM`으로 청소한다. 등록은 하트비트 주기(5s)마다 반복하는 멱등 `SADD`라 단발 실패·Redis 초기화가 다음 주기에 자가 치유된다. **`SCAN`은 없어지지 않고 주기 상한(기본 60s)을 둔 안전망으로 남아 레지스트리와 항상 합집합된다** — 없애면 롤링 배포 중 아직 구버전이라 등록하지 않는 게이트웨이의 수요가 통째로 누락되고, 그 세션들의 실시간 시세가 끊긴다. 레지스트리는 "즉시 발견", `SCAN`은 "빠짐없이 발견"을 담당하고, 합쳐진 후보를 `gw:alive` `MGET` 한 번으로 걸러 **생존 판정 주체를 하나로 유지**한다. 이로써 리컨실마다 돌던 `SCAN`이 분당 1회로 내려간다. `:contracts`의 `Keys.GW_REGISTRY` 상수 사용.
 
 > v0.19 (2026-08-09): worker-price 내부 키 1종 추가 — 분봉 과거 백필의 종목별 인스턴스 간 중복 방지 락 `lock:minute-backfill:{code}`(SET NX PX). `minute_candle_backfill`([KIS 워커 명세](alphatalk_kis_worker_spec.md) §2.6 소유)이 조회 트리거에 편승해 직전 7영업일의 빈 날짜를 비동기로 채울 때, 여러 인스턴스가 같은 종목을 동시에 백필해 KIS 콜을 중복 소진하는 것을 막는다. 미획득 인스턴스는 no-op(다음 트리거가 재시도). worker-price 전용이며 다른 서버는 접근하지 않는다. `:contracts`의 `Keys.minuteBackfillLock` 생성 함수 사용.
 
@@ -191,6 +193,7 @@ ingest-worker 스케줄러(싱글턴)가 매일 적재하고 — 종목 잡은 1
 | `demand:quote:{gwId}` | Hash `{code: refCount}` | 접속 세션의 관심목록 기준 종목 참조 수(유저 단위) — 주기·전이 트리거마다 스냅샷 전체 재기록(v0.12) | 게이트웨이 | worker-price | **60s** — 재기록이 연장 |
 | `demand:room:{gwId}` | Hash `{code: refCount}` | 방 토픽 구독(입장) 기준 참조 수(구독 단위) — trade/depth·우선순위 판단 | 게이트웨이 | worker-price | **60s** — 재기록이 연장 |
 | `gw:alive:{gwId}` | String | 살아있는 게이트웨이 식별(하트비트 5s 주기 갱신). worker-price는 리컨실 때 alive gw의 수요만 합산 | 게이트웨이 | worker-price | **15s** |
+| `gw:registry` | Set `{gwId}` | 게이트웨이 **후보 목록** — 키스페이스 전체를 훑는 `SCAN MATCH gw:alive:*` 없이 어느 `gwId`를 확인할지 알려준다(v0.20). 하트비트 주기마다 멱등 `SADD`, graceful shutdown 시 `SREM`. 등록은 `gw:alive` 기록 **뒤에** 한다 — 순서가 반대면 갓 등록된 `gwId`가 하트비트를 쓰기 전에 읽혀 청소될 수 있다. **생존 판정 권한은 없고 열거의 유일한 출처도 아니다** — 비정상 종료한 멤버가 남으므로 worker-price가 `gw:alive` 존재로 걸러내고 죽은 멤버를 `SREM`한다 — 삭제는 **`EXISTS` 재확인과 같은 Lua 안에서** 한다(판정과 삭제 사이에 하트비트가 갱신되면 살아난 게이트웨이를 지워 그 세션들의 시세가 끊긴다). 미등록(구버전) 게이트웨이를 놓치지 않도록 주기 상한을 둔 `SCAN MATCH gw:alive:*` 결과와 항상 합집합한다 | 게이트웨이(SADD/SREM) | worker-price(SMEMBERS/SREM) | 없음 — 멤버는 읽기 측이 청소 |
 
 - **`{gwId}`는 게이트웨이 부팅마다 새로 발급**한다(인메모리 수요 인덱스가 0에서 재구축되는 것과 정합). 이전 부팅의 해시는 하트비트가 끊겨 TTL로 자가 소멸하고, worker-price는 `gw:alive` 없는 gwId를 합산에서 제외하므로 TTL 만료 전에도 무해하다. graceful shutdown 시 게이트웨이는 자기 키 3개를 즉시 DEL한다.
 - **현재가 스냅샷**은 REST(메인서버가 `price:{code}` 읽기)로 준다. 게이트웨이는 `quote:{code}` 라이브만 relay하고 캐시를 직접 읽지 않는다(얇은 엣지 유지).
@@ -224,6 +227,7 @@ ingest-worker 스케줄러(싱글턴)가 매일 적재하고 — 종목 잡은 1
 | `demand:updated` (P/S) | **SUBSCRIBE** | — | — | — | — | **PUBLISH** |
 | `demand:quote/room:{gwId}` (자료구조) | READ | — | — | — | — | **WRITE** |
 | `gw:alive:{gwId}` (자료구조) | READ | — | — | — | — | **WRITE** |
+| `gw:registry` (자료구조) | READ/SREM(청소) | — | — | — | — | **SADD/SREM** |
 
 게이트웨이는 **Pub/Sub SUBSCRIBE만** 한다(+프레즌스·수요 쓰기, `demand:updated` 발행). Streams·DB 쓰기는 만지지 않는다.
  
