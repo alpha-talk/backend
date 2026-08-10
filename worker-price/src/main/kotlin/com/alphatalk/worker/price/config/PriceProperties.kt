@@ -33,5 +33,15 @@ data class PriceProperties(
                 "removal-grace-ms보다 짧아야 수요 유실이 구독 해제 전에 복구된다: " +
                 "demandReconcileMs=$demandReconcileMs removalGraceMs=$removalGraceMs"
         }
+        require(conflationMs in MIN_CONFLATION_MS..MAX_CONFLATION_MS) {
+            "alphatalk.price.conflation-ms는 ${MIN_CONFLATION_MS}~${MAX_CONFLATION_MS}ms여야 한다" +
+                "(KIS 워커 명세 §2.4). 0에 가까우면 플러시가 사실상 바쁜 대기가 되어 Redis를 두드리고, " +
+                "크면 틱이 그만큼 묵은 채로 배달된다: conflationMs=$conflationMs"
+        }
+    }
+
+    companion object {
+        const val MIN_CONFLATION_MS = 100L
+        const val MAX_CONFLATION_MS = 250L
     }
 }
