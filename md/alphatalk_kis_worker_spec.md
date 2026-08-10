@@ -424,7 +424,7 @@ OpenDART 응답 상태는 **세 갈래로 나눈다**. ① 데이터 없음(`013
 | `KIS_ACCOUNTS` | `[{"keyId":"a1b2c3d4","appkey":"...","appsecret":"..."}]` | 세션풀 계정 목록(시크릿 매니저 주입) |
 | `KIS_RATE_FACTOR` | `0.75` | 공식 유량 대비 내부 한도 비율 |
 | `DART_API_KEY` | — | OpenDART |
-| `DEMAND_RECONCILE_MS` / `CONFLATION_MS` | `10000` / `200` | §2 파라미터(`alphatalk.price.demand-reconcile-ms`·`conflation-ms`). 리컨실은 **게이트웨이 재등록 지연(하트비트 5s) + 주기 < `removal-grace-ms`** 를 만족해야 하며 어기면 기동에 실패한다 |
+| `DEMAND_RECONCILE_MS` / `CONFLATION_MS` | `10000` / `200` | §2 파라미터(`alphatalk.price.demand-reconcile-ms`·`conflation-ms`). 둘 다 기동 시 검증하며 어기면 기동에 실패한다 — 리컨실은 **게이트웨이 재등록 지연(하트비트 5s) + 주기 < `removal-grace-ms`**, conflation은 **100~250ms**(§2.4) |
 | `MINUTE_CANDLE_FRESH_SEC` / `MINUTE_CANDLE_RETENTION_DAYS` | `60` / `30` | §2.6 분봉 신선화 임계·보존 |
 | `TICK_SILENCE_MS` | `20000` | §2.3 등록 후 이 시간 동안 체결 틱이 없으면 degraded로 강등해 REST 폴링에 넘긴다 |
 | `MARKET_HOLIDAYS_FILE` | `holidays-2026.yml` | 휴장일 |

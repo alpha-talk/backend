@@ -75,6 +75,14 @@ class PriceConfigTest {
     }
 
     @Test
+    fun `conflation 주기가 명세 범위를 벗어나면 기동에 실패한다`() {
+        assertFailsWith<IllegalArgumentException> { PriceProperties(conflationMs = 0) }
+        assertFailsWith<IllegalArgumentException> { PriceProperties(conflationMs = 99) }
+        assertFailsWith<IllegalArgumentException> { PriceProperties(conflationMs = 251) }
+        assertEquals(200, PriceProperties().conflationMs)
+    }
+
+    @Test
     fun `틱 구독 기본은 통합·시간외이고 KRX 전용은 종목별로 대체된다`() {
         assertEquals(listOf("H0UNCNT0", "H0STOUP0"), PriceConfig.TICK_TR_IDS)
     }
