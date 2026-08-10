@@ -7,6 +7,7 @@ import org.springframework.context.SmartLifecycle
 import org.springframework.data.redis.connection.RedisConnectionFactory
 import org.springframework.data.redis.core.ScanOptions
 import org.springframework.data.redis.core.StringRedisTemplate
+import org.springframework.data.redis.core.script.DefaultRedisScript
 import org.springframework.data.redis.listener.ChannelTopic
 import org.springframework.data.redis.listener.RedisMessageListenerContainer
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor
@@ -19,6 +20,8 @@ class RedisDemandSource(
     private val redis: StringRedisTemplate,
     private val connectionFactory: RedisConnectionFactory,
     private val reconcileIntervalMs: Long = 60_000,
+    private val scanIntervalMs: Long = 60_000,
+    private val clock: () -> Long = System::currentTimeMillis,
 ) : DemandSource, SmartLifecycle {
     private val log = LoggerFactory.getLogger(javaClass)
     private val running = AtomicBoolean(false)
@@ -26,6 +29,9 @@ class RedisDemandSource(
 
     @Volatile
     private var demanded: Set<String> = emptySet()
+
+    @Volatile
+    private var scanCache: ScanCache? = null
 
     private var container: RedisMessageListenerContainer? = null
     private var listenerExecutor: ThreadPoolTaskExecutor? = null
@@ -49,9 +55,49 @@ class RedisDemandSource(
         }
     }
 
-    private fun aliveGatewayIds(): List<String> =
+    private fun aliveGatewayIds(): List<String> {
+        val registered = redis.opsForSet().members(Keys.GW_REGISTRY).orEmpty().toList()
+        val candidates = (registered + scannedGatewayIds()).distinct()
+        if (candidates.isEmpty()) return emptyList()
+        val heartbeats = redis.opsForValue().multiGet(candidates.map(Keys::gwAlive)).orEmpty()
+        val alive = candidates.filterIndexed { index, _ -> heartbeats.getOrNull(index) != null }
+        sweepRegistry(registered - alive.toSet())
+        return alive
+    }
+
+    private fun scannedGatewayIds(): List<String> {
+        val cached = scanCache
+        if (cached != null && clock() - cached.at < scanIntervalMs) return cached.ids
+        return runCatching { scanGatewayIds() }
+            .onSuccess { scanCache = ScanCache(it, clock()) }
+            .onFailure { log.warn("gateway scan failed - falling back to registry only", it) }
+            .getOrElse { cached?.ids ?: emptyList() }
+    }
+
+    private fun scanGatewayIds(): List<String> =
         redis.scan(ScanOptions.scanOptions().match("${Keys.GW_ALIVE_PREFIX}*").count(100).build())
             .use { cursor -> cursor.asSequence().map { it.removePrefix(Keys.GW_ALIVE_PREFIX) }.toList() }
+
+    internal fun sweepRegistry(dead: List<String>) {
+        if (dead.isEmpty()) return
+        val keys = listOf(Keys.GW_REGISTRY) + dead.map(Keys::gwAlive)
+        runCatching { redis.execute(SWEEP_SCRIPT, keys, *dead.toTypedArray()) }
+            .onFailure { log.warn("gateway registry sweep failed - retried on next reconcile", it) }
+    }
+
+    private data class ScanCache(val ids: List<String>, val at: Long)
+
+    companion object {
+        private val SWEEP_SCRIPT = DefaultRedisScript(
+            "local removed = 0 " +
+                "for i = 1, #ARGV do " +
+                "if redis.call('exists', KEYS[i + 1]) == 0 then " +
+                "removed = removed + redis.call('srem', KEYS[1], ARGV[i]) " +
+                "end end " +
+                "return removed",
+            Long::class.java,
+        )
+    }
 
     private fun activeCodes(hashKey: String): Set<String> =
         redis.opsForHash<String, String>().entries(hashKey)

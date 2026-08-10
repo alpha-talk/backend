@@ -42,6 +42,10 @@ class RedisDemandSourceTest {
         template.opsForValue().set(Keys.gwAlive(gwId), "1", Duration.ofSeconds(15))
     }
 
+    private fun register(gwId: String) {
+        template.opsForSet().add(Keys.GW_REGISTRY, gwId)
+    }
+
     @Test
     fun `alive 게이트웨이의 quote·room 수요를 합산한다 - 0 카운트는 제외`() {
         markAlive("gw1")
@@ -79,10 +83,117 @@ class RedisDemandSourceTest {
     }
 
     @Test
+    fun `레지스트리에 등록된 게이트웨이만 합산한다 - alive 없는 멤버는 제외`() {
+        register("gw-live")
+        register("gw-dead")
+        markAlive("gw-live")
+        template.opsForHash<String, String>().put(Keys.demandQuote("gw-live"), "000660", "1")
+        template.opsForHash<String, String>().put(Keys.demandQuote("gw-dead"), "035420", "1")
+
+        val source = RedisDemandSource(template, factory)
+        source.refresh()
+
+        assertEquals(setOf("000660"), source.targetSymbols())
+    }
+
+    @Test
+    fun `alive가 사라진 레지스트리 멤버를 청소한다`() {
+        register("gw-live")
+        register("gw-dead")
+        markAlive("gw-live")
+
+        val source = RedisDemandSource(template, factory)
+        source.refresh()
+
+        assertEquals(setOf("gw-live"), template.opsForSet().members(Keys.GW_REGISTRY))
+    }
+
+    @Test
+    fun `청소는 삭제 직전 하트비트를 다시 확인한다 - 그사이 되살아난 게이트웨이는 남긴다`() {
+        register("gw-revived")
+        register("gw-dead")
+        markAlive("gw-revived")
+
+        RedisDemandSource(template, factory).sweepRegistry(listOf("gw-revived", "gw-dead"))
+
+        assertEquals(setOf("gw-revived"), template.opsForSet().members(Keys.GW_REGISTRY))
+    }
+
+    @Test
+    fun `레지스트리가 비어도 SCAN으로 alive 게이트웨이를 찾는다 - 배포 순서 방어`() {
+        markAlive("gw1")
+        template.opsForHash<String, String>().put(Keys.demandQuote("gw1"), "000660", "1")
+
+        val source = RedisDemandSource(template, factory)
+        source.refresh()
+
+        assertEquals(setOf("000660"), source.targetSymbols())
+    }
+
+    @Test
+    fun `등록된 게이트웨이와 미등록 게이트웨이의 수요를 합집합한다 - 롤링 배포 버전 혼재`() {
+        register("gw-new")
+        markAlive("gw-new")
+        markAlive("gw-legacy")
+        template.opsForHash<String, String>().put(Keys.demandQuote("gw-new"), "000660", "1")
+        template.opsForHash<String, String>().put(Keys.demandQuote("gw-legacy"), "035420", "1")
+
+        val source = RedisDemandSource(template, factory)
+        source.refresh()
+
+        assertEquals(setOf("000660", "035420"), source.targetSymbols())
+    }
+
+    @Test
+    fun `미등록 게이트웨이가 죽으면 SCAN 결과가 캐시돼 있어도 gw alive로 걸러진다`() {
+        markAlive("gw-legacy")
+        template.opsForHash<String, String>().put(Keys.demandQuote("gw-legacy"), "035420", "1")
+        val source = RedisDemandSource(template, factory, scanIntervalMs = 600_000)
+        source.refresh()
+        assertEquals(setOf("035420"), source.targetSymbols())
+
+        template.delete(Keys.gwAlive("gw-legacy"))
+        source.refresh()
+
+        assertEquals(emptySet(), source.targetSymbols())
+    }
+
+    @Test
+    fun `SCAN 결과는 주기 안에서 재사용되고 주기가 지나면 갱신된다`() {
+        var now = 0L
+        val source = RedisDemandSource(template, factory, scanIntervalMs = 60_000, clock = { now })
+        source.refresh()
+
+        markAlive("gw-legacy")
+        template.opsForHash<String, String>().put(Keys.demandQuote("gw-legacy"), "035420", "1")
+        source.refresh()
+        assertEquals(emptySet(), source.targetSymbols())
+
+        now += 60_000
+        source.refresh()
+        assertEquals(setOf("035420"), source.targetSymbols())
+    }
+
+    @Test
+    fun `레지스트리 등록은 SCAN 주기를 기다리지 않고 즉시 반영된다`() {
+        var now = 0L
+        val source = RedisDemandSource(template, factory, scanIntervalMs = 600_000, clock = { now })
+        source.refresh()
+
+        register("gw-new")
+        markAlive("gw-new")
+        template.opsForHash<String, String>().put(Keys.demandQuote("gw-new"), "000660", "1")
+        source.refresh()
+
+        assertEquals(setOf("000660"), source.targetSymbols())
+    }
+
+    @Test
     fun `demand updated 수신 - 즉시 리컨실해 수요 등장과 소멸을 반영한다`() {
         val source = RedisDemandSource(template, factory, reconcileIntervalMs = 600_000)
         source.start()
         try {
+            register("gw1")
             markAlive("gw1")
             template.opsForHash<String, String>().put(Keys.demandQuote("gw1"), "000660", "1")
             template.convertAndSend(Channels.DEMAND_UPDATED, """{"kind":"quote","code":"000660","active":true,"ts":1}""")
