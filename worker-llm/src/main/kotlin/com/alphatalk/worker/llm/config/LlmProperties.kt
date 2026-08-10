@@ -62,7 +62,7 @@ data class LlmProperties(
 
     data class ClaudeCli(
         val executable: String = "claude",
-        val model: String = "sonnet",
+        val model: String = "haiku",
         val timeout: Duration = Duration.ofMinutes(2),
     )
 
