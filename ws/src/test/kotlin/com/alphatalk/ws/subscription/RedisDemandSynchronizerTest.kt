@@ -3,7 +3,6 @@ package com.alphatalk.ws.subscription
 import com.alphatalk.contracts.Channels
 import com.alphatalk.contracts.Keys
 import com.alphatalk.contracts.envelope.DemandUpdated
-import com.alphatalk.ws.config.WsProperties
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import org.assertj.core.api.Assertions.assertThat
 import org.awaitility.Awaitility.await
@@ -52,7 +51,7 @@ class RedisDemandSynchronizerTest {
     private val source = FakeSnapshotSource()
     private val trigger = DemandSyncTrigger()
     private val synchronizer by lazy {
-        RedisDemandSynchronizer(template, objectMapper, source, trigger, WsProperties())
+        RedisDemandSynchronizer(template, objectMapper, source, trigger)
     }
     private val published = LinkedBlockingQueue<DemandUpdated>()
     private lateinit var listenerContainer: RedisMessageListenerContainer
@@ -175,13 +174,7 @@ class RedisDemandSynchronizerTest {
 
     @Test
     fun `lifecycle - 트리거 요청이 주기를 기다리지 않고 즉시 동기화되고 stop이 키를 정리한다`() {
-        val slow = RedisDemandSynchronizer(
-            template,
-            objectMapper,
-            source,
-            trigger,
-            WsProperties(demand = WsProperties.Demand(heartbeatIntervalSeconds = 3_600)),
-        )
+        val slow = RedisDemandSynchronizer(template, objectMapper, source, trigger, heartbeatSeconds = 3_600)
         slow.start()
         try {
             await().atMost(Duration.ofSeconds(5)).until { template.hasKey(Keys.gwAlive(slow.gwId)) }

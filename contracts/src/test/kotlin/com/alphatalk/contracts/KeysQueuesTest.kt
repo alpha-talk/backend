@@ -20,6 +20,13 @@ class KeysQueuesTest {
     }
 
     @Test
+    fun `수요 타이밍 상수 - Redis 계약 §3`() {
+        assertEquals(5L, DemandTiming.GATEWAY_HEARTBEAT_SECONDS)
+        assertEquals(15L, DemandTiming.GATEWAY_ALIVE_TTL_SECONDS)
+        assertEquals(60L, DemandTiming.DEMAND_HASH_TTL_SECONDS)
+    }
+
+    @Test
     fun `뉴스 파이프라인 키 생성`() {
         assertEquals("seen:ingest:hankyung:a1b2", Keys.seenIngest("hankyung:a1b2"))
         assertEquals("lock:cluster:005930", Keys.clusterLock("005930"))

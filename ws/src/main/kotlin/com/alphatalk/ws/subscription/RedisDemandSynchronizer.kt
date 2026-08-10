@@ -1,9 +1,9 @@
 package com.alphatalk.ws.subscription
 
 import com.alphatalk.contracts.Channels
+import com.alphatalk.contracts.DemandTiming
 import com.alphatalk.contracts.Keys
 import com.alphatalk.contracts.envelope.DemandUpdated
-import com.alphatalk.ws.config.WsProperties
 import com.fasterxml.jackson.databind.ObjectMapper
 import org.slf4j.LoggerFactory
 import org.springframework.context.SmartLifecycle
@@ -21,16 +21,17 @@ class RedisDemandSynchronizer(
     private val objectMapper: ObjectMapper,
     private val snapshotSource: DemandSnapshotSource,
     private val trigger: DemandSyncTrigger,
-    props: WsProperties,
+    heartbeatSeconds: Long = DemandTiming.GATEWAY_HEARTBEAT_SECONDS,
 ) : SmartLifecycle {
     private val log = LoggerFactory.getLogger(javaClass)
     private val running = AtomicBoolean(false)
 
     val gwId: String = UUID.randomUUID().toString().replace("-", "").take(12)
 
-    private val syncIntervalMillis = props.demand.heartbeatIntervalSeconds * 1_000
-    private val aliveTtl = Duration.ofSeconds(props.demand.aliveTtlSeconds)
-    private val hashTtlMillis = Duration.ofSeconds(props.demand.hashTtlSeconds).toMillis().toString()
+    private val syncIntervalMillis = heartbeatSeconds * 1_000
+    private val aliveTtl = Duration.ofSeconds(DemandTiming.GATEWAY_ALIVE_TTL_SECONDS)
+    private val hashTtlMillis =
+        Duration.ofSeconds(DemandTiming.DEMAND_HASH_TTL_SECONDS).toMillis().toString()
 
     @Volatile
     private var lastWritten = DemandSnapshot.EMPTY
