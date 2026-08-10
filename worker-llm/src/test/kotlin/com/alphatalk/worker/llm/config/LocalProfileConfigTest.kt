@@ -14,7 +14,7 @@ class LocalProfileConfigTest {
         val defaults = localProperties()
 
         assertEquals("claude-cli", defaults.provider)
-        assertEquals("sonnet", defaults.claudeCli.model)
+        assertEquals("haiku", defaults.claudeCli.model)
         assertEquals(1, defaults.consumerBatch)
         assertEquals("rest", defaults.embedding.provider)
         assertEquals("http://localhost:11434", defaults.embedding.baseUrl)
