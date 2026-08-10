@@ -140,7 +140,28 @@ class RedisDemandSynchronizerTest {
     }
 
     @Test
-    fun `withdraw - 자기 키를 모두 삭제한다`() {
+    fun `sync - 레지스트리에 자기 gwId를 등록하고 반복 호출해도 멤버는 하나다`() {
+        source.snapshot = DemandSnapshot(quote = mapOf("005930" to 1), room = emptyMap())
+
+        synchronizer.sync()
+        synchronizer.sync()
+        synchronizer.sync()
+
+        assertThat(template.opsForSet().members(Keys.GW_REGISTRY)).containsExactly(synchronizer.gwId)
+    }
+
+    @Test
+    fun `sync - 수요가 비어도 레지스트리 등록과 하트비트가 함께 남는다`() {
+        source.snapshot = DemandSnapshot.EMPTY
+
+        synchronizer.sync()
+
+        assertThat(template.opsForSet().isMember(Keys.GW_REGISTRY, synchronizer.gwId)).isTrue()
+        assertThat(template.hasKey(Keys.gwAlive(synchronizer.gwId))).isTrue()
+    }
+
+    @Test
+    fun `withdraw - 자기 키를 모두 삭제하고 레지스트리에서도 빠진다`() {
         source.snapshot = DemandSnapshot(quote = mapOf("005930" to 1), room = mapOf("005930" to 1))
         synchronizer.sync()
 
@@ -149,6 +170,7 @@ class RedisDemandSynchronizerTest {
         assertThat(template.hasKey(Keys.gwAlive(synchronizer.gwId))).isFalse()
         assertThat(template.hasKey(Keys.demandQuote(synchronizer.gwId))).isFalse()
         assertThat(template.hasKey(Keys.demandRoom(synchronizer.gwId))).isFalse()
+        assertThat(template.opsForSet().isMember(Keys.GW_REGISTRY, synchronizer.gwId)).isFalse()
     }
 
     @Test

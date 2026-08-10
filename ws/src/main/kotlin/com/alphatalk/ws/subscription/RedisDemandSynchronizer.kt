@@ -70,6 +70,7 @@ class RedisDemandSynchronizer(
             writeHash(Keys.demandQuote(gwId), snapshot.quote)
             writeHash(Keys.demandRoom(gwId), snapshot.room)
             redis.opsForValue().set(Keys.gwAlive(gwId), "1", aliveTtl)
+            redis.opsForSet().add(Keys.GW_REGISTRY, gwId)
             publishTransitions(DemandUpdated.KIND_QUOTE, lastWritten.quote, snapshot.quote)
             publishTransitions(DemandUpdated.KIND_ROOM, lastWritten.room, snapshot.room)
             lastWritten = snapshot
@@ -81,8 +82,9 @@ class RedisDemandSynchronizer(
     internal fun withdraw() {
         try {
             redis.delete(listOf(Keys.gwAlive(gwId), Keys.demandQuote(gwId), Keys.demandRoom(gwId)))
+            redis.opsForSet().remove(Keys.GW_REGISTRY, gwId)
         } catch (e: Exception) {
-            log.warn("demand withdraw failed - keys expire by TTL", e)
+            log.warn("demand withdraw failed - keys expire by TTL, registry entry is swept by the reader", e)
         }
     }
 
