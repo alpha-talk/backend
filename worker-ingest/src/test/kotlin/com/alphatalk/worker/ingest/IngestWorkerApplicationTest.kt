@@ -50,13 +50,14 @@ class IngestWorkerApplicationTest {
     }
 
     @Test
-    fun `기본 프로필에 경제 사회 RSS 피드가 등록된다`() {
-        assertEquals(24, properties.feeds.size)
+    fun `기본 프로필에 주식 관련 RSS 피드만 등록된다`() {
+        assertEquals(11, properties.feeds.size)
         assertEquals(
-            setOf("yna", "hankyung", "mk", "donga", "khan", "hani", "chosun", "newsis", "sedaily"),
+            setOf("yna", "hankyung", "mk", "donga", "chosun", "newsis"),
             properties.feeds.map { it.source }.toSet(),
         )
         assertEquals(properties.feeds.size, properties.feeds.map { it.id }.distinct().size)
+        assertFalse(properties.feeds.any { "society" in it.id })
         assertFalse(properties.feeds.any { "politics" in it.id })
     }
 }
