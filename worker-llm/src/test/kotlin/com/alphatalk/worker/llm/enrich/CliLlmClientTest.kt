@@ -64,7 +64,7 @@ class CliLlmClientTest {
         assertEquals("claude-test", request.command.first())
         assertTrue(request.command.containsAll(listOf("--json-schema", "--safe-mode", "--no-session-persistence")))
         assertFalse(request.command.contains("--bare"))
-        assertEquals("sonnet", request.command[request.command.indexOf("--model") + 1])
+        assertEquals("haiku", request.command[request.command.indexOf("--model") + 1])
         assertEquals("", request.command[request.command.indexOf("--tools") + 1])
         assertTrue("ANTHROPIC_API_KEY" in request.environmentRemovals)
         assertTrue(request.input.contains("삼성전자"))
