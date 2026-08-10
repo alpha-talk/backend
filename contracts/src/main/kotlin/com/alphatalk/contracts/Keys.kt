@@ -15,6 +15,8 @@ object Keys {
 
     const val GW_ALIVE_PREFIX = "gw:alive:"
 
+    const val GW_REGISTRY = "gw:registry"
+
     fun demandQuote(gwId: String) = "demand:quote:$gwId"
     fun demandRoom(gwId: String) = "demand:room:$gwId"
     fun gwAlive(gwId: String) = "$GW_ALIVE_PREFIX$gwId"

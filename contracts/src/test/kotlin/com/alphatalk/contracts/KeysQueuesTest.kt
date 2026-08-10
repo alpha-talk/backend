@@ -11,6 +11,15 @@ class KeysQueuesTest {
     }
 
     @Test
+    fun `게이트웨이 수요 키 생성 - Redis 계약 §3`() {
+        assertEquals("gw:alive:a3f9c2b1d4e6", Keys.gwAlive("a3f9c2b1d4e6"))
+        assertEquals("gw:alive:", Keys.GW_ALIVE_PREFIX)
+        assertEquals("gw:registry", Keys.GW_REGISTRY)
+        assertEquals("demand:quote:a3f9c2b1d4e6", Keys.demandQuote("a3f9c2b1d4e6"))
+        assertEquals("demand:room:a3f9c2b1d4e6", Keys.demandRoom("a3f9c2b1d4e6"))
+    }
+
+    @Test
     fun `뉴스 파이프라인 키 생성`() {
         assertEquals("seen:ingest:hankyung:a1b2", Keys.seenIngest("hankyung:a1b2"))
         assertEquals("lock:cluster:005930", Keys.clusterLock("005930"))
