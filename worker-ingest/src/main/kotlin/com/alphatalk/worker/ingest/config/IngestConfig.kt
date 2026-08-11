@@ -1,6 +1,5 @@
 package com.alphatalk.worker.ingest.config
 
-import com.alphatalk.worker.ingest.source.NaverSearchNewsSource
 import com.alphatalk.worker.ingest.source.NewsSource
 import com.alphatalk.worker.ingest.source.RssFeedClient
 import com.alphatalk.worker.ingest.source.RssNewsSource
@@ -24,19 +23,8 @@ class IngestConfig {
         Executors.newThreadPerTaskExecutor(Thread.ofVirtual().name("digest-catchup-", 0).factory())
 
     @Bean
-    fun newsSources(props: IngestProperties, rssFeedClient: RssFeedClient): List<NewsSource> {
-        val rss = props.feeds.map { RssNewsSource(it.id, it.source, it.url, rssFeedClient) }
-        if (props.naver.clientId.isBlank()) return rss
-        val naver = NaverSearchNewsSource(
-            clientId = props.naver.clientId,
-            clientSecret = props.naver.clientSecret,
-            queries = props.stocks.mapNotNull { stock ->
-                stock.name.takeIf { it.isNotBlank() }?.let { NaverSearchNewsSource.StockQuery(stock.code, it) }
-            },
-            display = props.naver.display,
-        )
-        return rss + naver
-    }
+    fun newsSources(props: IngestProperties, rssFeedClient: RssFeedClient): List<NewsSource> =
+        props.feeds.map { RssNewsSource(it.id, it.source, it.url, rssFeedClient) }
 
     companion object {
         const val FETCH_EXECUTOR_BEAN = "ingestFetchExecutor"
