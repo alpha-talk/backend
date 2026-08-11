@@ -72,6 +72,12 @@ class PriceConfigTest {
         assertFailsWith<IllegalArgumentException> {
             PriceProperties(removalGraceMs = 30_000, demandReconcileMs = 0)
         }
+        assertFailsWith<IllegalArgumentException> {
+            PriceProperties(removalGraceMs = 30_000, demandReconcileMs = Long.MAX_VALUE)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            PriceProperties(removalGraceMs = Long.MIN_VALUE, demandReconcileMs = 10_000)
+        }
     }
 
     @Test
