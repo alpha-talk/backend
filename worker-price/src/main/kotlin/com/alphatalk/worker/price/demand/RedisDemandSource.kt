@@ -5,8 +5,8 @@ import com.alphatalk.contracts.Keys
 import org.slf4j.LoggerFactory
 import org.springframework.context.SmartLifecycle
 import org.springframework.data.redis.connection.RedisConnectionFactory
-import org.springframework.data.redis.core.ScanOptions
 import org.springframework.data.redis.core.StringRedisTemplate
+import org.springframework.data.redis.core.script.DefaultRedisScript
 import org.springframework.data.redis.listener.ChannelTopic
 import org.springframework.data.redis.listener.RedisMessageListenerContainer
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor
@@ -18,7 +18,7 @@ import kotlin.concurrent.thread
 class RedisDemandSource(
     private val redis: StringRedisTemplate,
     private val connectionFactory: RedisConnectionFactory,
-    private val reconcileIntervalMs: Long = 60_000,
+    private val reconcileIntervalMs: Long = 10_000,
 ) : DemandSource, SmartLifecycle {
     private val log = LoggerFactory.getLogger(javaClass)
     private val running = AtomicBoolean(false)
@@ -49,9 +49,33 @@ class RedisDemandSource(
         }
     }
 
-    private fun aliveGatewayIds(): List<String> =
-        redis.scan(ScanOptions.scanOptions().match("${Keys.GW_ALIVE_PREFIX}*").count(100).build())
-            .use { cursor -> cursor.asSequence().map { it.removePrefix(Keys.GW_ALIVE_PREFIX) }.toList() }
+    private fun aliveGatewayIds(): List<String> {
+        val registered = redis.opsForSet().members(Keys.GW_REGISTRY).orEmpty().toList()
+        if (registered.isEmpty()) return emptyList()
+        val heartbeats = redis.opsForValue().multiGet(registered.map(Keys::gwAlive)).orEmpty()
+        val alive = registered.filterIndexed { index, _ -> heartbeats.getOrNull(index) != null }
+        sweepRegistry(registered - alive.toSet())
+        return alive
+    }
+
+    internal fun sweepRegistry(dead: List<String>) {
+        if (dead.isEmpty()) return
+        val keys = listOf(Keys.GW_REGISTRY) + dead.map(Keys::gwAlive)
+        runCatching { redis.execute(SWEEP_SCRIPT, keys, *dead.toTypedArray()) }
+            .onFailure { log.warn("gateway registry sweep failed - retried on next reconcile", it) }
+    }
+
+    companion object {
+        private val SWEEP_SCRIPT = DefaultRedisScript(
+            "local removed = 0 " +
+                "for i = 1, #ARGV do " +
+                "if redis.call('exists', KEYS[i + 1]) == 0 then " +
+                "removed = removed + redis.call('srem', KEYS[1], ARGV[i]) " +
+                "end end " +
+                "return removed",
+            Long::class.java,
+        )
+    }
 
     private fun activeCodes(hashKey: String): Set<String> =
         redis.opsForHash<String, String>().entries(hashKey)

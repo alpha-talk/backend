@@ -3,7 +3,6 @@ package com.alphatalk.ws.subscription
 import com.alphatalk.contracts.Channels
 import com.alphatalk.contracts.Keys
 import com.alphatalk.contracts.envelope.DemandUpdated
-import com.alphatalk.ws.config.WsProperties
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import org.assertj.core.api.Assertions.assertThat
 import org.awaitility.Awaitility.await
@@ -52,7 +51,7 @@ class RedisDemandSynchronizerTest {
     private val source = FakeSnapshotSource()
     private val trigger = DemandSyncTrigger()
     private val synchronizer by lazy {
-        RedisDemandSynchronizer(template, objectMapper, source, trigger, WsProperties())
+        RedisDemandSynchronizer(template, objectMapper, source, trigger)
     }
     private val published = LinkedBlockingQueue<DemandUpdated>()
     private lateinit var listenerContainer: RedisMessageListenerContainer
@@ -140,7 +139,28 @@ class RedisDemandSynchronizerTest {
     }
 
     @Test
-    fun `withdraw - 자기 키를 모두 삭제한다`() {
+    fun `sync - 레지스트리에 자기 gwId를 등록하고 반복 호출해도 멤버는 하나다`() {
+        source.snapshot = DemandSnapshot(quote = mapOf("005930" to 1), room = emptyMap())
+
+        synchronizer.sync()
+        synchronizer.sync()
+        synchronizer.sync()
+
+        assertThat(template.opsForSet().members(Keys.GW_REGISTRY)).containsExactly(synchronizer.gwId)
+    }
+
+    @Test
+    fun `sync - 수요가 비어도 레지스트리 등록과 하트비트가 함께 남는다`() {
+        source.snapshot = DemandSnapshot.EMPTY
+
+        synchronizer.sync()
+
+        assertThat(template.opsForSet().isMember(Keys.GW_REGISTRY, synchronizer.gwId)).isTrue()
+        assertThat(template.hasKey(Keys.gwAlive(synchronizer.gwId))).isTrue()
+    }
+
+    @Test
+    fun `withdraw - 자기 키를 모두 삭제하고 레지스트리에서도 빠진다`() {
         source.snapshot = DemandSnapshot(quote = mapOf("005930" to 1), room = mapOf("005930" to 1))
         synchronizer.sync()
 
@@ -149,17 +169,12 @@ class RedisDemandSynchronizerTest {
         assertThat(template.hasKey(Keys.gwAlive(synchronizer.gwId))).isFalse()
         assertThat(template.hasKey(Keys.demandQuote(synchronizer.gwId))).isFalse()
         assertThat(template.hasKey(Keys.demandRoom(synchronizer.gwId))).isFalse()
+        assertThat(template.opsForSet().isMember(Keys.GW_REGISTRY, synchronizer.gwId)).isFalse()
     }
 
     @Test
     fun `lifecycle - 트리거 요청이 주기를 기다리지 않고 즉시 동기화되고 stop이 키를 정리한다`() {
-        val slow = RedisDemandSynchronizer(
-            template,
-            objectMapper,
-            source,
-            trigger,
-            WsProperties(demand = WsProperties.Demand(heartbeatIntervalSeconds = 3_600)),
-        )
+        val slow = RedisDemandSynchronizer(template, objectMapper, source, trigger, heartbeatSeconds = 3_600)
         slow.start()
         try {
             await().atMost(Duration.ofSeconds(5)).until { template.hasKey(Keys.gwAlive(slow.gwId)) }
