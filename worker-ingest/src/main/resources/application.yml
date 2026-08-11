@@ -56,13 +56,9 @@ alphatalk:
       - id: newsis-industry
         source: newsis
         url: https://www.newsis.com/RSS/industry.xml
-    stocks: []        # 시드 종목 — 네이버 검색 쿼리·일일 다이제스트 대상 (사전 매핑 아님)
+    stocks: []        # 시드 종목 — 일일 다이제스트 대상 (사전 매핑 아님)
                       # - code: "005930"
                       #   name: 삼성전자
-    naver:
-      client-id: ${NAVER_CLIENT_ID:}        # 미설정이면 네이버 소스 비활성
-      client-secret: ${NAVER_CLIENT_SECRET:}
-      display: 30
     digest:
       enabled: true
       cron: "0 0 18 * * *"                  # 매일 18:00 KST — 뉴스 워커 명세 §4.1
