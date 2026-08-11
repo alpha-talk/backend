@@ -28,7 +28,7 @@ data class PriceProperties(
 ) {
     init {
         val reregisterMs = DemandTiming.GATEWAY_HEARTBEAT_SECONDS * 1_000
-        require(demandReconcileMs > 0 && reregisterMs + demandReconcileMs < removalGraceMs) {
+        require(demandReconcileMs > 0 && removalGraceMs > reregisterMs && demandReconcileMs < removalGraceMs - reregisterMs) {
             "게이트웨이 재등록 지연(${reregisterMs}ms) + alphatalk.price.demand-reconcile-ms는 " +
                 "removal-grace-ms보다 짧아야 수요 유실이 구독 해제 전에 복구된다: " +
                 "demandReconcileMs=$demandReconcileMs removalGraceMs=$removalGraceMs"
