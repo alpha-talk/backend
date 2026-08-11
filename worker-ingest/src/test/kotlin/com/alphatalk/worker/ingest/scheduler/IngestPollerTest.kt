@@ -95,7 +95,7 @@ class IngestPollerTest {
             url = "https://example.com/n",
             codes = listOf("005930", "000660", "005930"),
         )
-        val poller = poller(FakeSource("naver", listOf(article)))
+        val poller = poller(FakeSource("dart", listOf(article)))
         poller.pollOnce()
         val entry = queue.entries.single()
         assertEquals(listOf("000660", "005930"), entry.codes)
