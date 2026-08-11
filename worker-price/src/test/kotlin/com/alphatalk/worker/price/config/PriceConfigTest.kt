@@ -1,5 +1,6 @@
 package com.alphatalk.worker.price.config
 
+import com.alphatalk.contracts.DemandTiming
 import com.alphatalk.worker.price.conflation.ConflationBuffer
 import com.alphatalk.worker.price.market.InMemoryMarketDivStore
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
@@ -20,7 +21,8 @@ class PriceConfigTest {
     private fun sessionPool(props: PriceProperties) =
         config.sessionPool(props, ConflationBuffer(), SimpleMeterRegistry(), InMemoryMarketDivStore())
 
-    private fun demandSource() = config.demandSource(redisTemplate, connectionFactory)
+    private fun demandSource(props: PriceProperties = PriceProperties()) =
+        config.demandSource(props, redisTemplate, connectionFactory)
 
     @Test
     fun `계정이 비어 있으면 기동에 실패한다`() {
@@ -50,6 +52,40 @@ class PriceConfigTest {
 
         assertNotNull(sessionPool(props))
         assertNotNull(demandSource())
+    }
+
+    @Test
+    fun `기본 설정은 게이트웨이 재등록 지연을 더해도 구독 해제 유예 안에 복구된다`() {
+        val props = PriceProperties()
+
+        assertTrue(DemandTiming.GATEWAY_HEARTBEAT_SECONDS * 1_000 + props.demandReconcileMs < props.removalGraceMs)
+    }
+
+    @Test
+    fun `재등록 지연을 더한 복구 시간이 구독 해제 유예를 넘으면 기동에 실패한다`() {
+        assertFailsWith<IllegalArgumentException> {
+            PriceProperties(removalGraceMs = 30_000, demandReconcileMs = 30_000)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            PriceProperties(removalGraceMs = 2_000, demandReconcileMs = 1_000)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            PriceProperties(removalGraceMs = 30_000, demandReconcileMs = 0)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            PriceProperties(removalGraceMs = 30_000, demandReconcileMs = Long.MAX_VALUE)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            PriceProperties(removalGraceMs = Long.MIN_VALUE, demandReconcileMs = 10_000)
+        }
+    }
+
+    @Test
+    fun `conflation 주기가 명세 범위를 벗어나면 기동에 실패한다`() {
+        assertFailsWith<IllegalArgumentException> { PriceProperties(conflationMs = 0) }
+        assertFailsWith<IllegalArgumentException> { PriceProperties(conflationMs = 99) }
+        assertFailsWith<IllegalArgumentException> { PriceProperties(conflationMs = 251) }
+        assertEquals(200, PriceProperties().conflationMs)
     }
 
     @Test

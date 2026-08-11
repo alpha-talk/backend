@@ -7,14 +7,7 @@ data class WsProperties(
     val transport: Transport = Transport(),
     val presence: Presence = Presence(),
     val features: Features = Features(),
-    val demand: Demand = Demand(),
 ) {
-    data class Demand(
-        val heartbeatIntervalSeconds: Long = 5,
-        val aliveTtlSeconds: Long = 15,
-        val hashTtlSeconds: Long = 60,
-    )
-
     data class Transport(
         val sendTimeLimitMs: Int = 10_000,
         val sendBufferSizeLimitBytes: Int = 512 * 1024,

@@ -1,4 +1,6 @@
-# Alpha Talk — Redis 계약 (`:contracts`) v0.19
+# Alpha Talk — Redis 계약 (`:contracts`) v0.20
+
+> v0.20 (2026-08-11): **살아있는 게이트웨이 열거를 `gw:registry`(Set) 기반으로 바꾼다.** worker-price는 리컨실마다 `SCAN MATCH gw:alive:*`로 게이트웨이를 찾았는데, `SCAN`의 비용은 매칭 키 수가 아니라 **전체 키스페이스 크기**에 비례한다(`MATCH`는 슬롯에서 꺼낸 뒤 걸러낼 뿐이다). `cursor:{userId}:{code}`가 유저×종목으로 늘고 `watchlist:{userId}`는 TTL이 없어 키스페이스는 단조 증가하는데, 정작 찾는 `gw:alive:*`는 게이트웨이 수(한 자릿수)뿐이라 낭비 비율이 규모에 비례해 나빠진다. 게이트웨이가 자기 `gwId`를 `gw:registry` Set에 등록하면 조회가 `SMEMBERS` + `MGET` **왕복 2회 고정**이 된다. **생존 판정은 여전히 `gw:alive:{gwId}` TTL이 소유한다** — Set은 멤버별 TTL이 없고 비정상 종료 시 `SREM` 기회가 없으므로 부정확할 수 있는 **후보 목록**일 뿐이고, worker-price가 `gw:alive` 존재로 걸러낸 뒤 죽은 멤버를 `SREM`으로 청소한다. 등록은 하트비트 주기(5s)마다 반복하는 멱등 `SADD`라 단발 실패·Redis 초기화가 다음 주기(≤5s)에 자가 치유된다 — 기동 시 한 번만 등록하면 그때 실패한 게이트웨이가 영원히 보이지 않는다. **`SCAN` 경로는 남기지 않는다**: 등록하지 않는 게이트웨이는 이 계약 이전 버전뿐이고 서비스는 아직 상용 배포 전이라 그런 인스턴스가 존재하지 않는다. 이후 배포는 모든 게이트웨이가 등록하므로 레지스트리가 유일한 열거 출처이고, 등록 유실은 `SADD` 반복이 흡수한다. `:contracts`의 `Keys.GW_REGISTRY` 상수 사용. 아울러 리컨실 1회가 키스페이스 순회에서 O(1) 명령 2개로 내려간 만큼 worker-price의 리컨실 주기를 60s → **10s**로 당긴다 — 레지스트리가 일시적으로 비는 등 `demand:updated` 전이 없이 상태가 어긋나는 경우, **게이트웨이 재등록 지연(하트비트 주기) + 리컨실 주기**가 구독 해제 유예(30s)를 넘으면 복구 전에 KIS 구독이 끊긴다. 이 부등식은 worker-price가 기동 시 검증한다. 양쪽이 함께 지켜야 하는 타이밍(하트비트 5s · `gw:alive` TTL 15s · 수요 해시 TTL 60s)은 `:contracts`의 `DemandTiming`이 소유하고 **서비스별 설정으로 노출하지 않는다** — `ws.demand.*` 프로퍼티를 없앴다. 한쪽만 바꿀 수 있으면 worker-price의 복구 시간 검증식이 실제 하트비트와 어긋나 통과해버린다(예: 하트비트 25s인데 워커는 5s로 가정).
 
 > v0.19 (2026-08-09): worker-price 내부 키 1종 추가 — 분봉 과거 백필의 종목별 인스턴스 간 중복 방지 락 `lock:minute-backfill:{code}`(SET NX PX). `minute_candle_backfill`([KIS 워커 명세](alphatalk_kis_worker_spec.md) §2.6 소유)이 조회 트리거에 편승해 직전 7영업일의 빈 날짜를 비동기로 채울 때, 여러 인스턴스가 같은 종목을 동시에 백필해 KIS 콜을 중복 소진하는 것을 막는다. 미획득 인스턴스는 no-op(다음 트리거가 재시도). worker-price 전용이며 다른 서버는 접근하지 않는다. `:contracts`의 `Keys.minuteBackfillLock` 생성 함수 사용.
 
@@ -91,7 +93,7 @@ Redis를 세 가지 용도로 쓴다. **이름이 비슷해도 메커니즘이 �
 ```
 
 - 게이트웨이는 종목 참조수가 **0↔1 전이할 때만** 발행한다(모든 증감마다 발행하지 않는다).
-- best-effort다. worker-price는 이 메시지를 **리컨실 트리거**로만 쓰고, 목표 종목 집합은 항상 §3의 해시 합산으로 재계산한다(payload의 `active`를 단독 신뢰해 즉시 해제하지 않는다). 유실은 60초 주기 전체 리컨실이 자기치유한다.
+- best-effort다. worker-price는 이 메시지를 **리컨실 트리거**로만 쓰고, 목표 종목 집합은 항상 §3의 해시 합산으로 재계산한다(payload의 `active`를 단독 신뢰해 즉시 해제하지 않는다). 유실은 주기 전체 리컨실이 자기치유한다 — 주기는 worker-price의 구독 해제 유예(`removal-grace-ms`, 기본 30s)보다 짧아야 하며(기본 10s, 기동 시 검증), 그래야 수요를 한 번 놓쳐도 KIS 구독이 실제로 끊기기 전에 복구된다.
 - 증감 시점: CONNECT 시 관심목록 해소분 +1씩 / DISCONNECT −1씩 / `watchlist:updated` 반영 시 ± / 방 토픽 SUBSCRIBE·UNSUBSCRIBE 시 room ±.
 
 ---
@@ -191,6 +193,7 @@ ingest-worker 스케줄러(싱글턴)가 매일 적재하고 — 종목 잡은 1
 | `demand:quote:{gwId}` | Hash `{code: refCount}` | 접속 세션의 관심목록 기준 종목 참조 수(유저 단위) — 주기·전이 트리거마다 스냅샷 전체 재기록(v0.12) | 게이트웨이 | worker-price | **60s** — 재기록이 연장 |
 | `demand:room:{gwId}` | Hash `{code: refCount}` | 방 토픽 구독(입장) 기준 참조 수(구독 단위) — trade/depth·우선순위 판단 | 게이트웨이 | worker-price | **60s** — 재기록이 연장 |
 | `gw:alive:{gwId}` | String | 살아있는 게이트웨이 식별(하트비트 5s 주기 갱신). worker-price는 리컨실 때 alive gw의 수요만 합산 | 게이트웨이 | worker-price | **15s** |
+| `gw:registry` | Set `{gwId}` | 게이트웨이 **후보 목록** — 키스페이스 전체를 훑는 `SCAN MATCH gw:alive:*` 없이 어느 `gwId`를 확인할지 알려준다(v0.20). 하트비트 주기마다 멱등 `SADD`, graceful shutdown 시 `SREM`. 등록은 `gw:alive` 기록 **뒤에** 한다 — 순서가 반대면 갓 등록된 `gwId`가 하트비트를 쓰기 전에 읽혀 청소될 수 있다. **열거의 유일한 출처지만 생존 판정 권한은 없다** — 비정상 종료한 멤버가 남으므로 worker-price가 `gw:alive` 존재로 걸러내고 죽은 멤버를 `SREM`한다. 삭제는 **`EXISTS` 재확인과 같은 Lua 안에서** 한다(판정과 삭제 사이에 하트비트가 갱신되면 살아난 게이트웨이를 지워 그 세션들의 시세가 끊긴다) | 게이트웨이(SADD/SREM) | worker-price(SMEMBERS/SREM) | 없음 — 멤버는 읽기 측이 청소 |
 
 - **`{gwId}`는 게이트웨이 부팅마다 새로 발급**한다(인메모리 수요 인덱스가 0에서 재구축되는 것과 정합). 이전 부팅의 해시는 하트비트가 끊겨 TTL로 자가 소멸하고, worker-price는 `gw:alive` 없는 gwId를 합산에서 제외하므로 TTL 만료 전에도 무해하다. graceful shutdown 시 게이트웨이는 자기 키 3개를 즉시 DEL한다.
 - **현재가 스냅샷**은 REST(메인서버가 `price:{code}` 읽기)로 준다. 게이트웨이는 `quote:{code}` 라이브만 relay하고 캐시를 직접 읽지 않는다(얇은 엣지 유지).
@@ -224,6 +227,7 @@ ingest-worker 스케줄러(싱글턴)가 매일 적재하고 — 종목 잡은 1
 | `demand:updated` (P/S) | **SUBSCRIBE** | — | — | — | — | **PUBLISH** |
 | `demand:quote/room:{gwId}` (자료구조) | READ | — | — | — | — | **WRITE** |
 | `gw:alive:{gwId}` (자료구조) | READ | — | — | — | — | **WRITE** |
+| `gw:registry` (자료구조) | READ/SREM(청소) | — | — | — | — | **SADD/SREM** |
 
 게이트웨이는 **Pub/Sub SUBSCRIBE만** 한다(+프레즌스·수요 쓰기, `demand:updated` 발행). Streams·DB 쓰기는 만지지 않는다.
  

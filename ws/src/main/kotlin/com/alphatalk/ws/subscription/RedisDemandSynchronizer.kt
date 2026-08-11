@@ -1,9 +1,9 @@
 package com.alphatalk.ws.subscription
 
 import com.alphatalk.contracts.Channels
+import com.alphatalk.contracts.DemandTiming
 import com.alphatalk.contracts.Keys
 import com.alphatalk.contracts.envelope.DemandUpdated
-import com.alphatalk.ws.config.WsProperties
 import com.fasterxml.jackson.databind.ObjectMapper
 import org.slf4j.LoggerFactory
 import org.springframework.context.SmartLifecycle
@@ -21,16 +21,17 @@ class RedisDemandSynchronizer(
     private val objectMapper: ObjectMapper,
     private val snapshotSource: DemandSnapshotSource,
     private val trigger: DemandSyncTrigger,
-    props: WsProperties,
+    heartbeatSeconds: Long = DemandTiming.GATEWAY_HEARTBEAT_SECONDS,
 ) : SmartLifecycle {
     private val log = LoggerFactory.getLogger(javaClass)
     private val running = AtomicBoolean(false)
 
     val gwId: String = UUID.randomUUID().toString().replace("-", "").take(12)
 
-    private val syncIntervalMillis = props.demand.heartbeatIntervalSeconds * 1_000
-    private val aliveTtl = Duration.ofSeconds(props.demand.aliveTtlSeconds)
-    private val hashTtlMillis = Duration.ofSeconds(props.demand.hashTtlSeconds).toMillis().toString()
+    private val syncIntervalMillis = heartbeatSeconds * 1_000
+    private val aliveTtl = Duration.ofSeconds(DemandTiming.GATEWAY_ALIVE_TTL_SECONDS)
+    private val hashTtlMillis =
+        Duration.ofSeconds(DemandTiming.DEMAND_HASH_TTL_SECONDS).toMillis().toString()
 
     @Volatile
     private var lastWritten = DemandSnapshot.EMPTY
@@ -70,6 +71,7 @@ class RedisDemandSynchronizer(
             writeHash(Keys.demandQuote(gwId), snapshot.quote)
             writeHash(Keys.demandRoom(gwId), snapshot.room)
             redis.opsForValue().set(Keys.gwAlive(gwId), "1", aliveTtl)
+            redis.opsForSet().add(Keys.GW_REGISTRY, gwId)
             publishTransitions(DemandUpdated.KIND_QUOTE, lastWritten.quote, snapshot.quote)
             publishTransitions(DemandUpdated.KIND_ROOM, lastWritten.room, snapshot.room)
             lastWritten = snapshot
@@ -81,8 +83,9 @@ class RedisDemandSynchronizer(
     internal fun withdraw() {
         try {
             redis.delete(listOf(Keys.gwAlive(gwId), Keys.demandQuote(gwId), Keys.demandRoom(gwId)))
+            redis.opsForSet().remove(Keys.GW_REGISTRY, gwId)
         } catch (e: Exception) {
-            log.warn("demand withdraw failed - keys expire by TTL", e)
+            log.warn("demand withdraw failed - keys expire by TTL, registry entry is swept by the reader", e)
         }
     }
 
