@@ -19,7 +19,7 @@ worker-ingest·worker-llm을 구현하거나 리뷰하기 전에 여는 문서�
 
 | 워커 | 책임 | 비책임 |
 |---|---|---|
-| **worker-ingest** | 소스 폴링(RSS·네이버 검색 API), 정규화·exact 중복 제거, `XADD queue:ingest`, 일일 다이제스트 잡 적재(스케줄러) — 종목 후보는 소스가 아는 것만 전달(텍스트 매칭 없음, §2.4) | LLM 호출, DB 쓰기(읽기는 허용), Pub/Sub 발행 |
+| **worker-ingest** | 소스 폴링(RSS), 정규화·exact 중복 제거, `XADD queue:ingest`, 일일 다이제스트 잡 적재(스케줄러) — 종목 후보는 소스가 아는 것만 전달(텍스트 매칭 없음, §2.4) | LLM 호출, DB 쓰기(읽기는 허용), Pub/Sub 발행 |
 | **worker-llm** | `XREADGROUP g:llm` 소비, 본문 확보, 클러스터 판정, LLM 요약·감성 분류, `stream_event` persist, `PUBLISH stream:{code}`, XACK, 일일 다이제스트 생성 | 수집·폴링, 스케줄(무상태 ×N 유지) |
 
 **핵심 설계 결정** (근거는 각 절):
@@ -38,9 +38,9 @@ worker-ingest·worker-llm을 구현하거나 리뷰하기 전에 여는 문서�
 두 워커 사이에 직접 호출은 없다. 모든 연결은 `queue:ingest` 한 곳을 지나고, 기사는 수집 → 큐 → 가공 → 발행 한 방향으로만 흐른다.
 
 ```
-[RSS 피드들]  [네이버 뉴스검색 API]                        (매일 18:00 KST)
-      │              │                                        │
-      ▼              ▼                                        ▼
+[RSS 피드들]                                               (매일 18:00 KST)
+      │                                                       │
+      ▼                                                       ▼
 ┌─────────────────────────────┐                    ┌──────────────────────┐
 │ worker-ingest               │                    │ ingest 스케줄러       │
 │  폴링 → 정규화 → seen 체크   │                    │  당일 뉴스 있는 종목별 │
@@ -70,13 +70,14 @@ worker-ingest는 외부 소스를 큐 엔트리로 바꾸는 일만 한다. 관�
 
 ### 2.1 소스 전략
 
-소스마다 저작권 부담과 종목 매핑 비용이 달라 셋을 다르게 다룬다.
+소스마다 저작권 부담과 종목 매핑 비용이 달라 다르게 다룬다.
 
 | 소스 | 방식 | 종목 매핑 | 비고 |
 |---|---|---|---|
 | 언론사 RSS (경제·산업·금융·증권 섹션) | 주기 폴링(5분), `If-Modified-Since`/ETag 활용 | 없음 — 관련성·종목 판정은 LLM(§2.4) | 제목+링크+요약만 제공 — 저작권 안전 |
-| 네이버 뉴스 검색 API | 종목명 쿼리, 주기 폴링(10분) | 쿼리 자체가 종목 — 매핑 공짜 | 공식 오픈 API, **25,000건/일** 한도 |
 | OpenDART 공시 *(후속)* | 목록 API 폴링 | 공시 자체에 종목 포함 | `type=disclosure`, 동일 경로 재사용 |
+
+> **네이버 뉴스 검색 API 소스는 제거했다(2026-08-11).** N3에서 종목명 쿼리 소스로 구현했으나 운영에 쓰지 않기로 결정해 코드째 걷어냈다. 소스 부여 종목 후보(§2.4 1차)는 현재 붙는 곳이 없고, 후속 DART 공시 소스가 같은 메커니즘을 재사용한다.
 
 - RSS 설정은 기본 `application.yml`이 소유해 실행 프로필과 무관하게 같은 목록을 쓴다. 피드의 `id`는 섹션별 로그·메트릭 식별자이고, `source`는 언론사 단위 표시값이자 `sourceId` 네임스페이스다. 같은 언론사의 여러 섹션에 같은 기사가 걸려도 하나만 남긴다.
 - MVP RSS는 연합뉴스·한국경제·매일경제·동아일보·조선일보·뉴시스의 경제·산업·금융·증권 섹션만 쓴다. 주식 관련성이 낮은 사회·정치 섹션과 경향신문·한겨레·서울경제 피드는 기본 목록에서 제외한다.
@@ -84,11 +85,10 @@ worker-ingest는 외부 소스를 큐 엔트리로 바꾸는 일만 한다. 관�
 - 소스는 `NewsSource` 포트 뒤의 어댑터로 추가한다 — 소스가 늘어도 파이프라인 코드는 그대로여야 한다.
 - **크롤링 준법**: robots.txt 준수, 식별 가능한 User-Agent, 사이트별 요청 간격 제한. robots.txt와 본문 요청은 `rate:article-fetch:{host}` TTL 게이트로 모든 llm-worker 인스턴스가 기본 1초 간격을 공유한다. 본문 페이지 fetch는 worker-llm이 신규 클러스터를 요약하기 직전에만 한다(수집 단계 대량 fetch 금지).
 - **폴링 병렬화**: 소스별 fetch·처리는 고정 크기 스레드 풀(`fetch-concurrency`, 기본 4)에서 소스 단위 태스크로 병렬 실행한다. 느리거나 죽은 소스(타임아웃 최대 ~15s) 하나가 전체 폴링 주기를 끌지 않게 하려는 것이다. 같은 소스 안의 기사 처리는 순차라 사이트별 요청 예절은 그대로 지켜지고, 통계는 소스별로 모은 뒤 합산한다(공유 가변 상태 없음).
-- 네이버 API 예산: 쿼리 대상 종목 × 폴링 횟수가 한도를 넘지 않게 설계한다. 시드 41종목 × 6회/시간 × 24h ≈ 5,900건/일로 여유. 전 종목(~2,600) 확장 시 수요 기반 선별이 필요하다(§10 오픈 이슈).
 
-### 2.2 폴링 대상 종목
+### 2.2 시드 종목 목록
 
-MVP 폴링 대상은 **설정 파일의 시드 종목 목록**이다(worker-price의 41종목과 같은 세트). 이 목록은 네이버 검색 API 쿼리에만 쓴다 — RSS는 종목과 무관하게 전체를 수집하므로 목록의 영향을 받지 않는다. 확장 후보는 `watchlist` distinct 코드 합집합 ∪ 거래대금 상위 N(`daily_candle`)이며, 워커가 core-api 테이블을 읽는 것은 core-api가 워커 테이블을 읽는 것과 대칭이라 허용한다.
+MVP 시드 종목 목록은 **설정 파일**이 소유한다(worker-price의 41종목과 같은 세트). 이 목록은 일일 다이제스트 잡 적재 대상(§4.1)에만 쓴다 — RSS는 종목과 무관하게 전체를 수집하므로 목록의 영향을 받지 않는다. 확장 후보는 `watchlist` distinct 코드 합집합 ∪ 거래대금 상위 N(`daily_candle`)이며, 워커가 core-api 테이블을 읽는 것은 core-api가 워커 테이블을 읽는 것과 대칭이라 허용한다.
 
 ### 2.3 정규화 · exact 중복 제거
 
@@ -107,7 +107,7 @@ MVP 폴링 대상은 **설정 파일의 시드 종목 목록**이다(worker-pric
 
 | 단계 | 방법 | 담당 |
 |---|---|---|
-| 1차 | 소스가 종목을 알면 그대로(네이버 쿼리, DART 공시) — **텍스트 매칭 없음** | ingest |
+| 1차 | 소스가 종목을 알면 그대로(DART 공시 등 — 현재 소스는 RSS뿐이라 붙는 후보 없음) — **텍스트 매칭 없음** | ingest |
 | 2차 | LLM 요약 시 관련 종목 확정 — 후보 오탐 제거 및 후보 외 종목 발견(발견 종목은 `stock_master` 존재 검증 후 채택) | llm |
 
 - **v0.6 결정: 수집 측 텍스트 매칭(종목명 사전·매크로 키워드)을 코드 레벨에서 제거했다.** 종목명 사전은 전 종목 등록·별칭 관리 부담에 비해 이득이 없고(판정은 어차피 LLM 전담), 매크로 `macroHint`는 소비 측이 쓴 적이 없다. `stock_alias` 테이블(§5)은 예약으로만 남긴다.
@@ -241,7 +241,7 @@ stream payload (ws_api_spec §4.3 확장 — ⚠️ §6 증보):
 | 2차 | `impact != LOW`만 | `fanout-hard-cap`(500) | 실시간 억제 |
 | 3차 | — | — | 다이제스트에만 반영 |
 
-  **상한 예외는 수집 단계에서 붙은 소스 후보(`entry.codes`)뿐이다** — 네이버 검색 쿼리·DART 공시처럼 소스가 종목을 알고 붙인 것이라 기사가 그 종목을 다룬다는 근거가 있다. 이 종목들은 3차 억제에서도 계속 발행한다. **LLM이 후보 밖에서 발견한 종목은 상한에 포함한다** — `stock_master` 존재 검증만 통과했을 뿐 근거는 모델의 기억이라, 예외로 두면 §2.4가 막으려던 '코드를 운으로 추가하는 경로'가 상한을 우회해 되살아난다. 따라서 실시간 발행 총량은 `fanout-hard-cap` + 소스 후보 종목 수다. **상한은 실제 수신 종목의 고유 개수로 센다** — 섹터 구성 종목에서 소스 후보를 뺀 뒤 발견 종목과 합집합을 만들어 그 크기로 판정한다. 단순 합산하면 발견 종목이 그 섹터 구성원일 때 같은 방을 두 번 세어, 상한 이내인 뉴스가 강등·억제돼 정상 구성 종목이 누락된다.
+  **상한 예외는 수집 단계에서 붙은 소스 후보(`entry.codes`)뿐이다** — DART 공시처럼 소스가 종목을 알고 붙인 것이라 기사가 그 종목을 다룬다는 근거가 있다. 이 종목들은 3차 억제에서도 계속 발행한다. **LLM이 후보 밖에서 발견한 종목은 상한에 포함한다** — `stock_master` 존재 검증만 통과했을 뿐 근거는 모델의 기억이라, 예외로 두면 §2.4가 막으려던 '코드를 운으로 추가하는 경로'가 상한을 우회해 되살아난다. 따라서 실시간 발행 총량은 `fanout-hard-cap` + 소스 후보 종목 수다. **상한은 실제 수신 종목의 고유 개수로 센다** — 섹터 구성 종목에서 소스 후보를 뺀 뒤 발견 종목과 합집합을 만들어 그 크기로 판정한다. 단순 합산하면 발견 종목이 그 섹터 구성원일 때 같은 방을 두 번 세어, 상한 이내인 뉴스가 강등·억제돼 정상 구성 종목이 누락된다.
 
   2차 상한은 사실상 무제한이다 — 실측 MEDIUM+ fan-out은 중앙값 24 · 최대 152이고 200을 넘는 클러스터가 없다. LLM이 업종을 비정상적으로 많이 붙였을 때만 걸리는 폭주 방지선이며, 걸리면 `sector.fanout.suppressed`와 경고 로그로 남겨 오판정을 추적한다. **2차에서 material 구성 종목과 발견 종목이 모두 비면 그것도 억제로 집계한다** — 배달 0건인데 `degraded`만 오르면 운영에서 감지되지 않는다. material이 비어도 발견 종목이 하드 상한 이내면 발행한다 — LOW 섹터를 덜어냈다고 상한 안에 남은 발견 종목까지 막을 이유가 없다. 후속 편입 이벤트도 클러스터 scope가 SECTOR면 `scope`·`sector`를 그대로 싣는다(§3.5 편입 경로 포함). `sector.fanout.degraded`는 LOW를 실제로 덜어낸 회차에만 올린다. 1차 상한을 넘어 2차로 들어간 것 자체는 결과와 무관하게 `sector.fanout.tier2`로 센다 — LOW가 없어 덜어낸 게 없는데 101~500종목에 배달되는 회차는 이 카운터로만 관측된다. 두 상한은 `fanout-cap > 0`·`fanout-hard-cap >= fanout-cap`을 기동 시 검증한다(어긋나면 2차가 1차보다 좁아져 상한이 조용히 무력화된다).
 - **같은 섹터를 impact 다르게 두 번 판정하면 높은 쪽을 쓴다**: fan-out은 `impact` 내림차순으로 구성 종목을 모으고 먼저 잡은 판정을 유지한다. `stock_master.sector_code`가 단일값이라 서로 다른 섹터의 구성 종목은 겹치지 않으므로, 이 규칙이 실제로 작동하는 경우는 LLM이 같은 `sectorCode`를 중복 출력했을 때다.
@@ -465,7 +465,7 @@ Liquibase 마이그레이션(`db-migrations` 모듈, `news/` changelog — Flywa
 ```
 worker-ingest/
 ├─ scheduler/   IngestPoller(소스 폴링 오케스트레이션) · DigestTrigger(§4.1)
-├─ source/      NewsSource(포트) · RssNewsSource · NaverSearchNewsSource
+├─ source/      NewsSource(포트) · RssNewsSource
 ├─ dedup/       SeenMarker(포트) · RedisSeenMarker
 └─ queue/       IngestQueue(포트) · RedisIngestQueue(XADD)
 
@@ -505,7 +505,7 @@ provider는 명시 설정이고 자동 fallback이 없다. 엉뚱한 경로로 �
 - 로컬 무료 임베딩은 Ollama+BGE-M3를 기본으로 쓴다. 설치·환경변수·Docker 연결·문제 해결은 [로컬 임베딩 설정](local_embedding_setup.md)을 따른다.
 - `anthropic`은 `ANTHROPIC_API_KEY`가 없으면 기동에 실패한다. LLM·임베딩(rest)의 HTTP connect/read 타임아웃은 양수 필수(0=무한 대기 거부)이고, **배치 최악 지연 `consumer-batch × (LLM + 임베딩 + 원문 fetch 상한)`이 `claim-idle`보다 짧아야 기동한다** — 배치는 PEL에 먼저 들어가 순차 처리되므로 마지막 레코드의 선점 임계 초과가 중복 처리·조기 DLQ를 만든다. 원문 fetch는 요청 단위 타임아웃(8s)만으로는 리다이렉트×robots×게이트 대기가 합산돼 무계가 되므로, **fetcher가 종단 데드라인(20s)을, 호스트 게이트가 벽시계 기준 총 대기 상한(10s — 다중 레플리카 경합에서 획득 경쟁을 계속 지면 무한 대기이며, 잔여 예산을 넘는 sleep은 예산까지로 자른다)을 런타임에 강제**하고, 검증은 `데드라인 + 최장 블로킹 구간`을 상한으로 쓴다 — 최장 블로킹 구간은 robots 콜드 미스(게이트 10s + robots HTTP 8s, 중간에 데드라인 확인 없이 직렬 실행)다. 상한 초과 fetch는 본문 없이 진행한다(발췌 폴백 — best-effort). 원문 fetch 비활성 구성(`allowed-host-suffixes` 공란)은 이 항을 0으로 친다. 같은 검증을 CLI provider에도 적용한다(batch=1이라 레코드 1건 상한 검사). 레코드 상한에는 클러스터 락 대기(2×lock-ttl — `RedisClusterLock`의 유계 대기)도 포함한다. 기본값: batch 2 × (LLM 30s + 임베딩 25s + fetch 38s + 락 6s) = 198s < 5m. **수용 한계**: HTTP read timeout은 블로킹 read 단위 상한이라 응답을 계속 흘려보내는(드립피드) 서버는 이론상 회피할 수 있다 — 호출 대상이 신뢰된 엔드포인트(Anthropic·설정된 임베딩 제공자)이고, 스레드 격리로 완전한 종단 데드라인을 강제하는 비용 대비 이득이 없어 수용한다. claim-idle 초과의 결말은 중복 처리이고 파이프라인 전체가 sourceId 멱등·DB 유니크로 이를 흡수하도록 설계되어 있다(§2.2·§4.1) — 이 검증은 실시간 보장이 아니라 구성 오류를 기동에서 잡는 안전장치다. `claude-cli`·`codex-cli`는 각각 로그인된 로컬 CLI가 필요하고, 실행 실패·타임아웃은 PEL 재처리 경로로 전파한다. `fake`는 `alphatalk.llm.allow-fake=true`일 때만 허용한다.
 - CLI provider는 개인 구독 로컬 단일 인스턴스 전용이다. `consumer-batch=1`이 아니거나 CLI timeout이 `claim-idle` 이상이면 기동에 실패해, 긴 CLI 호출 중 다른 consumer가 아직 처리하지 않은 배치 레코드를 회수하는 구성을 막는다.
-- 시크릿(환경변수): `ANTHROPIC_API_KEY` · `NAVER_CLIENT_ID/SECRET` · 임베딩 API 키. 로그 출력 금지. 임베딩 키는 `provider=rest`에서 fail-closed한다.
+- 시크릿(환경변수): `ANTHROPIC_API_KEY` · 임베딩 API 키. 로그 출력 금지. 임베딩 키는 `provider=rest`에서 fail-closed한다.
 - 설정: 시드 종목 목록, 소스별 폴링 주기, 유사도 임계값(0.85), 클러스터 창(72h), 원문 허용 호스트·호스트별 요청 간격(기본 1초), digest 시각(18:00) — 임계값 튜닝에 대비해 전부 프로퍼티로 외부화한다.
 - 시장 다이제스트(§4.3) 설정: market digest 시각(17:40) · 리서치 사용 여부(끄면 항상 ①·②층만) · 리서치 턴 상한·타임아웃 · 팩트시트 커버리지 임계(기본 90%) — 검색을 여는 호출이므로 상한 없는 기본값을 두지 않는다. **시장 다이제스트의 전체 처리 데드라인(리서치 타임아웃 포함)은 배치 선행 대기까지 합쳐 `claim-idle`보다 작아야 하며 기동 시 검증한다** — 소비는 배치로 PEL에 들어와 순차 처리되므로 MARKET 레코드는 자기 데드라인이 시작되기 전에 앞 레코드들(`consumer-batch − 1`건)의 처리 시간만큼 PEL에서 대기할 수 있다. 검증식은 `(consumer-batch − 1) × 레코드 처리 상한 + 리서치 타임아웃 + 무리서치 재호출 상한 < claim-idle`(재호출은 §4.3 리서치 실패 폴백)이고, 만족하지 못하면 기동에 실패한다(기존 CLI timeout 검증과 같은 이유 — 넘으면 진행 중인 리서치를 다른 consumer가 XCLAIM해 동시 검색·delivery count 인플레·조기 DLQ가 생긴다).
 - 메트릭: `ingest_fetched_total{source}` · `ingest_dup_skipped_total` · `queue_ingest_pending`(PEL, 기획안 §10 알람 항목) · `llm_processed_total{type}` · `llm_failed_total` · `cluster_merged_total` · `dlq_total` · `llm_tokens_total{model}`(비용 감시, NFR-09) · `market_digest_generated_total{degraded}` · `market_digest_layer_failed_total{layer}`(§4.3 층별 실패).
@@ -526,7 +526,7 @@ SPRING_PROFILES_ACTIVE=local LLM_PROVIDER=fake ./gradlew :worker-llm:bootRun
 | **N0** | 두 모듈 스캐폴딩 · settings.gradle 등록 · :contracts 상수(§6 잔여분) | `./gradlew :worker-ingest:test :worker-llm:test` 통과 |
 | **N1** | ingest: RSS 1소스 → 정규화·seen → XADD *(사전 매핑은 구현 후 v0.6에서 제거)* | 동일 기사 재수집 시 큐 적재 0건(Testcontainers Redis) |
 | **N2** | llm: 소비 → 요약·감성 → persist→publish→ack (클러스터링 없이 1기사=1이벤트) | **FR-11**: 동일 sourceId 중복 요약 0건 · XADD→`GET /rooms/{code}/stream` 노출 E2E |
-| **N3** | 클러스터링(pgvector·락·편입 병합) + 네이버 검색 API 소스 | 동일 사건 3개 언론사 기사 → stream_event 1건 · `sources` 3건 · 편입 재발행 0건 |
+| **N3** | 클러스터링(pgvector·락·편입 병합) + 네이버 검색 API 소스 *(소스는 2026-08-11 제거 — §2.1)* | 동일 사건 3개 언론사 기사 → stream_event 1건 · `sources` 3건 · 편입 재발행 0건 |
 | **N4** | 일일 다이제스트 | `digest:{code}:{date}` 멱등 — 잡 2회 적재에도 브리핑 1건 · 호재/악재 리스트 노출 |
 | **N5** | 운영: DLQ·XPENDING/XCLAIM·메트릭·알람 | poison 5회 초과 → DLQ 격리 · PEL 알람 동작 |
 | **N6** | 섹터·매크로(§3.6): scope 판정 · 섹터 fan-out · 다이제스트 sectorIssues/marketIssues — **선행: `sector`·`stock_master.sector_code` 적재(worker-batch `industry_sync`)** | 금리 인상 기사 1건 → 은행 섹터 커버 종목 각 방에 `scope=SECTOR` 이벤트 1건씩 · MARKET 기사는 방 이벤트 0건 + 다이제스트 반영 |
@@ -543,7 +543,7 @@ SPRING_PROFILES_ACTIVE=local LLM_PROVIDER=fake ./gradlew :worker-llm:bootRun
 | 1 | 임베딩 제공자 | Voyage `voyage-3.5-lite`(기본 제안) vs OpenAI `text-embedding-3-small` vs 로컬(KoSimCSE). 차원·비용·한국어 성능 비교 후 확정 — `vector(N)` 차원 연동 |
 | 2 | 유사도 임계값·창 | 0.85 · 72h로 시작, 실데이터 오합류/미합류 사례로 튜닝 |
 | 3 | digest 시각 | 18:00 장후(기본) vs 07:50 장전 브리핑 추가 — 둘 다 하려면 sourceId에 슬롯 포함(`digest:{code}:{date}:{am|pm}`) |
-| 4 | 폴링 종목 확장 | 시드 41 → watchlist 합집합 ∪ 거래대금 상위 N. 네이버 API 일 한도 내 배분 설계 필요 |
+| 4 | 시드 종목 확장 | 시드 41 → watchlist 합집합 ∪ 거래대금 상위 N — 일일 다이제스트 대상(§2.2·§4.1) |
 | 5 | RSS 이용조건 확정 | 현재 9개 언론사의 공식 RSS를 사용한다. 상업 출시 전 언론사별 이용조건·제휴 필요 여부를 최종 확인 |
 | 6 | 편입 시 클라 갱신 | 현재 재발행 없음(접속 중 클라는 `sources` 갱신을 못 봄). 필요해지면 갱신 전용 경량 이벤트 검토 — MVP 아님 |
 | 7 | 섹터 분류 체계 | 기본: KIS 마스터 파일 업종 필드(`stock_master_sync`가 이미 파싱하는 소스). 세분화가 부족하면 KRX 업종분류/GICS 검토 — 판단 기준은 LLM 섹터 후보 목록의 품질 |
