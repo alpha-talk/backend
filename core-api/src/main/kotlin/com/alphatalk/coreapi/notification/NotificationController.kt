@@ -41,4 +41,18 @@ class NotificationController(
     fun readAll() {
         notifications.readAll(CurrentUser.id())
     }
+
+    @GetMapping("/notifications/opinions")
+    fun opinions(
+        @RequestParam(required = false) cursor: String?,
+        @RequestParam(required = false) limit: Int?,
+    ): OpinionPage = notifications.opinions(cursor, limit)
+
+    @PutMapping("/notifications/opinions/cursor")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    fun advanceOpinionCursor(
+        @RequestBody request: CursorAdvanceRequest,
+    ) {
+        notifications.advanceOpinionCursor(CurrentUser.id(), request.lastEventId)
+    }
 }

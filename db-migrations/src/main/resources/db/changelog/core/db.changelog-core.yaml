@@ -55,3 +55,10 @@ databaseChangeLog:
         - sqlFile:
             path: sql/0008_stream_event_source_key.sql
             relativeToChangelogFile: true
+  - changeSet:
+      id: 0009-opinion-read-cursor
+      author: core-api
+      changes:
+        - sqlFile:
+            path: sql/0009_opinion_read_cursor.sql
+            relativeToChangelogFile: true
