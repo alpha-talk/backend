@@ -425,7 +425,7 @@ idempotency_record(user_id, idem_key CHAR(26), action, response JSONB NULL, crea
 -- financial_summary 등)은 「KIS 수집 워커 명세」 §4 참조. 마이그레이션은 db-migrations 모듈(Liquibase) 단일 관리.
 ```
 
-### 전체 엔드포인트 요약 (30개)
+### 전체 엔드포인트 요약 (33개)
 
 | 모듈 | 엔드포인트 |
 |---|---|
@@ -433,10 +433,10 @@ idempotency_record(user_id, idem_key CHAR(26), action, response JSONB NULL, crea
 | search (1) | GET /stocks/search |
 | subscription (3) | GET /watchlist, PUT·DELETE /watchlist/{code} |
 | stream (2) | GET /rooms/{code}/stream, GET /rooms/{code}/quote |
-| notification (4) | GET badge, GET /notifications, PUT /rooms/{code}/cursor, POST read-all |
-| community (10) | posts CRUD(4)+목록, comments(POST·GET·DELETE=3), like(PUT/DELETE=1), report |
+| notification (6) | GET badge, GET /notifications, PUT /rooms/{code}/cursor, POST read-all, GET /notifications/opinions, PUT /notifications/opinions/cursor |
+| community (11) | posts(작성·목록·상세·수정·삭제=5), comments(POST·GET·DELETE=3), like(PUT·DELETE=2), report(1) |
 | stockinfo (5) | GET /stocks/{code} + candles·valuation·financials·investors |
 
 ---
 
-*core-api REST API 명세 v0.3 — WS 명세 v0.3·Redis 계약 v0.17·KIS 워커 명세 v0.7과 정합. 봉투/채널 문자열은 `:contracts`가 원천.*
+*core-api REST API 명세 v0.4 — WS 명세 v0.8·Redis 계약 v0.21·KIS 워커 명세 v0.8과 정합. 봉투/채널 문자열은 `:contracts`가 원천.*
