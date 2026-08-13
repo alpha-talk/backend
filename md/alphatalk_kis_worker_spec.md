@@ -378,6 +378,10 @@ invest_opinion(code CHAR(6), business_date CHAR(8), broker_code TEXT, broker_nam
              stream_event_id CHAR(26) NULL, published_at TIMESTAMPTZ NULL,
              PK(code, business_date, broker_code, content_hash))
 -- INDEX (collected_at) WHERE published_at IS NULL — 미통보 스캔(§3.3 ③)이 테이블 누적과 무관하게 좁게 돌도록
+-- INDEX (stream_event_id) WHERE stream_event_id IS NOT NULL — core-api 투자의견 전역 피드(core-api 명세 §6.1)의
+--   최신순 조회·커서 카운트용. changeSet은 core 체인지로그(0009) 소유 — source_key와 같은 배치
+-- INDEX (collected_at) WHERE stream_event_id IS NOT NULL — 같은 피드의 커서 없는 유저용 최근 24시간 카운트가
+--   이력 전체를 훑지 않도록. 역시 core 체인지로그(0010) 소유
 -- rating_code·previous_rating_code 없음: KIS cls_code는 위치 값이라 저장하지 않는다(§3.3, v0.6)
 stream_event(..., source_key TEXT NULL, ...)
 -- UNIQUE(source_key) WHERE source_key IS NOT NULL
