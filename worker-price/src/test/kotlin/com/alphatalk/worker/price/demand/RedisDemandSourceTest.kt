@@ -171,11 +171,11 @@ class RedisDemandSourceTest {
             register("gw1")
             markAlive("gw1")
             template.opsForHash<String, String>().put(Keys.demandQuote("gw1"), "000660", "1")
-            template.convertAndSend(Channels.DEMAND_UPDATED, """{"kind":"quote","code":"000660","active":true,"ts":1}""")
+            template.convertAndSend(Channels.DEMAND_UPDATED, """{"gwId":"gw1","ts":1}""")
             await().atMost(Duration.ofSeconds(5)).until { source.targetSymbols() == setOf("000660") }
 
             template.opsForHash<String, String>().delete(Keys.demandQuote("gw1"), "000660")
-            template.convertAndSend(Channels.DEMAND_UPDATED, """{"kind":"quote","code":"000660","active":false,"ts":2}""")
+            template.convertAndSend(Channels.DEMAND_UPDATED, """{"gwId":"gw1","ts":2}""")
             await().atMost(Duration.ofSeconds(5)).until { source.targetSymbols().isEmpty() }
         } finally {
             source.stop()
