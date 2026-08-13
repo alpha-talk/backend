@@ -259,7 +259,7 @@ ULID 사전순이 곧 시간순이라는 성질을 이용한 **양방향 커서*
 새 증권사 투자의견은 **관심목록과 무관하게 모든 유저에게** 알린다. 클라는 `opinions > 0`이면 "새로운 증권사 종목 의견이 나왔어요" 안내를 띄우고, 피드 화면에서 최신 의견을 보여준다.
 
 - **원천**: worker-batch `invest_opinion_sync`가 적재하는 `invest_opinion` 테이블(insert-only, KIS 워커 명세 §3.3·§4). `eventId`는 발행 파이프라인이 부여한 `stream_event_id`(ULID, 시간순)를 그대로 쓴다 — 아직 이벤트가 바인딩되지 않은 행(`stream_event_id IS NULL`)은 피드에 노출하지 않는다. `stream_event`의 `type=REPORT`는 뉴스 파이프라인도 쓸 수 있어 식별자로 삼지 않는다.
-- **배지 `opinions`**: 전역 커서 이후의 의견 수. `byCode`/`total`(관심 종목 스코프)과 별도 필드이며 `total`에 합산하지 않는다 — 전체 미읽음은 `total + opinions`. 종목당 캡과 동일하게 99로 캡(`LIMIT 100` 카운트)하고 `badge:{userId}` 10초 캐시에 함께 실린다. 관심 종목에 담긴 종목의 의견은 `byCode`(REPORT 타입)와 `opinions` 양쪽에 잡힐 수 있다 — 서로 다른 화면(방 알림 vs 전역 피드)의 카운트라 중복 합산 문제로 보지 않는다.
+- **배지 `opinions`**: 전역 커서 이후의 의견 수. `byCode`/`total`(관심 종목 스코프)과 별도 필드이며 `total`에 합산하지 않는다 — 전체 미읽음은 `total + opinions`. 종목당 캡과 동일하게 99로 캡(`LIMIT 100` 카운트)하고 `badge:{userId}` 10초 캐시에 함께 실린다. **커서가 없는 유저(신규 가입·기능 롤아웃 직후)는 전체 이력이 아니라 최근 24시간(`collected_at` 기준)의 의견만 센다** — 방 커서의 "커서 없음 = 전부 미읽음"과 달리 전역 피드는 이력 전체가 새 알림으로 쏟아지는 것을 막아야 하고, 조회 경로에 커서 초기화 쓰기를 만들지 않기 위해 시간 하한으로 대신한다. 관심 종목에 담긴 종목의 의견은 `byCode`(REPORT 타입)와 `opinions` 양쪽에 잡힐 수 있다 — 서로 다른 화면(방 알림 vs 전역 피드)의 카운트라 중복 합산 문제로 보지 않는다.
 - **GET /notifications/opinions?cursor=&limit=30** → 200
 
   ```json
