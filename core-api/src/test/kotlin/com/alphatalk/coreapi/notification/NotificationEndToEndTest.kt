@@ -58,6 +58,8 @@ class NotificationEndToEndTest {
     @BeforeEach
     fun seed() {
         redisTemplate.connectionFactory!!.connection.use { it.serverCommands().flushDb() }
+        jdbc.update("DELETE FROM opinion_read_cursor")
+        jdbc.update("DELETE FROM invest_opinion")
         jdbc.update("DELETE FROM read_cursor")
         jdbc.update("DELETE FROM stream_event")
         jdbc.update("DELETE FROM watchlist")
@@ -93,6 +95,24 @@ class NotificationEndToEndTest {
                 eventId,
                 code,
                 type,
+            )
+        }
+        listOf(
+            Triple("035720", "00016", "01J9Z8000000000000000000A1"),
+            Triple("005930", "00017", "01J9Z8000000000000000000A2"),
+            Triple("035720", "00018", null),
+        ).forEach { (code, broker, eventId) ->
+            jdbc.update(
+                """
+                INSERT INTO invest_opinion
+                    (code, business_date, broker_code, broker_name, rating, previous_rating,
+                     target_price, content_hash, collected_at, stream_event_id)
+                VALUES (?, '20260813', ?, '증권사$broker', '매수', '중립', 92000, ?, now(), ?)
+                """.trimIndent(),
+                code,
+                broker,
+                "hash-$broker".padEnd(64, '0'),
+                eventId,
             )
         }
     }
@@ -213,8 +233,70 @@ class NotificationEndToEndTest {
     }
 
     @Test
+    fun `투자의견 배지는 관심목록과 무관하게 이벤트가 바인딩된 의견만 센다`() {
+        val badge = json(get("/api/v1/notifications/badge").body)
+
+        assertEquals(2, badge.path("opinions").asInt())
+        assertEquals(5, badge.path("total").asInt())
+    }
+
+    @Test
+    fun `투자의견 피드는 최신순이고 커서 전진 뒤 배지가 줄고 역행은 무시한다`() {
+        val page = json(get("/api/v1/notifications/opinions").body)
+        assertEquals(
+            listOf("01J9Z8000000000000000000A2", "01J9Z8000000000000000000A1"),
+            page.path("items").map { it.path("eventId").asText() },
+        )
+        assertEquals("증권사00017", page.path("items")[0].path("brokerName").asText())
+        assertEquals("매수", page.path("items")[0].path("rating").asText())
+        assertEquals(92000, page.path("items")[0].path("targetPrice").asLong())
+
+        val advanced = put(
+            "/api/v1/notifications/opinions/cursor",
+            """{"lastEventId":"01J9Z8000000000000000000A1"}""",
+        )
+        assertEquals(204, advanced.statusCode.value())
+        assertEquals(1, json(get("/api/v1/notifications/badge").body).path("opinions").asInt())
+
+        val regressed = put(
+            "/api/v1/notifications/opinions/cursor",
+            """{"lastEventId":"01J9Z800000000000000000001"}""",
+        )
+        assertEquals(204, regressed.statusCode.value())
+        assertEquals(
+            "01J9Z8000000000000000000A1",
+            jdbc.queryForObject(
+                "SELECT last_event_id FROM opinion_read_cursor WHERE user_id = ?",
+                String::class.java,
+                userId,
+            ),
+        )
+
+        val olderPage = json(get("/api/v1/notifications/opinions?cursor=01J9Z8000000000000000000A2").body)
+        assertEquals(
+            listOf("01J9Z8000000000000000000A1"),
+            olderPage.path("items").map { it.path("eventId").asText() },
+        )
+        assertEquals(false, olderPage.path("pageInfo").path("hasMoreBefore").asBoolean())
+        assertEquals(true, olderPage.path("pageInfo").path("hasMoreAfter").asBoolean())
+    }
+
+    @Test
+    fun `모두 읽음은 투자의견 배지도 0으로 만든다`() {
+        assertEquals(2, json(get("/api/v1/notifications/badge").body).path("opinions").asInt())
+
+        val readAll = post("/api/v1/notifications/read-all", bearer = token)
+        assertEquals(204, readAll.statusCode.value())
+
+        val badge = json(get("/api/v1/notifications/badge").body)
+        assertEquals(0, badge.path("total").asInt())
+        assertEquals(0, badge.path("opinions").asInt())
+    }
+
+    @Test
     fun `알림 API는 인증이 필요하다`() {
         assertEquals(401, get("/api/v1/notifications/badge", bearer = null).statusCode.value())
         assertEquals(401, get("/api/v1/notifications", bearer = null).statusCode.value())
+        assertEquals(401, get("/api/v1/notifications/opinions", bearer = null).statusCode.value())
     }
 }
