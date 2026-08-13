@@ -14,6 +14,8 @@ import org.springframework.data.jpa.repository.JpaRepository
 import org.springframework.stereotype.Repository
 import org.springframework.transaction.annotation.Transactional
 import java.io.Serializable
+import java.time.Clock
+import java.time.Duration
 import java.time.Instant
 
 data class NotificationOpinionId(
@@ -67,7 +69,10 @@ interface NotificationOpinionJpaRepository : JpaRepository<NotificationOpinionEn
 
     fun findByStreamEventIdGreaterThan(eventId: String, pageable: PageRequest): List<NotificationOpinionEntity>
 
-    fun findEventIdsByStreamEventIdIsNotNull(pageable: PageRequest): List<OpinionEventIdView>
+    fun findEventIdsByStreamEventIdIsNotNullAndCollectedAtGreaterThanEqual(
+        cutoff: Instant,
+        pageable: PageRequest,
+    ): List<OpinionEventIdView>
 
     fun findEventIdsByStreamEventIdGreaterThan(eventId: String, pageable: PageRequest): List<OpinionEventIdView>
 
@@ -84,12 +89,16 @@ interface NotificationOpinionJpaRepository : JpaRepository<NotificationOpinionEn
 @Transactional(readOnly = true)
 class JpaOpinionFeed(
     private val opinions: NotificationOpinionJpaRepository,
+    private val clock: Clock = Clock.systemUTC(),
 ) : OpinionFeed {
     override fun countNewerThan(afterEventId: String?, fetchLimit: Int): Int {
-        val page = latestFirst(fetchLimit)
+        val page = PageRequest.of(0, fetchLimit)
         val unread = afterEventId
             ?.let { opinions.findEventIdsByStreamEventIdGreaterThan(it, page) }
-            ?: opinions.findEventIdsByStreamEventIdIsNotNull(page)
+            ?: opinions.findEventIdsByStreamEventIdIsNotNullAndCollectedAtGreaterThanEqual(
+                clock.instant().minus(NO_CURSOR_LOOKBACK),
+                page,
+            )
         return unread.size
     }
 
@@ -109,6 +118,10 @@ class JpaOpinionFeed(
         opinions.findTopByStreamEventIdIsNotNullOrderByStreamEventIdDesc()?.streamEventId?.trim()
 
     private fun latestFirst(limit: Int) = PageRequest.of(0, limit, Sort.by(Sort.Direction.DESC, "streamEventId"))
+
+    companion object {
+        val NO_CURSOR_LOOKBACK: Duration = Duration.ofHours(24)
+    }
 
     private fun toRecord(entity: NotificationOpinionEntity) = OpinionRecord(
         eventId = checkNotNull(entity.streamEventId).trim(),

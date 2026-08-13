@@ -98,16 +98,18 @@ class NotificationEndToEndTest {
             )
         }
         listOf(
-            Triple("035720", "00016", "01J9Z8000000000000000000A1"),
-            Triple("005930", "00017", "01J9Z8000000000000000000A2"),
-            Triple("035720", "00018", null),
-        ).forEach { (code, broker, eventId) ->
+            Triple("000660", "00015", "01J9Z8000000000000000000A0" to "now() - interval '2 days'"),
+            Triple("035720", "00016", "01J9Z8000000000000000000A1" to "now()"),
+            Triple("005930", "00017", "01J9Z8000000000000000000A2" to "now()"),
+            Triple("035720", "00018", null to "now()"),
+        ).forEach { (code, broker, opinion) ->
+            val (eventId, collectedAt) = opinion
             jdbc.update(
                 """
                 INSERT INTO invest_opinion
                     (code, business_date, broker_code, broker_name, rating, previous_rating,
                      target_price, content_hash, collected_at, stream_event_id)
-                VALUES (?, '20260813', ?, '증권사$broker', '매수', '중립', 92000, ?, now(), ?)
+                VALUES (?, '20260813', ?, '증권사$broker', '매수', '중립', 92000, ?, $collectedAt, ?)
                 """.trimIndent(),
                 code,
                 broker,
@@ -233,7 +235,7 @@ class NotificationEndToEndTest {
     }
 
     @Test
-    fun `투자의견 배지는 관심목록과 무관하게 이벤트가 바인딩된 의견만 센다`() {
+    fun `커서 없는 투자의견 배지는 관심목록과 무관하게 최근 24시간의 바인딩된 의견만 센다`() {
         val badge = json(get("/api/v1/notifications/badge").body)
 
         assertEquals(2, badge.path("opinions").asInt())
@@ -244,7 +246,7 @@ class NotificationEndToEndTest {
     fun `투자의견 피드는 최신순이고 커서 전진 뒤 배지가 줄고 역행은 무시한다`() {
         val page = json(get("/api/v1/notifications/opinions").body)
         assertEquals(
-            listOf("01J9Z8000000000000000000A2", "01J9Z8000000000000000000A1"),
+            listOf("01J9Z8000000000000000000A2", "01J9Z8000000000000000000A1", "01J9Z8000000000000000000A0"),
             page.path("items").map { it.path("eventId").asText() },
         )
         assertEquals("증권사00017", page.path("items")[0].path("brokerName").asText())
@@ -274,7 +276,7 @@ class NotificationEndToEndTest {
 
         val olderPage = json(get("/api/v1/notifications/opinions?cursor=01J9Z8000000000000000000A2").body)
         assertEquals(
-            listOf("01J9Z8000000000000000000A1"),
+            listOf("01J9Z8000000000000000000A1", "01J9Z8000000000000000000A0"),
             olderPage.path("items").map { it.path("eventId").asText() },
         )
         assertEquals(false, olderPage.path("pageInfo").path("hasMoreBefore").asBoolean())
