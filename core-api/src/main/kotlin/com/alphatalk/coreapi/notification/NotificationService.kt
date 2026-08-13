@@ -18,6 +18,8 @@ class NotificationService(
     private val cursorCache: CursorCache,
     private val badgeCache: BadgeCache,
     private val stocks: StockCatalog,
+    private val opinionFeed: OpinionFeed,
+    private val opinionCursors: OpinionReadCursorStore,
 ) {
     fun badge(userId: Long): BadgeResponse {
         badgeCache.find(userId)?.let { return it }
@@ -25,7 +27,8 @@ class NotificationService(
         val byCode = inbox.countUnread(windows, BADGE_FETCH_LIMIT)
             .mapValues { (_, count) -> minOf(count, BADGE_CAP) }
             .filterValues { it > 0 }
-        val badge = BadgeResponse(total = byCode.values.sum(), byCode = byCode)
+        val opinions = minOf(opinionFeed.countNewerThan(opinionCursors.find(userId), BADGE_FETCH_LIMIT), BADGE_CAP)
+        val badge = BadgeResponse(total = byCode.values.sum(), byCode = byCode, opinions = opinions)
         badgeCache.store(userId, badge)
         return badge
     }
@@ -64,15 +67,57 @@ class NotificationService(
         badgeCache.evict(userId)
     }
 
-    fun readAll(userId: Long) {
-        val codes = watchlist.codes(userId)
-        if (codes.isEmpty()) return
-        val latest = inbox.latestEventIds(codes)
-        if (latest.isEmpty()) return
-        val finalCursors = cursorStore.advanceAll(userId, latest)
-        cursorCache.advanceAll(userId, finalCursors)
+    fun opinions(cursor: String?, limit: Int?): OpinionPage {
+        val validCursor = validCursor(cursor)
+        val validLimit = validLimit(limit)
+        val items = opinionFeed.findLatest(validCursor, validLimit).map(::toOpinionItem)
+        if (items.isEmpty()) {
+            return OpinionPage(items, PageInfo(oldest = null, newest = null, hasMoreBefore = false, hasMoreAfter = false))
+        }
+        val oldest = items.last().eventId
+        val newest = items.first().eventId
+        return OpinionPage(
+            items,
+            PageInfo(
+                oldest = oldest,
+                newest = newest,
+                hasMoreBefore = opinionFeed.hasOlderThan(oldest),
+                hasMoreAfter = validCursor != null && opinionFeed.hasNewerThan(newest),
+            ),
+        )
+    }
+
+    fun advanceOpinionCursor(userId: Long, rawEventId: String?) {
+        val eventId = validCursor(rawEventId?.trim())
+            ?: throw ApiException(ErrorCode.VALIDATION_FAILED, "lastEventId는 필수입니다", mapOf("field" to "lastEventId"))
+        opinionCursors.advance(userId, eventId)
         badgeCache.evict(userId)
     }
+
+    fun readAll(userId: Long) {
+        val codes = watchlist.codes(userId)
+        if (codes.isNotEmpty()) {
+            val latest = inbox.latestEventIds(codes)
+            if (latest.isNotEmpty()) {
+                val finalCursors = cursorStore.advanceAll(userId, latest)
+                cursorCache.advanceAll(userId, finalCursors)
+            }
+        }
+        opinionFeed.latestEventId()?.let { opinionCursors.advance(userId, it) }
+        badgeCache.evict(userId)
+    }
+
+    private fun toOpinionItem(record: OpinionRecord) = OpinionItem(
+        eventId = record.eventId,
+        code = record.code,
+        businessDate = record.businessDate,
+        brokerCode = record.brokerCode,
+        brokerName = record.brokerName,
+        rating = record.rating,
+        previousRating = record.previousRating,
+        targetPrice = record.targetPrice,
+        collectedAt = record.collectedAt.toEpochMilli(),
+    )
 
     private fun unreadWindows(userId: Long): List<UnreadWindow> {
         val codes = watchlist.codes(userId)

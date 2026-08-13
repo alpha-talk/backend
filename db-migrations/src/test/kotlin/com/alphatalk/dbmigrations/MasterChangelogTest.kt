@@ -34,7 +34,7 @@ class MasterChangelogTest {
         withFreshDatabase("full_apply") { connection ->
             update(connection)
 
-            assertEquals(28, appliedChangeSetCount(connection))
+            assertEquals(30, appliedChangeSetCount(connection))
             assertTrue(tableExists(connection, "news_cluster"))
             assertTrue(tableExists(connection, "stream_event"))
             assertTrue(tableExists(connection, "market_digest"))
@@ -63,6 +63,7 @@ class MasterChangelogTest {
             assertTrue(columnExists(connection, "stock_master", "dart_induty_code"))
             assertTrue(tableExists(connection, "invest_opinion"))
             assertTrue(columnExists(connection, "stream_event", "source_key"))
+            assertTrue(tableExists(connection, "opinion_read_cursor"))
         }
     }
 

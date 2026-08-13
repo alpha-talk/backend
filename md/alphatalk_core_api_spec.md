@@ -1,5 +1,7 @@
-# Alpha Talk — core-api REST API 명세 v0.3
+# Alpha Talk — core-api REST API 명세 v0.4
 **메인서버(core-api) · 동기 API 전용 · 담당: 민균**
+
+> **v0.4 (2026-08-13)**: **증권사 투자의견 전역 알림 추가(§6)** — 관심목록과 무관하게 모든 유저에게 새 투자의견을 알린다. `GET /notifications/opinions`(최신 의견 피드)·`PUT /notifications/opinions/cursor`(전역 읽음 커서) 신설, 배지 응답에 `opinions` 필드 추가, read-all이 전역 커서도 전진. 원천은 worker-batch가 적재하는 `invest_opinion`(KIS 워커 명세 §4)이고 notification 모듈이 읽기 전용 매핑으로 조회 시점 집계한다(ADR A4 확장 — 유저별 알림 행 없음). 읽음 위치는 유저당 1행 `opinion_read_cursor`(DB 전용, Redis 미러 없음 — 배지 10초 캐시가 비용을 방어).
 
 > **v0.3 (2026-08-06)**: 분봉의 **수집 창이 종목별로 다르다는 사실을 §8에 반영**. NXT 상장 종목은 08:00–20:00(최대 721봉)이지만 미상장 종목은 09:00–15:30(최대 391봉)이다 — KIS가 미상장 종목에 장외 세션 분봉을 주지 않는다(KIS 워커 명세 v0.5 §2.6). 응답 스키마와 버킷 그리드는 그대로고, 클라는 종목에 따라 장외 구간이 비는 것을 **정상**으로 다뤄야 한다.
 
@@ -232,10 +234,12 @@ ULID 사전순이 곧 시간순이라는 성질을 이용한 **양방향 커서*
 | GET | `/notifications` | 미읽음 이벤트 통합 목록 |
 | PUT | `/rooms/{code}/cursor` | 읽음 커서 전진 (FR-13) |
 | POST | `/notifications/read-all` | 모두 읽음 |
+| GET | `/notifications/opinions` | 증권사 투자의견 전역 피드 (관심목록 무관, v0.4) |
+| PUT | `/notifications/opinions/cursor` | 투자의견 전역 읽음 커서 전진 (v0.4) |
 
 **동작 원리 (ADR A4)**: 쓰기 시점에 유저별 알림 행을 만들지 않는다. `cursor:{userId}:{code}`(Redis, DB `read_cursor` 미러) **이후의 StreamEvent를 조회 시점에 집계**한다.
 
-**GET /notifications/badge** → 200 `{ "total": 27, "byCode": { "005930": 12, "000660": 15 } }`
+**GET /notifications/badge** → 200 `{ "total": 27, "byCode": { "005930": 12, "000660": 15 }, "opinions": 3 }`
 
 - 관심 종목마다 `count(event_id > cursor)`를 센다. 종목당 상한 99로 캡(`LIMIT 100` 카운트)해 비용을 고정한다. 결과는 10초 Redis 캐시(`badge:{userId}` — 메인서버 전용 키, Redis 계약 §3 주석). 커서 전진·모두 읽음 시 캐시를 지워 읽음 처리 직후의 배지가 캐시 신선도에 묶이지 않게 한다. 미읽음이 0인 종목은 `byCode`에서 생략한다.
 - 커서가 없는 종목(구독 직후 등)은 전부 미읽음으로 센다. 커서 조회는 Redis가 fast path고, 미스·장애 시 DB `read_cursor` 미러에서 읽어 Redis에 되채운다(기획안 §5.4).
@@ -248,7 +252,29 @@ ULID 사전순이 곧 시간순이라는 성질을 이용한 **양방향 커서*
 
 - 현재 커서보다 **작은 값(역행)은 무시**한다. DB upsert 후 Redis SET(write-through — DB가 진실, Redis는 fast path). 방 열람 중 주기적/이탈 시 호출한다. `lastEventId`는 ULID 형식을 검증하고, 없는 종목은 404.
 
-**POST /notifications/read-all** → 204 — 관심 종목 각각의 커서를 해당 종목 최신 `eventId`로 옮긴다.
+**POST /notifications/read-all** → 204 — 관심 종목 각각의 커서를 해당 종목 최신 `eventId`로 옮기고, **투자의견 전역 커서도 최신 의견 `eventId`로 옮긴다**(v0.4).
+
+### 6.1 증권사 투자의견 전역 알림 (v0.4)
+
+새 증권사 투자의견은 **관심목록과 무관하게 모든 유저에게** 알린다. 클라는 `opinions > 0`이면 "새로운 증권사 종목 의견이 나왔어요" 안내를 띄우고, 피드 화면에서 최신 의견을 보여준다.
+
+- **원천**: worker-batch `invest_opinion_sync`가 적재하는 `invest_opinion` 테이블(insert-only, KIS 워커 명세 §3.3·§4). `eventId`는 발행 파이프라인이 부여한 `stream_event_id`(ULID, 시간순)를 그대로 쓴다 — 아직 이벤트가 바인딩되지 않은 행(`stream_event_id IS NULL`)은 피드에 노출하지 않는다. `stream_event`의 `type=REPORT`는 뉴스 파이프라인도 쓸 수 있어 식별자로 삼지 않는다.
+- **배지 `opinions`**: 전역 커서 이후의 의견 수. `byCode`/`total`(관심 종목 스코프)과 별도 필드이며 `total`에 합산하지 않는다 — 전체 미읽음은 `total + opinions`. 종목당 캡과 동일하게 99로 캡(`LIMIT 100` 카운트)하고 `badge:{userId}` 10초 캐시에 함께 실린다. **커서가 없는 유저(신규 가입·기능 롤아웃 직후)는 전체 이력이 아니라 최근 24시간(`collected_at` 기준)의 의견만 센다** — 방 커서의 "커서 없음 = 전부 미읽음"과 달리 전역 피드는 이력 전체가 새 알림으로 쏟아지는 것을 막아야 하고, 조회 경로에 커서 초기화 쓰기를 만들지 않기 위해 시간 하한으로 대신한다. 관심 종목에 담긴 종목의 의견은 `byCode`(REPORT 타입)와 `opinions` 양쪽에 잡힐 수 있다 — 서로 다른 화면(방 알림 vs 전역 피드)의 카운트라 중복 합산 문제로 보지 않는다.
+- **GET /notifications/opinions?cursor=&limit=30** → 200
+
+  ```json
+  {
+    "items": [
+      { "eventId": "01J9Z8...", "code": "005930", "businessDate": "20260813",
+        "brokerCode": "00016", "brokerName": "한국투자증권", "rating": "매수",
+        "previousRating": "중립", "targetPrice": 92000, "collectedAt": 1755072000000 }
+    ],
+    "pageInfo": { "oldest": "01J9Z8...", "newest": "01J9Z8...", "hasMoreBefore": false, "hasMoreAfter": false }
+  }
+  ```
+
+  읽음 여부와 무관하게 **최신 의견을 `eventId` 내림차순**으로 준다(읽음 커서는 배지 카운트만 제어) — "최신 의견 보여주기"가 목적이라 미읽음 필터를 걸지 않는다. `limit` 기본 30·최대 100, 과거 페이지는 `cursor`(`before` 의미), 봉투는 §1.4 `pageInfo`. `brokerName`·`previousRating`·`targetPrice`는 원천이 비면 null.
+- **PUT /notifications/opinions/cursor** — req `{ "lastEventId": "01J9Z8..." }` → 204. 역행 무시·ULID 검증은 방 커서와 동일. 저장은 유저당 1행 `opinion_read_cursor`(DB 전용 — Redis 미러 없음, 커서 읽기는 배지 계산 시 1회뿐이고 10초 캐시 뒤에 있다).
 
 ---
 
@@ -364,7 +390,7 @@ ULID 사전순이 곧 시간순이라는 성질을 이용한 **양방향 커서*
 community ──(StreamEventAppender 포트)──► stream   # POST 이벤트 기록
 subscription ──(WatchlistBroadcaster 포트)──► watchlist:{userId} 미러 + watchlist:updated
 subscription/stream ──(StockCatalog 포트)──► search   # 종목 존재 확인·이름 조회
-notification ──(읽기)──► stream(이벤트 조회) + subscription(관심목록)
+notification ──(읽기)──► stream(이벤트 조회) + subscription(관심목록) + invest_opinion 읽기 매핑(§6.1)
 stream/stockinfo ──(읽기)──► Redis price:{code} / 워커 적재 테이블
 auth ◄── 전 모듈 (SecurityContext)
 ```
@@ -392,13 +418,14 @@ comment(id CHAR(26) PK, post_id FK, author_id FK, content, created_at, deleted_a
 post_like(post_id, user_id, created_at, PK(post_id, user_id))
 report(id, target_type, target_id, reporter_id, reason, detail, status, created_at)
 read_cursor(user_id, code, last_event_id, updated_at, PK(user_id, code))   -- Redis 미러
+opinion_read_cursor(user_id PK, last_event_id, updated_at)   -- 투자의견 전역 커서(§6.1, DB 전용)
 idempotency_record(user_id, idem_key CHAR(26), action, response JSONB NULL, created_at,
      PK(user_id, idem_key))   -- §1.6 멱등 원장 (글·댓글 커밋과 동일 트랜잭션)
 -- 워커 소유 테이블(stock_master, daily_candle, valuation_daily, investor_flow_daily,
 -- financial_summary 등)은 「KIS 수집 워커 명세」 §4 참조. 마이그레이션은 db-migrations 모듈(Liquibase) 단일 관리.
 ```
 
-### 전체 엔드포인트 요약 (30개)
+### 전체 엔드포인트 요약 (33개)
 
 | 모듈 | 엔드포인트 |
 |---|---|
@@ -406,10 +433,10 @@ idempotency_record(user_id, idem_key CHAR(26), action, response JSONB NULL, crea
 | search (1) | GET /stocks/search |
 | subscription (3) | GET /watchlist, PUT·DELETE /watchlist/{code} |
 | stream (2) | GET /rooms/{code}/stream, GET /rooms/{code}/quote |
-| notification (4) | GET badge, GET /notifications, PUT /rooms/{code}/cursor, POST read-all |
-| community (10) | posts CRUD(4)+목록, comments(POST·GET·DELETE=3), like(PUT/DELETE=1), report |
+| notification (6) | GET badge, GET /notifications, PUT /rooms/{code}/cursor, POST read-all, GET /notifications/opinions, PUT /notifications/opinions/cursor |
+| community (11) | posts(작성·목록·상세·수정·삭제=5), comments(POST·GET·DELETE=3), like(PUT·DELETE=2), report(1) |
 | stockinfo (5) | GET /stocks/{code} + candles·valuation·financials·investors |
 
 ---
 
-*core-api REST API 명세 v0.3 — WS 명세 v0.3·Redis 계약 v0.17·KIS 워커 명세 v0.7과 정합. 봉투/채널 문자열은 `:contracts`가 원천.*
+*core-api REST API 명세 v0.4 — WS 명세 v0.8·Redis 계약 v0.21·KIS 워커 명세 v0.8과 정합. 봉투/채널 문자열은 `:contracts`가 원천.*
