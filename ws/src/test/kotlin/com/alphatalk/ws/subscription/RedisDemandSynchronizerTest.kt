@@ -79,7 +79,7 @@ class RedisDemandSynchronizerTest {
         template.opsForHash<String, String>().entries(Keys.demandQuote(synchronizer.gwId))
 
     @Test
-    fun `sync - 스냅샷을 해시에 기록하고 새 활성 종목의 active true를 발행한다`() {
+    fun `sync - 스냅샷을 해시에 기록하고 전이가 있으면 gwId 신호를 1건만 발행한다`() {
         source.snapshot = DemandSnapshot(quote = mapOf("005930" to 2), room = mapOf("000660" to 1))
 
         synchronizer.sync()
@@ -90,28 +90,40 @@ class RedisDemandSynchronizerTest {
         assertThat(template.getExpire(Keys.gwAlive(synchronizer.gwId))).isBetween(1L, 15L)
         assertThat(template.getExpire(Keys.demandQuote(synchronizer.gwId))).isBetween(1L, 60L)
 
-        val messages = generateSequence { published.poll(5, TimeUnit.SECONDS) }.take(2).toList()
-        assertThat(messages).containsExactlyInAnyOrder(
-            DemandUpdated(DemandUpdated.KIND_QUOTE, "005930", active = true, ts = messages.first { it.kind == "quote" }.ts),
-            DemandUpdated(DemandUpdated.KIND_ROOM, "000660", active = true, ts = messages.first { it.kind == "room" }.ts),
-        )
+        val message = published.poll(5, TimeUnit.SECONDS)
+        assertThat(message?.gwId).isEqualTo(synchronizer.gwId)
+        assertThat(published.poll(500, TimeUnit.MILLISECONDS)).isNull()
     }
 
     @Test
-    fun `sync - 카운트만 변한 종목은 발행하지 않고 0이 된 종목만 active false를 발행한다`() {
+    fun `sync - 카운트만 변한 sync는 발행하지 않고 0이 된 종목이 있는 sync만 1건 발행한다`() {
         source.snapshot = DemandSnapshot(quote = mapOf("005930" to 1, "000660" to 1), room = emptyMap())
         synchronizer.sync()
-        repeat(2) { published.poll(5, TimeUnit.SECONDS) }
+        published.poll(5, TimeUnit.SECONDS)
+
+        source.snapshot = DemandSnapshot(quote = mapOf("005930" to 3, "000660" to 1), room = emptyMap())
+        synchronizer.sync()
+        assertThat(published.poll(500, TimeUnit.MILLISECONDS)).isNull()
 
         source.snapshot = DemandSnapshot(quote = mapOf("005930" to 3), room = emptyMap())
         synchronizer.sync()
 
         val message = published.poll(5, TimeUnit.SECONDS)
-        assertThat(message?.kind).isEqualTo(DemandUpdated.KIND_QUOTE)
-        assertThat(message?.code).isEqualTo("000660")
-        assertThat(message?.active).isFalse()
+        assertThat(message?.gwId).isEqualTo(synchronizer.gwId)
         assertThat(published.poll(500, TimeUnit.MILLISECONDS)).isNull()
         assertThat(quoteHash()).isEqualTo(mapOf("005930" to "3"))
+    }
+
+    @Test
+    fun `sync - 전이 없는 하트비트 sync는 발행하지 않는다`() {
+        source.snapshot = DemandSnapshot(quote = mapOf("005930" to 1), room = emptyMap())
+        synchronizer.sync()
+        published.poll(5, TimeUnit.SECONDS)
+
+        synchronizer.sync()
+        synchronizer.sync()
+
+        assertThat(published.poll(500, TimeUnit.MILLISECONDS)).isNull()
     }
 
     @Test
