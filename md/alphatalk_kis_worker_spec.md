@@ -80,7 +80,7 @@ WS 구독 용량이 유한하므로(§1.3) 전 종목이 아니라 수요가 있
 |---|---|---|---|---|
 | `demand:quote:{gwId}` | Hash `{code: refCount}` | 게이트웨이(스냅샷 전체 재기록) | worker-price | 접속 세션의 관심목록 기준 참조 수 |
 | `demand:room:{gwId}` | Hash `{code: refCount}` | 게이트웨이(스냅샷 전체 재기록) | worker-price | 방 토픽 구독(입장) 기준 — trade/depth·우선순위 판단 |
-| `demand:updated` | Pub/Sub | 게이트웨이 | worker-price | `{"kind":"quote|room","code":"005930","active":true,"ts":...}` — 종목 참조수 0↔1 전이 시만 발행 |
+| `demand:updated` | Pub/Sub | 게이트웨이 | worker-price | `{"gwId":"...","ts":...}` — 참조수 0↔1 전이가 있었던 sync당 최대 1건 발행(Redis 계약 v0.21). 소비 측은 payload를 파싱하지 않는다 |
 | `gw:alive:{gwId}` | String TTL 15s | 게이트웨이(하트비트) | worker-price | 살아있는 게이트웨이 식별. 죽은 gwId의 해시는 수요 합산에서 제외(스테일 정리) |
 | `gw:registry` | Set `{gwId}` | 게이트웨이(하트비트 주기 `SADD`·종료 시 `SREM`) | worker-price | 확인할 gwId 목록. 죽은 멤버는 worker-price가 `EXISTS` 재확인과 같은 Lua 안에서 `SREM`으로 청소 |
 

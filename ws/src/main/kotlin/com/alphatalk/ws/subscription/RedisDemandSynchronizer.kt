@@ -72,8 +72,10 @@ class RedisDemandSynchronizer(
             writeHash(Keys.demandRoom(gwId), snapshot.room)
             redis.opsForValue().set(Keys.gwAlive(gwId), "1", aliveTtl)
             redis.opsForSet().add(Keys.GW_REGISTRY, gwId)
-            publishTransitions(DemandUpdated.KIND_QUOTE, lastWritten.quote, snapshot.quote)
-            publishTransitions(DemandUpdated.KIND_ROOM, lastWritten.room, snapshot.room)
+            if (hasTransition(lastWritten.quote, snapshot.quote) || hasTransition(lastWritten.room, snapshot.room)) {
+                val payload = DemandUpdated(gwId = gwId, ts = System.currentTimeMillis())
+                redis.convertAndSend(Channels.DEMAND_UPDATED, objectMapper.writeValueAsString(payload))
+            }
             lastWritten = snapshot
         } catch (e: Exception) {
             log.warn("demand sync failed - retried on next cycle", e)
@@ -99,16 +101,10 @@ class RedisDemandSynchronizer(
         redis.execute(REWRITE_SCRIPT, listOf(key), *args.toTypedArray())
     }
 
-    private fun publishTransitions(kind: String, before: Map<String, Int>, after: Map<String, Int>) {
-        (before.keys + after.keys).forEach { code ->
-            val was = (before[code] ?: 0) > 0
-            val now = (after[code] ?: 0) > 0
-            if (was != now) {
-                val payload = DemandUpdated(kind = kind, code = code, active = now, ts = System.currentTimeMillis())
-                redis.convertAndSend(Channels.DEMAND_UPDATED, objectMapper.writeValueAsString(payload))
-            }
+    private fun hasTransition(before: Map<String, Int>, after: Map<String, Int>): Boolean =
+        (before.keys + after.keys).any { code ->
+            ((before[code] ?: 0) > 0) != ((after[code] ?: 0) > 0)
         }
-    }
 
     companion object {
         private val REWRITE_SCRIPT = DefaultRedisScript(
