@@ -705,6 +705,37 @@ class SessionPoolTest {
     }
 
     @Test
+    fun `ACK 없이 수요가 사라져도 등록 추적이 남아 해지를 보낸다`() {
+        val pool = pool(ackTimeoutMillis = 100, graceMillis = 1_000)
+        pool.maintain(setOf("000001"), emptyList(), subscribeAllowed = true)
+        server.awaitMessages(1)
+
+        pool.maintain(emptySet(), emptyList(), subscribeAllowed = true)
+        now += 1_500
+        pool.maintain(emptySet(), emptyList(), subscribeAllowed = true)
+
+        server.awaitMessages(2)
+        val unsubscribed = unsubscribesOf(server.receivedMessages)
+        assertEquals(1, unsubscribed.size)
+        assertEquals("000001", unsubscribed[0].path("body").path("input").path("tr_key").asText())
+    }
+
+    @Test
+    fun `ACK 유효기간이 지나 재등록한 뒤 늦게 온 ACK도 확정으로 흡수한다`() {
+        val meters = SimpleMeterRegistry()
+        val pool = pool(ackTimeoutMillis = 100, meters = meters)
+        pool.maintain(setOf("000001"), emptyList(), subscribeAllowed = true)
+        server.awaitMessages(1)
+        now += 500
+        pool.maintain(setOf("000001"), emptyList(), subscribeAllowed = true)
+        server.awaitMessages(2)
+
+        server.broadcastText(ackFrame("000001", success = true))
+
+        awaitConfirmed(meters, 1)
+    }
+
+    @Test
     fun `응답이 없으면 ACK 유효기간 뒤에 재등록한다`() {
         val pool = pool(ackTimeoutMillis = 100)
         pool.maintain(setOf("000001"), emptyList(), subscribeAllowed = true)
