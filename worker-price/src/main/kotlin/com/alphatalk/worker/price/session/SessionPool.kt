@@ -85,11 +85,6 @@ class SessionPool(
     }
 
     @Synchronized
-    fun maintain(target: Set<String>, subscribeAllowed: Boolean) {
-        maintain(target, emptyList(), subscribeAllowed)
-    }
-
-    @Synchronized
     fun maintain(target: Set<String>, rooms: List<String>, subscribeAllowed: Boolean) {
         reconcileAssignments(target, rooms)
         reconcileDepth(if (depthEnabled) rooms else emptyList())
@@ -330,8 +325,16 @@ class SessionPool(
             depthAssigned.mapTo(wanted) { Registration(depthTrFor(it), it) }
             (confirmed + pending.keys - wanted).forEach { registration ->
                 runCatching { current.unsubscribe(registration.symbol, registration.trId) }
-                confirmed -= registration
-                pending.remove(registration)
+                    .onSuccess {
+                        confirmed -= registration
+                        pending.remove(registration)
+                    }
+                    .onFailure {
+                        log.warn(
+                            "unsubscribe failed - retried next maintain: keyId={} trId={} code={}",
+                            account.keyId, registration.trId, registration.symbol, it,
+                        )
+                    }
             }
             (wanted - confirmed - pending.keys).forEach { registration ->
                 runCatching { current.subscribe(registration.symbol, registration.trId) }
