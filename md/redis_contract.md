@@ -1,5 +1,6 @@
-# Alpha Talk — Redis 계약 (`:contracts`) v0.21
+# Alpha Talk — Redis 계약 (`:contracts`) v0.22
 
+> v0.22 (2026-08-14): **방 quote 토픽 반영**([WS 명세](ws_api_spec.md) v0.9 `/topic/rooms/{code}/quote`) — 게이트웨이의 `quote:{code}` 채널 구독 조건을 "관심목록 수요 **또는** 방 quote 구독 중 하나라도 있으면"으로 확장하고, 해지는 양쪽 수요가 모두 사라졌을 때만 한다(교차 refcount — 관심목록이 비어도 방 열람자가 남아 있으면 채널을 끊지 않는다). 방 quote 구독은 기존 방 토픽과 동일하게 `demand:room:{gwId}`에 계상되어 price-worker 수집을 트리거한다 — **worker-price는 변경 없음**(이미 `demand:quote ∪ demand:room` 합산, v0.11). 와이어 스키마·키·채널 추가 없음.
 > v0.21 (2026-08-13): **`demand:updated` 발행을 종목별 N건에서 sync당 최대 1건으로 바꾼다** — payload는 `{gwId, ts}`. 유일한 구독자 worker-price는 payload를 파싱하지 않고(리스너가 메시지 내용을 버린다) 수신 자체를 리컨실 트리거로만 쓰며, 목표 종목은 항상 §3 해시 합산으로 재계산한다. 즉 "어느 종목이 켜졌는가"는 와이어에 실을 이유가 없던 정보다 — 장 시작처럼 전이가 몰리면 게이트웨이 sync 1회가 `PUBLISH`를 전이 종목 수만큼(수백 회) 왕복하는 비용만 남는다. sync당 1건으로 줄여 sync 왕복이 **최대 5회로 고정**된다(해시 2 + `gw:alive` + `gw:registry` + PUBLISH ≤1). **전이가 있을 때만 발행한다** — 하트비트마다 무조건 발행하면 worker-price가 5초마다 깨어나 "전이 시 즉시 + 10s 리컨실" 설계가 "5s 상시 폴링"으로 변질된다. 소비자가 payload를 읽지 않으므로 스키마 교체는 런타임 호환이다(구버전 worker-price도 새 메시지에 깃발만 올린다). `kind`/`code`/`active` 필드는 제거하고 별도 로그로도 남기지 않는다 — 종목 단위 전이는 해시 diff로 재구성 가능하다.
 
 > v0.20 (2026-08-11): **살아있는 게이트웨이 열거를 `gw:registry`(Set) 기반으로 바꾼다.** worker-price는 리컨실마다 `SCAN MATCH gw:alive:*`로 게이트웨이를 찾았는데, `SCAN`의 비용은 매칭 키 수가 아니라 **전체 키스페이스 크기**에 비례한다(`MATCH`는 슬롯에서 꺼낸 뒤 걸러낼 뿐이다). `cursor:{userId}:{code}`가 유저×종목으로 늘고 `watchlist:{userId}`는 TTL이 없어 키스페이스는 단조 증가하는데, 정작 찾는 `gw:alive:*`는 게이트웨이 수(한 자릿수)뿐이라 낭비 비율이 규모에 비례해 나빠진다. 게이트웨이가 자기 `gwId`를 `gw:registry` Set에 등록하면 조회가 `SMEMBERS` + `MGET` **왕복 2회 고정**이 된다. **생존 판정은 여전히 `gw:alive:{gwId}` TTL이 소유한다** — Set은 멤버별 TTL이 없고 비정상 종료 시 `SREM` 기회가 없으므로 부정확할 수 있는 **후보 목록**일 뿐이고, worker-price가 `gw:alive` 존재로 걸러낸 뒤 죽은 멤버를 `SREM`으로 청소한다. 등록은 하트비트 주기(5s)마다 반복하는 멱등 `SADD`라 단발 실패·Redis 초기화가 다음 주기(≤5s)에 자가 치유된다 — 기동 시 한 번만 등록하면 그때 실패한 게이트웨이가 영원히 보이지 않는다. **`SCAN` 경로는 남기지 않는다**: 등록하지 않는 게이트웨이는 이 계약 이전 버전뿐이고 서비스는 아직 상용 배포 전이라 그런 인스턴스가 존재하지 않는다. 이후 배포는 모든 게이트웨이가 등록하므로 레지스트리가 유일한 열거 출처이고, 등록 유실은 `SADD` 반복이 흡수한다. `:contracts`의 `Keys.GW_REGISTRY` 상수 사용. 아울러 리컨실 1회가 키스페이스 순회에서 O(1) 명령 2개로 내려간 만큼 worker-price의 리컨실 주기를 60s → **10s**로 당긴다 — 레지스트리가 일시적으로 비는 등 `demand:updated` 전이 없이 상태가 어긋나는 경우, **게이트웨이 재등록 지연(하트비트 주기) + 리컨실 주기**가 구독 해제 유예(30s)를 넘으면 복구 전에 KIS 구독이 끊긴다. 이 부등식은 worker-price가 기동 시 검증한다. 양쪽이 함께 지켜야 하는 타이밍(하트비트 5s · `gw:alive` TTL 15s · 수요 해시 TTL 60s)은 `:contracts`의 `DemandTiming`이 소유하고 **서비스별 설정으로 노출하지 않는다** — `ws.demand.*` 프로퍼티를 없앴다. 한쪽만 바꿀 수 있으면 worker-price의 복구 시간 검증식이 실제 하트비트와 어긋나 통과해버린다(예: 하트비트 25s인데 워커는 5s로 가정).
@@ -194,7 +195,7 @@ ingest-worker 스케줄러(싱글턴)가 매일 적재하고 — 종목 잡은 1
 | `market-div:{code}` | String (`UN`\|`J`) | 그 종목의 시계열 API가 통합(`UN`)을 받는지 KRX 전용(`J`)이어야 하는지 — **NXT 상장 여부의 단일 소유자**(KIS 워커 명세 §2.3·§2.6). 분봉·실시간 구독·현재가 폴백이 모두 이 키를 읽는다. 쓰기는 확정 판정만: 분봉의 `acml_vol>0 && 봉 전부 0` → `J`, 정상 봉 → `UN`; 실시간의 통합 틱 수신 → `UN`(**실시간은 `J`를 쓰지 않는다** — 침묵은 "통합이 안 준다"와 "체결이 없었다"를 구분하지 못한다. 또한 체결 TR의 틱만 근거로 쓴다 — 시간외 `H0STOUP0`은 구분과 무관하게 항상 등록되는 KRX 채널이라 통합 체결의 증거가 아니다). **KRX 조회가 성공했다는 사실만으로는 쓰지 않는다**(`J`는 모든 종목에서 동작하므로 NXT 미상장의 증거가 아니다) | worker-price | worker-price | **7일** |
 | `minute:market-div:{code}:{date}` | String (`UN`\|`J`) | 그 종목·일자의 분봉을 어느 시장 구분으로 적재했는지(KIS 워커 명세 §2.6) — NXT 지원이면 `UN`, 미지원이면 `J`. 기록이 있으면 그 구분으로 1콜만 조회한다. 판별·전환은 **그날 적재분이 0이고 `acml_vol > 0`일 때만** 일어나며(하루 안 구분 혼입 방지), 전환 시 `minute:through:{code}:{date}`를 **먼저** 지운 뒤 이 키를 기록한다(크래시가 "둘 다 없음"으로 수렴해 재판정이 멱등). 적재된 분봉은 어떤 경우에도 삭제하지 않는다 | worker-price | worker-price | **2일** |
 | `demand:quote:{gwId}` | Hash `{code: refCount}` | 접속 세션의 관심목록 기준 종목 참조 수(유저 단위) — 주기·전이 트리거마다 스냅샷 전체 재기록(v0.12) | 게이트웨이 | worker-price | **60s** — 재기록이 연장 |
-| `demand:room:{gwId}` | Hash `{code: refCount}` | 방 토픽 구독(입장) 기준 참조 수(구독 단위) — trade/depth·우선순위 판단 | 게이트웨이 | worker-price | **60s** — 재기록이 연장 |
+| `demand:room:{gwId}` | Hash `{code: refCount}` | 방 토픽 구독(입장) 기준 참조 수(구독 단위, quote/post/trade/depth 합산) — 방 열람자의 시세 수집 트리거·우선순위 판단 | 게이트웨이 | worker-price | **60s** — 재기록이 연장 |
 | `gw:alive:{gwId}` | String | 살아있는 게이트웨이 식별(하트비트 5s 주기 갱신). worker-price는 리컨실 때 alive gw의 수요만 합산 | 게이트웨이 | worker-price | **15s** |
 | `gw:registry` | Set `{gwId}` | 게이트웨이 **후보 목록** — 키스페이스 전체를 훑는 `SCAN MATCH gw:alive:*` 없이 어느 `gwId`를 확인할지 알려준다(v0.20). 하트비트 주기마다 멱등 `SADD`, graceful shutdown 시 `SREM`. 등록은 `gw:alive` 기록 **뒤에** 한다 — 순서가 반대면 갓 등록된 `gwId`가 하트비트를 쓰기 전에 읽혀 청소될 수 있다. **열거의 유일한 출처지만 생존 판정 권한은 없다** — 비정상 종료한 멤버가 남으므로 worker-price가 `gw:alive` 존재로 걸러내고 죽은 멤버를 `SREM`한다. 삭제는 **`EXISTS` 재확인과 같은 Lua 안에서** 한다(판정과 삭제 사이에 하트비트가 갱신되면 살아난 게이트웨이를 지워 그 세션들의 시세가 끊긴다) | 게이트웨이(SADD/SREM) | worker-price(SMEMBERS/SREM) | 없음 — 멤버는 읽기 측이 청소 |
 
@@ -243,7 +244,8 @@ Streams를 타는 경로는 뉴스 기반 소식(stream) 하나뿐이다. 틱·�
 ```
 틱(quote) ─ 큐 없음:
   KIS WS → price-worker → [자료구조] price:{code} 캐시 갱신
-                        → PUBLISH [P/S] quote:{code} → 게이트웨이 → /user/queue/quote
+                        → PUBLISH [P/S] quote:{code} → 게이트웨이 → /user/queue/quote (관심목록)
+                                                                  · /topic/rooms/{code}/quote (방 열람, v0.22)
  
 뉴스 기반 소식(stream) ─ Streams 작업 큐 사용:
   뉴스/리포트 → ingest-worker → XADD [STREAM] queue:ingest
