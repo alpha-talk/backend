@@ -2,11 +2,13 @@ package com.alphatalk.worker.price.session
 
 import com.alphatalk.kis.model.KisAccount
 import com.alphatalk.kis.model.KisLimits
+import com.alphatalk.kis.ws.KisDepth
 import com.alphatalk.kis.ws.KisFrameParser
 import com.alphatalk.kis.ws.KisSessionListener
 import com.alphatalk.kis.ws.KisTick
 import com.alphatalk.kis.ws.KisWebSocketSession
 import com.alphatalk.worker.price.conflation.ConflationBuffer
+import com.alphatalk.worker.price.conflation.DepthConflationBuffer
 import com.alphatalk.worker.price.market.MarketDivStore
 import io.micrometer.core.instrument.Gauge
 import io.micrometer.core.instrument.MeterRegistry
@@ -25,8 +27,12 @@ class SessionPool(
     private val marketDivs: MarketDivStore,
     private val unifiedTrId: String = KisFrameParser.TR_ID_TICK_TOTAL,
     private val krxTrId: String = KisFrameParser.TR_ID_TICK,
+    private val depthBuffer: DepthConflationBuffer = DepthConflationBuffer(),
+    private val depthUnifiedTrId: String = KisFrameParser.TR_ID_DEPTH_TOTAL,
+    private val depthKrxTrId: String = KisFrameParser.TR_ID_DEPTH,
+    private val depthEnabled: Boolean = false,
     private val silenceMillis: Long = 20_000,
-    maxRegistrationsPerSession: Int = KisLimits.MAX_REGISTRATIONS_PER_SESSION,
+    private val maxRegistrationsPerSession: Int = KisLimits.MAX_REGISTRATIONS_PER_SESSION,
     private val removalGraceMillis: Long = 30_000,
     private val backoff: BackoffPolicy = BackoffPolicy(),
     private val connectTimeoutSeconds: Long = 10,
@@ -43,6 +49,10 @@ class SessionPool(
     private val sessions = accounts.map { PooledSession(it) }
     private val assignments = mutableMapOf<String, PooledSession>()
     private val pendingRemovals = mutableMapOf<String, Long>()
+    private val depthRemovals = mutableMapOf<String, Long>()
+
+    @Volatile
+    private var depthDroppedCount = 0
     private val degraded = linkedSetOf<String>()
     private val tickDivs = ConcurrentHashMap<String, String>()
     private val lastTickAt = ConcurrentHashMap<String, Long>()
@@ -66,11 +76,23 @@ class SessionPool(
         Gauge.builder("degraded.symbols", this) { pool ->
             pool.degraded.size.toDouble()
         }.register(meters)
+        Gauge.builder("depth.symbols", this) { pool ->
+            pool.sessions.sumOf { it.depthAssigned.size }.toDouble()
+        }.register(meters)
+        Gauge.builder("depth.symbols.dropped", this) { pool ->
+            pool.depthDroppedCount.toDouble()
+        }.register(meters)
     }
 
     @Synchronized
     fun maintain(target: Set<String>, subscribeAllowed: Boolean) {
-        reconcileAssignments(target)
+        maintain(target, emptyList(), subscribeAllowed)
+    }
+
+    @Synchronized
+    fun maintain(target: Set<String>, rooms: List<String>, subscribeAllowed: Boolean) {
+        reconcileAssignments(target, rooms)
+        reconcileDepth(if (depthEnabled) rooms else emptyList())
         val now = clock()
         if (subscribeAllowed) {
             adoptUpdatedDivs()
@@ -102,6 +124,50 @@ class SessionPool(
         val chosen = tickDivs.computeIfAbsent(symbol) { marketDivs.get(it) ?: MarketDivStore.UNIFIED }
         val tick = if (chosen == MarketDivStore.KRX) krxTrId else unifiedTrId
         return tickTrIds.map { if (it == unifiedTrId) tick else it }
+    }
+
+    private fun depthTrFor(symbol: String): String {
+        val chosen = tickDivs.computeIfAbsent(symbol) { marketDivs.get(it) ?: MarketDivStore.UNIFIED }
+        return if (chosen == MarketDivStore.KRX) depthKrxTrId else depthUnifiedTrId
+    }
+
+    private fun reconcileDepth(depthTarget: List<String>) {
+        val now = clock()
+        val live = LinkedHashSet(depthTarget)
+        live.forEach(depthRemovals::remove)
+        val previous = sessions.flatMapTo(mutableSetOf()) { it.depthAssigned }
+        previous.filter { it !in live }.forEach { depthRemovals.putIfAbsent(it, now + removalGraceMillis) }
+        depthRemovals.entries.removeIf { it.value <= now }
+        val holdovers = previous.filter { it in depthRemovals }
+        sessions.forEach { it.depthAssigned.clear() }
+        var dropped = 0
+        live.filter { it in previous }.forEach { if (!tryAssignDepth(it)) dropped += 1 }
+        holdovers.forEach(::tryAssignDepth)
+        live.filter { it !in previous }.forEach { if (!tryAssignDepth(it)) dropped += 1 }
+        depthDroppedCount = dropped
+    }
+
+    private fun evictQuoteOnly(roomSet: Set<String>): PooledSession? {
+        val victim = assignments.keys.firstOrNull { it in pendingRemovals && it !in roomSet }
+            ?: assignments.keys.firstOrNull { it !in roomSet }
+            ?: return null
+        val session = assignments.remove(victim) ?: return null
+        session.assigned.remove(victim)
+        pendingRemovals.remove(victim)
+        forgetSymbol(victim)
+        degraded += victim
+        log.info("방 수요가 quote 전용 등록을 선점한다 - REST 폴링으로 넘긴다: evicted={}", victim)
+        meters.counter("tick.room.preempted").increment()
+        return session
+    }
+
+    private fun tryAssignDepth(symbol: String): Boolean {
+        val session = assignments[symbol] ?: return false
+        if (symbol in session.depthAssigned) return true
+        val used = session.assigned.size * tickTrIds.size + session.depthAssigned.size
+        if (used >= maxRegistrationsPerSession) return false
+        session.depthAssigned += symbol
+        return true
     }
 
     private fun adoptUpdatedDivs() {
@@ -178,14 +244,19 @@ class SessionPool(
         pooled.onAck(trId, trKey, success)
     }
 
-    private fun reconcileAssignments(target: Set<String>) {
+    private fun reconcileAssignments(target: Set<String>, rooms: List<String>) {
         val now = clock()
         degraded.clear()
-        target.forEach { symbol ->
+        val roomSet = rooms.toSet()
+        val ordered = LinkedHashSet<String>(rooms.size + target.size)
+        rooms.filterTo(ordered) { it in target }
+        ordered.addAll(target)
+        ordered.forEach { symbol ->
             pendingRemovals.remove(symbol)
             if (symbol !in assignments) {
                 val candidate = sessions.minByOrNull { it.assigned.size }
                     ?.takeIf { it.assigned.size < maxSymbolsPerSession }
+                    ?: if (symbol in roomSet) evictQuoteOnly(roomSet) else null
                 if (candidate == null) {
                     degraded += symbol
                 } else {
@@ -207,6 +278,7 @@ class SessionPool(
     private inner class PooledSession(val account: KisAccount) {
         var state: SessionState = SessionState.DISCONNECTED
         val assigned = mutableSetOf<String>()
+        val depthAssigned = mutableSetOf<String>()
         val confirmed: MutableSet<Registration> = ConcurrentHashMap.newKeySet()
         val pending = mutableMapOf<Registration, Long>()
         var session: KisWebSocketSession? = null
@@ -255,6 +327,12 @@ class SessionPool(
             val wanted = assigned.flatMapTo(mutableSetOf()) { symbol ->
                 trIdsFor(symbol).map { Registration(it, symbol) }
             }
+            depthAssigned.mapTo(wanted) { Registration(depthTrFor(it), it) }
+            (confirmed + pending.keys - wanted).forEach { registration ->
+                runCatching { current.unsubscribe(registration.symbol, registration.trId) }
+                confirmed -= registration
+                pending.remove(registration)
+            }
             (wanted - confirmed - pending.keys).forEach { registration ->
                 runCatching { current.subscribe(registration.symbol, registration.trId) }
                     .onSuccess { pending[registration] = now }
@@ -264,11 +342,6 @@ class SessionPool(
                             account.keyId, registration.trId, registration.symbol, it,
                         )
                     }
-            }
-            (confirmed + pending.keys - wanted).forEach { registration ->
-                runCatching { current.unsubscribe(registration.symbol, registration.trId) }
-                confirmed -= registration
-                pending.remove(registration)
             }
         }
 
@@ -320,6 +393,11 @@ class SessionPool(
                 onSymbolTick(trId, tick.code, now)
             }
             meters.counter("tick.in").increment(ticks.size.toDouble())
+        }
+
+        override fun onDepths(trId: String, depths: List<KisDepth>) {
+            depths.forEach(depthBuffer::offer)
+            meters.counter("depth.in").increment(depths.size.toDouble())
         }
 
         override fun onSubscribeAck(trId: String?, trKey: String?, success: Boolean) {

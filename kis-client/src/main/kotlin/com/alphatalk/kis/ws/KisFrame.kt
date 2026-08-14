@@ -3,6 +3,8 @@ package com.alphatalk.kis.ws
 sealed interface KisFrame {
     data class Ticks(val trId: String, val ticks: List<KisTick>) : KisFrame
 
+    data class Depths(val trId: String, val depths: List<KisDepth>) : KisFrame
+
     data class PingPong(val raw: String) : KisFrame
 
     data class Control(

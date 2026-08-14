@@ -31,19 +31,29 @@ class RedisDemandSource(
     private var listenerExecutor: ThreadPoolTaskExecutor? = null
     private var reconciler: Thread? = null
 
+    @Volatile
+    private var roomCounts: Map<String, Long> = emptyMap()
+
     override fun targetSymbols(): Set<String> = demanded
+
+    override fun roomDemand(): Map<String, Long> = roomCounts
 
     fun refresh() {
         runCatching {
             val symbols = HashSet<String>()
+            val rooms = HashMap<String, Long>()
             aliveGatewayIds().forEach { gwId ->
                 symbols += activeCodes(Keys.demandQuote(gwId))
-                symbols += activeCodes(Keys.demandRoom(gwId))
+                activeCounts(Keys.demandRoom(gwId)).forEach { (code, count) ->
+                    symbols += code
+                    rooms.merge(code, count, Long::plus)
+                }
             }
             if (symbols != demanded) {
                 log.info("demand changed: {} -> {} symbols", demanded.size, symbols.size)
             }
             demanded = symbols
+            roomCounts = rooms
         }.onFailure {
             log.warn("demand refresh failed - keeping previous {} symbols", demanded.size, it)
         }
@@ -77,10 +87,12 @@ class RedisDemandSource(
         )
     }
 
-    private fun activeCodes(hashKey: String): Set<String> =
+    private fun activeCodes(hashKey: String): Set<String> = activeCounts(hashKey).keys
+
+    private fun activeCounts(hashKey: String): Map<String, Long> =
         redis.opsForHash<String, String>().entries(hashKey)
-            .filterValues { (it.toLongOrNull() ?: 0L) > 0L }
-            .keys
+            .mapValues { it.value.toLongOrNull() ?: 0L }
+            .filterValues { it > 0L }
 
     override fun start() {
         if (!running.compareAndSet(false, true)) return

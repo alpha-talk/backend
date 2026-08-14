@@ -1,6 +1,7 @@
-# Alpha Talk — KIS 수집 워커 명세 v0.8
+# Alpha Talk — KIS 수집 워커 명세 v0.9
 **worker-price · worker-batch · `:kis-client` 공유 라이브러리 · 담당: 민균**
 
+> **v0.9 (2026-08-14)**: 실시간 호가(depth) 확장 착수(§2.3) — P3로 미뤄뒀던 `depth:{code}` 발행을 구현 기준으로 확정. ⑴ 호가 TR은 체결과 같은 규칙으로 종목별 선택한다 — `market-div:{code}`가 `J`면 `H0STASP0`(KRX), 아니면 `H0UNASP0`(통합). 공식 open-trading-api columns 대조 결과 두 TR은 앞 59필드가 동일하고 통합만 KRX/NXT 중간가 6필드가 뒤에 붙는다(파서는 공유 프리픽스 idx 0~42만 사용). ⑵ 등록 대상은 **방 수요(`demand:room`) 종목만**이며, 체결 기준 배정을 그대로 두고 세션 잔여 슬롯 안에서 refCount 내림차순으로 얹는다 — quote 용량을 깎지 않고, 초과분은 `depth.symbols.dropped`로 노출한다. 체결 배정 쪽에서는 §2.2의 우선순위 ①(입장 방)을 구현해 방 종목이 quote 전용 심볼에 밀려 WS 배정을 못 받는 일이 없게 한다(가득 차면 선점, `tick.room.preempted`). ⑶ 호가에는 REST 폴백·침묵 강등이 없고(계약 §1.1 선택 채널·best-effort), 호가 프레임은 market-div 확정·침묵 판정에 쓰지 않는다. ⑷ `alphatalk.price.depth-enabled` 기본 off(fail-closed) — 방 수요는 posts 입장만으로도 생기므로 게이트웨이 `trade-depth-enabled`와 함께 켠다.
 > **v0.8 (2026-08-09)**: `minute_candle_backfill` 착수 — §9.9 계측 종결(`FHKST03010230` 실계정). ⑴ 트리거를 **수요 0→1 전이에서 조회 트리거로 변경** — 분봉 소비의 원천이 REST 조회이고 신선화 내부 API가 이미 조회 편승 지점이라, 같은 경계에서 직전 **7영업일**(설정)의 빈 날짜를 **비동기 best-effort**로 채운다(조회 응답은 백필을 기다리지 않는다). ⑵ 계측 결과: 1콜 **최대 120건** 최신→과거 정렬, `FID_INPUT_DATE_1`+`FID_INPUT_HOUR_1` 이하 봉을 담고 **날짜 경계를 넘어 직전 영업일로 이어진다**; **휴장일 날짜 요청은 에러가 아니라 직전 영업일 행을 반환**하고 NXT 미지원 종목 `UN` 요청은 엉뚱한 과거 날짜 행을 주므로 `stck_bsop_date=요청일` 필터가 필수; 시각은 봉 시작(`HHmmss`), `cntg_vol`은 분값·`acml_tr_pbmn`은 당일 누적(차분 필요), `output1`은 요청일이 아닌 **현재 시점 스냅샷**이라 당일 TR의 `acml_vol` 기반 구분 판정을 과거 날짜에 쓸 수 없다. ⑶ 백필 규칙은 §2.6 — 날짜 단위 원자 적재·`UN`→`J` 날짜 필터 폴백·후방 페이징·분산 락 `lock:minute-backfill:{code}`(Redis 계약 v0.19).
 > **v0.7 (2026-08-07)**: 같은 함정이 **실시간에도 있었다** — `H0UNCNT0`(통합)이 NXT 미상장 종목에 등록 SUCCESS를 주고 틱을 0건 준다(047040 45초 0건 vs `H0STCNT0` 48건, 실계정 계측). 대우건설이 구독·거래 중인데 `price:047040` 캐시가 한 번도 안 생긴 사고의 원인이다. ⑴ 체결 TR을 **종목별로** 고르고(§2.3), ⑵ **NXT 상장 여부를 `market-div:{code}` 한 키가 소유**해 분봉·실시간·현재가 폴백이 함께 읽고 확정 판정만 쓰며(Redis 계약 v0.17), ⑶ 등록됐는데 조용한 심볼을 degraded로 강등해 REST 폴링이 받게 한다 — **조용히 비는 상태를 만들지 않는다**. 현재가 폴백도 같은 구분을 써 폴백 구간의 누적거래량 37% 어긋남을 없앤다.
 > **v0.6 (2026-08-07)**: 투자의견 수집(§3.3)을 실계정 계측으로 확정 — §9-7 종결. ⑴ 회원사 코드 원천은 KIS 마스터 파일 `memcode.mst.zip`(5자리 코드+이름+외국계 플래그, 집계 행 `99999` 제외 61개사)이고 **요청 `FID_INPUT_ISCD`는 5자리 코드의 뒤 3자리**다 — 5자리를 그대로 보내면 에러가 아니라 `rt_cd=0`에 0행이 온다(조용한 실패). ⑵ 이 TR은 **연속조회를 지원하지 않는다** — 응답은 최신순 최대 100행에서 잘리고 `tr_cont`가 오지 않는다(`P=1`, v0.2의 tr_cont 반복 절차 폐기). ⑶ 응답에 **회원사명 `mbcr_name`이 있다**(v0.2의 "이름 없음" 가정 정정 — 코드만 없다). ⑷ `invt_opnn_cls_code`는 등급 분류가 아니라 위치 값(현재=2·직전=3 고정)이라 **content_hash·payload에서 제외**하고 의견 텍스트를 쓴다(WS 계약 v0.7). ⑸ `hts_goal_prc=0`은 목표가 없음 → `null`.
@@ -93,8 +94,9 @@ WS 구독 용량이 유한하므로(§1.3) 전 종목이 아니라 수요가 있
 
 - WS 등록 한도는 세션당 41건이고 **등록 단위는 (tr_id, 종목)**이다. 심볼당 2건(통합 체결가+시간외 체결가, §2.3)을 등록하므로 심볼 용량은 `C = ⌊41 / 2⌋ × 계정 수 = 20 × 계정 수`다. 계정 목록은 `KIS_ACCOUNTS`(JSON 배열: keyId·appkey·appsecret)로 주입한다.
 - 시간외 TR을 상시 등록하는 이유: 장중/시간외 경계에서 TR을 갈아끼우면 하루 두 번 대량 재구독·재배정 플래핑이 생기고, 경계 시각에 용량이 출렁여 강등이 요동친다. 용량 절반을 내주고 등록을 고정하는 쪽을 택한다 — 초과 수요는 어차피 REST 폴링 강등(§2.5)이 받는다. 시간대별 TR 스왑은 계정 추가로도 부족해질 때의 후속 최적화로 남긴다.
-- 목표 집합은 리컨실마다 산출한다. `rooms ∪ topN(quote)`이 C를 넘으면 **우선순위: ① 입장 방 ② quote refCount 내림차순**으로 자른다. 탈락분은 REST 폴링으로 강등한다(§2.5).
+- 목표 집합은 리컨실마다 산출한다. `rooms ∪ topN(quote)`이 C를 넘으면 **우선순위: ① 입장 방 ② quote refCount 내림차순**으로 자른다. 탈락분은 REST 폴링으로 강등한다(§2.5). ①의 구현: 신규 배정은 방 종목(refCount 내림차순)부터 처리하고, 세션이 가득 차 방 종목이 들어갈 자리가 없으면 **quote 전용 등록 하나를 선점**해 REST 폴링으로 밀어낸다(`tick.room.preempted` — 해지 유예 중인 심볼 우선 선정). 방이 아닌 quote끼리의 세부 순서(refCount 내림차순)는 아직 도착 순이다 — 초과분이 전부 REST로 받쳐지므로 후속으로 남긴다. 방 종목의 WS 배정을 보장하는 이유는 quote(REST 폴백 있음)와 달리 **depth는 WS 등록이 유일한 경로**이기 때문이다(§2.3 호가 확장).
 - 배정: `종목 → (세션, 슬롯)` 맵 + 역인덱스. 신규는 빈 슬롯 최다 세션에 배정하고 해지는 슬롯을 반납한다. 잦은 재배정(플래핑)을 막으려고 **해지는 30초 유예**한다 — 그 사이 재수요가 오면 취소.
+- 호가(depth) 등록은 이 배정을 바꾸지 않는다 — 체결 기준 배정(심볼당 2건)을 그대로 두고, 각 종목이 배정된 세션의 **잔여 슬롯(41 − 체결계 등록 수) 안에서만** 방 수요 종목의 호가를 얹는다(§2.3 호가 확장). 심볼 용량 C를 3건 기준으로 줄이지 않는 이유: depth는 선택 기능이고 방 수요는 전체 수요의 부분집합이라, 전 종목 3건 계산은 핵심인 quote 커버리지를 1/3 깎는다.
 - 세션 상태머신: `DISCONNECTED → CONNECTING(Approval 발급) → CONNECTED(구독 리플레이) → DEGRADED(오류 누적)`. 재접속은 지수 백오프+지터. 성공하면 그 세션 배정분 전체를 재구독한다.
 
 ### 2.3 KIS WS 프로토콜
@@ -149,7 +151,27 @@ WS 구독 용량이 유한하므로(§1.3) 전 종목이 아니라 수요가 있
 
 > 전체 필드 순서는 공식 open-trading-api columns 기준 전 필드 픽스처(46·43필드, 다건 이어붙임 포함)로 단위 테스트에 고정했고, **실 수신 프레임 캡처**로 재확정한다(§9). `prevClose`는 틱에 없음 → `price − PRDY_VRSS`로 산출.
 
-H0STASP0(실시간 호가)는 P3 `depth` 확장 시 동일 구조로 추가한다.
+#### 실시간 호가(depth) 확장 — `H0UNASP0`·`H0STASP0`
+
+`depth:{code}`는 선택 채널이다(Redis 계약 §1.1 — 보는 방만, best-effort). 체결과 달리 전 수요 종목이 아니라 **방 수요 종목만** 다룬다.
+
+- **켜기**: `alphatalk.price.depth-enabled`(기본 off, fail-closed). `demand:room`은 posts 토픽 구독(입장)만으로도 생기므로, 플래그 없이 상시 등록하면 게이트웨이가 depth 토픽을 열지 않은 배포에서도 등록 슬롯만 소모한다. 클라이언트까지 흐르려면 게이트웨이 `ws.features.trade-depth-enabled`도 함께 켜야 한다.
+- **등록 대상과 우선순위**: 리컨실마다 살아있는 게이트웨이의 `demand:room:{gwId}`를 합산해 refCount>0 종목을 **내림차순(동률은 코드 오름차순)**으로 정렬하고, 각 종목이 배정된 세션의 잔여 슬롯 안에서만 호가를 등록한다(§2.2). 슬롯이 없으면 등록하지 않고 `depth.symbols.dropped`로 노출한다 — 조용한 축소 금지. 방 수요가 사라지면 체결과 같은 해지 유예를 거쳐 해제된다. 슬롯이 모자랄 때의 배정 순서는 ① **유지 중이면서 여전히 방 수요가 있는 등록**(끊기지 않는 스트림이 최우선 — 신규 수요의 refCount가 더 높아도 활성 등록을 빼앗지 않는다, 안정 우선) ② **유예 홀드오버**(재입장·수요 블링크 플래핑 방지 — 신규 수요보다 앞선다) ③ **신규 방 수요**이며, 각 단계 안에서는 refCount 내림차순이다. 단 체결(quote) 수요가 슬롯을 되찾으면 단계와 무관하게 즉시 밀려난다 — depth는 quote 용량을 깎지 않는다. 같은 정비 주기 안에서는 **해지 프레임을 등록 프레임보다 먼저 보낸다** — 41건 한도가 꽉 찬 세션에서 해지 몫을 먼저 비워야 새 등록이 거절되지 않는다(체결 재구독 전환의 공백은 §2.5 REST 강등이 이미 받는다). 방 수요 종목은 수요 정의(§2.1 — rooms ∪ watchlist)상 항상 체결 구독 대상에도 포함되므로, 호가만 있고 체결이 없는 종목은 없다.
+- **TR 선택**: 체결과 같은 구분 선택을 공유한다 — `market-div:{code}`가 `J`면 `H0STASP0`, 아니면 `H0UNASP0`. 체결의 구분 전환 재구독(위)이 일어나면 호가 등록도 함께 갈아탄다. `H0UNASP0`도 NXT 미상장 종목에 등록 SUCCESS+무데이터일 것으로 가정한다(시계열 API 공통 현상, §9.15에서 실계정 확인) — 구분 확정은 체결·분봉 경로가 하고 호가는 따라간다.
+- **판정 격리**: 호가 프레임은 market-div 확정에도, 체결 침묵 판정·리셋에도 쓰지 않는다. 호가는 체결 없이도 흐르므로(잔량 변동) 이를 근거로 삼으면 체결이 조용한 종목의 REST 강등(§2.5)이 막힌다. 호가 자체에는 침묵 강등·REST 폴백이 없다 — 유실·공백은 다음 호가 프레임이 대체한다.
+- **필드**(공식 open-trading-api columns 대조, 2026-08-14): `H0STASP0`는 59필드, `H0UNASP0`는 같은 59필드 뒤에 KRX/NXT 중간가 6필드(`KMID_PRC`·`KMID_TOTAL_RSQN`·`KMID_CLS_CODE`·`NMID_*`)가 붙은 65필드다. 파서는 두 TR이 공유하는 프리픽스만 쓴다:
+
+| idx | 필드 | 매핑 |
+|---|---|---|
+| 0 | MKSC_SHRN_ISCD | code |
+| 1 | BSOP_HOUR (HHMMSS) | 호가시각 |
+| 3–12 | ASKP1–10 | 매도호가 1~10단계 |
+| 13–22 | BIDP1–10 | 매수호가 1~10단계 |
+| 23–32 | ASKP_RSQN1–10 | 매도호가 잔량 1~10단계 |
+| 33–42 | BIDP_RSQN1–10 | 매수호가 잔량 1~10단계 |
+
+  총잔량·예상체결(43–58)·중간가(59–64)는 v1에서 쓰지 않는다. 실수신 캡처 재확정은 §9.15.
+- **발행**: 체결과 같은 conflation(§2.4)을 따른다 — 종목별 최신 호가만 버퍼에 남기고 주기마다 `PUBLISH depth:{code}` `{"type":"depth","code":"005930","ts":...,"data":{"bids":[[가격,잔량],…],"asks":[[가격,잔량],…]}}`(WS 계약 §4.5, `eventId` 없음). 가격 0인 단계(빈 슬롯)는 payload에서 뺀다. `price:{code}` 같은 캐시 키는 두지 않는다 — 계약에 depth 캐시가 없고, 방 입장 시점의 스냅샷 공백은 다음 호가 프레임이 채운다.
 
 ### 2.4 Conflation & 발행 (Redis 계약 §1.1 이행)
 
@@ -164,6 +186,7 @@ KIS 프레임 → 파싱 → 종목별 최신값 버퍼(덮어쓰기)
 
 - 봉투·필드는 `:contracts` DTO 사용. `eventId` 없음(스냅샷성 — 계약 §1.2).
 - 발행 실패(Redis 순단)는 드랍을 허용한다 — 다음 틱이 대체한다.
+- 호가(depth)도 같은 주기의 conflation을 거치되 ①(캐시 HSET) 없이 ②(PUBLISH `depth:{code}`)만 수행한다(§2.3 호가 확장).
 
 ### 2.5 REST 스냅샷 폴링 (강등 경로 + 장전 워밍)
 
@@ -431,12 +454,13 @@ OpenDART 응답 상태는 **세 갈래로 나눈다**. ① 데이터 없음(`013
 | `DEMAND_RECONCILE_MS` / `CONFLATION_MS` | `10000` / `200` | §2 파라미터(`alphatalk.price.demand-reconcile-ms`·`conflation-ms`). 둘 다 기동 시 검증하며 어기면 기동에 실패한다 — 리컨실은 **게이트웨이 재등록 지연(하트비트 5s) + 주기 < `removal-grace-ms`**, conflation은 **100~250ms**(§2.4) |
 | `MINUTE_CANDLE_FRESH_SEC` / `MINUTE_CANDLE_RETENTION_DAYS` | `60` / `30` | §2.6 분봉 신선화 임계·보존 |
 | `TICK_SILENCE_MS` | `20000` | §2.3 등록 후 이 시간 동안 체결 틱이 없으면 degraded로 강등해 REST 폴링에 넘긴다 |
+| `DEPTH_ENABLED` | `false` | §2.3 호가(depth) 확장 스위치(`alphatalk.price.depth-enabled`). 게이트웨이 `trade-depth-enabled`와 함께 켠다 |
 | `MARKET_HOLIDAYS_FILE` | `holidays-2026.yml` | 휴장일 |
 | `REDIS_URL` / `DB_URL` | — | 공용 |
 
 ## 6. 관측성
 
-메트릭: `kis_ws_sessions{state}` · `kis_subscribed_symbols` · `demand_symbols` · `degraded_symbols` · `tick_in_rate`/`quote_publish_rate` · `conflation_lag_ms` · `pingpong_miss` · `rest_call_rate{keyId}` · `rest_throttled` · `token_refresh_total` · `batch_job_duration/fail{job}`. 로그는 구조화 JSON으로 남기고 appkey/token은 마스킹한다. 프레임 원문은 DEBUG+샘플링으로만 남긴다. 실시간 메트릭(§2.3): `tick.div.resubscribed`(구분 기록 갱신으로 재구독) · `tick.silence.degraded`(등록됐는데 체결 틱이 없어 REST 폴링으로 넘긴 종목) · `tick.market.div{div}`(실시간이 확정한 구분 — `UN`만 나온다). **`tick.silence.degraded`는 발생 즉시 알람** — 실시간 경로가 그 종목을 못 받고 있다는 뜻이다. 분봉 메트릭(§2.6): `minute.candle.refresh` · `minute.candle.upsert.retry` · `minute.candle.empty.complete`(`output2`가 빈 채로 완주) · `minute.candle.zero.page`(전 행 0인 페이지 — 시장 구분 오판·KIS 이상) · `minute.candle.value.regressed`(누적 거래대금 역행 = 시장 구분 혼입 의심) · `minute.candle.market.div{div}`(날짜별 판별 결과 분포) · `minute.candle.div.unknown`(그날 구분 기록 없이 적재분만 있어 갱신을 건너뛴 횟수 — Redis 유실 신호). 알람: WS 세션 전멸 5분, 장중 tick_in=0, 배치 실패, throttled 급증, `candle_sync_aborted`(유니버스 조회 실패로 일봉 회차 중단), `candle_sync_failed` 지속(재시도 회차까지 남는 종목 실패 — 둘 다 §2.6), **`minute.candle.value.regressed` 발생 즉시**(앵커 오염은 조용히 번진다).
+메트릭: `kis_ws_sessions{state}` · `kis_subscribed_symbols` · `demand_symbols` · `degraded_symbols` · `tick_in_rate`/`quote_publish_rate` · `conflation_lag_ms` · `pingpong_miss` · `rest_call_rate{keyId}` · `rest_throttled` · `token_refresh_total` · `batch_job_duration/fail{job}`. 로그는 구조화 JSON으로 남기고 appkey/token은 마스킹한다. 프레임 원문은 DEBUG+샘플링으로만 남긴다. 실시간 메트릭(§2.3): `tick.div.resubscribed`(구분 기록 갱신으로 재구독) · `tick.silence.degraded`(등록됐는데 체결 틱이 없어 REST 폴링으로 넘긴 종목) · `tick.market.div{div}`(실시간이 확정한 구분 — `UN`만 나온다). **`tick.silence.degraded`는 발생 즉시 알람** — 실시간 경로가 그 종목을 못 받고 있다는 뜻이다. 호가 메트릭(§2.3): `depth.in` · `depth.published` · `depth.symbols`(등록 중) · `depth.symbols.dropped`(잔여 슬롯 부족으로 등록하지 못한 방 수요 종목 — 지속되면 계정 추가 신호) · `tick.room.preempted`(방 수요가 가득 찬 세션에서 quote 전용 등록을 밀어낸 횟수 — §2.2). 분봉 메트릭(§2.6): `minute.candle.refresh` · `minute.candle.upsert.retry` · `minute.candle.empty.complete`(`output2`가 빈 채로 완주) · `minute.candle.zero.page`(전 행 0인 페이지 — 시장 구분 오판·KIS 이상) · `minute.candle.value.regressed`(누적 거래대금 역행 = 시장 구분 혼입 의심) · `minute.candle.market.div{div}`(날짜별 판별 결과 분포) · `minute.candle.div.unknown`(그날 구분 기록 없이 적재분만 있어 갱신을 건너뛴 횟수 — Redis 유실 신호). 알람: WS 세션 전멸 5분, 장중 tick_in=0, 배치 실패, throttled 급증, `candle_sync_aborted`(유니버스 조회 실패로 일봉 회차 중단), `candle_sync_failed` 지속(재시도 회차까지 남는 종목 실패 — 둘 다 §2.6), **`minute.candle.value.regressed` 발생 즉시**(앵커 오염은 조용히 번진다).
 
 ## 7. 장애 시나리오 & 대응
 
@@ -451,8 +475,8 @@ OpenDART 응답 상태는 **세 갈래로 나눈다**. ① 데이터 없음(`013
 
 ## 8. 테스트 전략 (워커 특화)
 
-- 파서 단위: 실 캡처 프레임/mst 파일 픽스처(CP949 포함) 고정 — 체결가 TR 3종(H0STCNT0·H0UNCNT0·H0STOUP0) 필드 순서 검증.
-- 세션풀 단위: 가짜 KIS 서버(로컬 WS)로 등록 한도(41건, TR×종목) 초과 배정·다중 TR 구독/해지·재접속 리플레이·해지 유예 검증.
+- 파서 단위: 실 캡처 프레임/mst 파일 픽스처(CP949 포함) 고정 — 체결가 TR 3종(H0STCNT0·H0UNCNT0·H0STOUP0) 필드 순서 검증. 호가 TR 2종(H0STASP0 59필드·H0UNASP0 65필드)은 공유 프리픽스 파싱과 다건 이어붙임을 픽스처로 고정.
+- 세션풀 단위: 가짜 KIS 서버(로컬 WS)로 등록 한도(41건, TR×종목) 초과 배정·다중 TR 구독/해지·재접속 리플레이·해지 유예 검증. 호가는 잔여 슬롯 내 등록·우선순위·초과 드랍·구분 전환 동반 재구독을 검증.
 - 통합(Testcontainers): demand 해시 변경 → 구독 집합 수렴 / conflation 발행 주기 / 배치 2회 실행 멱등.
 - 실계정 스모크: 장중 삼성전자 1종목 실수신 → `quote:005930` 발행 확인. 실전 키만 쓰므로 스모크는 최소 종목·최소 시간으로 제한한다.
 
@@ -472,6 +496,7 @@ OpenDART 응답 상태는 **세 갈래로 나눈다**. ① 데이터 없음(`013
 12. **`J` 경로의 장외 봉 처리(§2.6)** — NXT 미지원 종목을 `J`로 조회하면 장 마감 이후 구간에 시간외 체결분이 **조회 시각 부근의 단일 봉**으로 붙는다(047040을 19:00에 조회 → `1900` 봉 vol 90,550 / 19:37에 조회 → `1937` 봉). 봉 시각이 조회 시점에 따라 움직이므로 적재하면 재조회마다 유령 봉이 생긴다. 확정할 것: 이 봉이 시간외단일가 총합인지, 고정 시각(예: 18:00)으로 받을 방법이 있는지(`FID_ETC_CLS_CODE` 조합 포함). 과거 일자 TR `FHKST03010230`에서는 **유령 봉이 관측되지 않았다** — 047040 20260807을 20:00 기준으로 조회해도 최신 행이 15:30 마감 봉이다(2026-08-09 계측). 백필도 방어적으로 `J` 창(09:00–15:30) 밖 행은 적재하지 않는다. 당일 TR의 `J` 종목 페치 상한은 계속 **15:30**이다.
 13. **NXT 편입·제외의 장중 발효 여부(§2.6)** — 판정·전환이 "그날 적재분 0"일 때만 일어나므로, 상태 변화는 **다음 거래일 첫 조회**에 반영된다. ⑴ **편입**된 종목은 그날 하루 `J`로 조회되어 장외 구간이 누락된다(0봉이 아니라 정상 응답이라 감지 신호가 없다 — 가장 조용한 갈래다). ⑵ **제외**된 종목은 그날 첫 조회에서 `UN` 0봉을 만나 즉시 `J`로 전환·자가 복구하고, 이미 적재분이 있는 날은 0봉 가드만 작동해 그날은 정지한다(데이터 유지·오염 없음, `minute.candle.zero.page`). 두 경우 모두 **다음 거래일 첫 조회에서 자동 반영**된다 — 구분 기록이 날짜별이라 별도 무효화 경로가 필요 없다. 남은 확인 사항은 장중에 발효되는 편입·제외가 실제로 있는지다. 있다면 그날 하루는 위 규칙대로 이전 구분을 유지하며(적재분이 있으므로 전환하지 않는다) 지나가는데, 그 하루의 장외 구간 누락을 감수할지 아니면 발효 시각에 그날 기록을 무효화하고 재적재할지 정한다.
 14. **비12월 결산 법인의 `financials_sync` 매핑(§3.1)** — 분기보고서의 `reprt_code`(11013 Q1/11014 Q3) 판별을 보고서명 괄호의 결산월(`month<=6`→Q1)로 하는데, 이 규칙은 12월·3월 결산에는 맞고 **6월·9월 결산 법인에서는 Q1/Q3이 뒤집힌다**. `bsns_year`도 회계연도가 역년을 걸치면 괄호 연도와 어긋날 수 있다. 오판 시 대부분 `fnlttSinglAcntAll`이 013(데이터 없음)을 돌려줘 적재 누락(`batch.financials.absent`)으로 관측되며, 잘못된 분기로 데이터를 대체 적재하지는 않는다(대체 조회 금지 — 구현 결정). 해당 법인은 극소수라 우선 수용하고, 정확한 매핑이 필요해지면 DART `company.json`의 결산월(`acc_mt`)로 분기 서수를 유도하고 비역년 회계연도의 `bsns_year` 규약을 실호출로 계측해 확정한다.
+15. **호가 TR 실수신 캡처 재확정(§2.3)** — 필드 순서는 공식 open-trading-api columns 대조 기준이며, 실 수신 프레임(다건 이어붙임 포함) 캡처로 재확정한다. 함께 확인: ⑴ `H0UNASP0`가 NXT 미상장 종목에 등록 SUCCESS+무프레임인지(체결 `H0UNCNT0`과 같은 현상으로 가정 중), ⑵ 동시호가 구간(08:30–09:00 등)에서 호가 단계 값이 0으로 오는 범위(0가격 단계 필터가 payload를 통째로 비우는 시간대 확인).
 ---
 
-*KIS 수집 워커 명세 v0.8 — Redis 계약 v0.19·WS API v0.7·core-api 명세 v0.3과 정합. KIS 수치는 2026-07 공식 샘플 대조 기준이며 §9 항목은 실계정 재확인 대상.*
+*KIS 수집 워커 명세 v0.9 — Redis 계약 v0.19·WS API v0.7·core-api 명세 v0.3과 정합. KIS 수치는 2026-07 공식 샘플 대조 기준이며 §9 항목은 실계정 재확인 대상.*
