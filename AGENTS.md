@@ -102,7 +102,7 @@ backend/
 
 ## 현재 상태 (2026-07 기준)
 
-- **S0~S5 구현 완료**: `:contracts` + `:auth-jwt` + `:ws` — 인증(JWT CONNECT)·수요 인덱스(DemandRegistry)·Redis relay·관심목록 해소·watchlist:updated·프레즌스·메트릭. 테스트 49개(E2E 4개 포함) 통과.
+- **S0~S5 구현 완료**: `:contracts` + `:auth-jwt` + `:ws` — 인증(JWT CONNECT)·수요 인덱스(DemandRegistry)·Redis relay·관심목록 해소·watchlist:updated·프레즌스·메트릭·방 quote 토픽(WS 명세 v0.9 — 관심목록 없이 방만 열람해도 시세 수신). 테스트 77개(E2E 5개 포함) 통과.
 - 버전: Spring Boot 3.5.16 · Kotlin 2.2.21 · JDK 21(toolchain 자동 다운로드) · jjwt 0.12.7.
 - 남은 단계: **S6**(graceful shutdown 시나리오 검증, quote 샘플러 여부 판단) · **S7**(41종목×500세션 부하 스모크). 계획서 §5 참조.
 - 미해결 합의 안건은 [md/ws_module_plan.md](md/ws_module_plan.md) §7 (RS256 전환 여부, 관심목록 조회 경로 등). 해당 코드는 포트로 격리된 구현(`:auth-jwt`의 `JwtTokenProvider` HS256, `RedisWatchlistResolver`)을 쓴다.

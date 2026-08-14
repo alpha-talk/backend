@@ -325,7 +325,7 @@ DISCONNECT 또는 하트비트 미수신 → 프레임워크 세션 정리 → S
 | 상황 | 처리 |
 |---|---|
 | CONNECT JWT 실패 | `TokenVerifier`가 예외 → 프레임워크 `ERROR` + 종료. `message:unauthorized` |
-| 허용 외 SUBSCRIBE / SEND | 인터셉터 예외 → `ERROR` + 종료. `stomp_errors` 증가 |
+| 허용 외 SUBSCRIBE / SEND | 인터셉터 예외 → `ERROR` + 종료. `stomp_errors` 증가. 목적지를 새로 열 때 게이트웨이를 클라보다 먼저 올리는 이유다(API 명세 §7) |
 | watchlist 해소 실패(Redis 장애) | 세션 유지 + **빈 watchlist 시작** + 경고. 방 토픽 구독은 가능. 재연결 시 자연 복구 |
 | 봉투 역직렬화 실패 | 해당 `RedisChannelHandler`가 드랍 + 카운터. relay 계속(한 건의 독이 채널을 막지 않게) |
 | 느린 클라(송신 버퍼 초과) | 프레임워크가 세션 강제 종료 → 정리 이벤트 정상 발화 → 클라 재연결+REST 복구. `slow_client_disconnects` |
