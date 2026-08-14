@@ -318,7 +318,6 @@ class SessionPool(
         fun syncSubscriptions() {
             val current = session ?: return
             val now = clock()
-            pending.entries.removeIf { now - it.value >= ackTimeoutMillis }
             val wanted = assigned.flatMapTo(mutableSetOf()) { symbol ->
                 trIdsFor(symbol).map { Registration(it, symbol) }
             }
@@ -336,7 +335,8 @@ class SessionPool(
                         )
                     }
             }
-            (wanted - confirmed - pending.keys).forEach { registration ->
+            val awaitingAck = pending.filterValues { now - it < ackTimeoutMillis }.keys
+            (wanted - confirmed - awaitingAck).forEach { registration ->
                 runCatching { current.subscribe(registration.symbol, registration.trId) }
                     .onSuccess { pending[registration] = now }
                     .onFailure {
