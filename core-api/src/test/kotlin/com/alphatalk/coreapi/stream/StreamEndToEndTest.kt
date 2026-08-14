@@ -56,6 +56,7 @@ class StreamEndToEndTest {
 
     @BeforeEach
     fun seed() {
+        redisTemplate.execute { connection -> connection.serverCommands().flushAll() }
         jdbc.update("DELETE FROM stream_event")
         jdbc.update("DELETE FROM refresh_tokens")
         jdbc.update("DELETE FROM users")
@@ -142,13 +143,13 @@ class StreamEndToEndTest {
     }
 
     @Test
-    fun `FR-08 - 시세 캐시가 있으면 실시간으로 답한다`() {
+    fun `FR-08 - 신선한 시세 캐시가 있으면 실시간으로 답한다`() {
         redisTemplate.opsForHash<String, String>().putAll(
             Keys.price("005930"),
             mapOf(
                 "price" to "71200", "prevClose" to "70500", "change" to "700", "changeRate" to "0.99",
                 "open" to "70600", "high" to "71500", "low" to "70400", "volume" to "1234567",
-                "ts" to "1719500000000",
+                "ts" to System.currentTimeMillis().toString(),
             ),
         )
 
@@ -156,6 +157,31 @@ class StreamEndToEndTest {
 
         assertEquals(71200, quote.path("price").asLong())
         assertEquals(false, quote.path("delayed").asBoolean())
+    }
+
+    @Test
+    fun `FR-08 - 낡은 시세 캐시는 일봉 폴백으로 강등한다`() {
+        jdbc.update("DELETE FROM daily_candle")
+        jdbc.update(
+            """
+            INSERT INTO daily_candle (code, date, open, high, low, close, volume, value) VALUES
+            ('005930', '20260812', 70000, 71000, 69500, 70500, 1000, 70500000),
+            ('005930', '20260813', 70500, 71500, 70400, 71200, 2000, 142400000)
+            """.trimIndent(),
+        )
+        redisTemplate.opsForHash<String, String>().putAll(
+            Keys.price("005930"),
+            mapOf(
+                "price" to "99999", "prevClose" to "70500", "change" to "700", "changeRate" to "9.99",
+                "open" to "70600", "high" to "71500", "low" to "70400", "volume" to "1234567",
+                "ts" to "1719500000000",
+            ),
+        )
+
+        val quote = json(get("/api/v1/rooms/005930/quote").body)
+
+        assertEquals(true, quote.path("delayed").asBoolean())
+        assertEquals(71200, quote.path("price").asLong())
     }
 
     @Test
