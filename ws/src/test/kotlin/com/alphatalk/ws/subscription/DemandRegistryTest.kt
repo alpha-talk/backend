@@ -299,6 +299,87 @@ class DemandRegistryTest {
     }
 
     @Nested
+    inner class RoomQuoteDemand {
+        @Test
+        fun `방 quote 첫 구독 - quote 채널 구독, 마지막 해제 - 해지`() {
+            registry.registerSession("s1", 1L)
+            registry.registerSession("s2", 2L)
+
+            registry.subscribeRoom("s1", "sub-1", ChannelKind.QUOTE, "005930")
+            registry.subscribeRoom("s2", "sub-1", ChannelKind.QUOTE, "005930")
+            assertThat(subscriber.subscribeCalls.filter { it == "quote:005930" }).hasSize(1)
+            assertThat(registry.roomHasQuoteViewers("005930")).isTrue()
+
+            registry.unsubscribeById("s1", "sub-1")
+            assertThat(subscriber.active).contains("quote:005930")
+
+            registry.unsubscribeById("s2", "sub-1")
+            assertThat(subscriber.active).doesNotContain("quote:005930")
+            assertThat(registry.roomHasQuoteViewers("005930")).isFalse()
+        }
+
+        @Test
+        fun `관심목록에 이미 있는 code의 방 quote 구독 - 중복 구독 호출 없음`() {
+            connectAndAttach("s1", 1L, setOf("005930"))
+            registry.registerSession("s2", 2L)
+
+            registry.subscribeRoom("s2", "sub-1", ChannelKind.QUOTE, "005930")
+
+            assertThat(subscriber.subscribeCalls.filter { it == "quote:005930" }).hasSize(1)
+            assertThat(registry.roomHasQuoteViewers("005930")).isTrue()
+        }
+
+        @Test
+        fun `관심목록이 비어도 방 quote 구독자가 남아 있으면 quote 채널 유지`() {
+            connectAndAttach("s1", 1L, setOf("005930"))
+            registry.registerSession("s2", 2L)
+            registry.subscribeRoom("s2", "sub-1", ChannelKind.QUOTE, "005930")
+
+            registry.removeSession("s1")
+
+            assertThat(subscriber.active).contains("quote:005930")
+            assertThat(subscriber.active).doesNotContain("stream:005930")
+
+            registry.unsubscribeById("s2", "sub-1")
+            assertThat(subscriber.active).doesNotContain("quote:005930")
+        }
+
+        @Test
+        fun `방 quote를 해제해도 관심목록 유저가 남아 있으면 quote 채널 유지`() {
+            registry.registerSession("s2", 2L)
+            registry.subscribeRoom("s2", "sub-1", ChannelKind.QUOTE, "005930")
+            connectAndAttach("s1", 1L, setOf("005930"))
+
+            registry.unsubscribeById("s2", "sub-1")
+
+            assertThat(subscriber.active).contains("quote:005930", "stream:005930")
+            assertThat(registry.roomHasQuoteViewers("005930")).isFalse()
+
+            registry.removeSession("s1")
+            assertThat(subscriber.active).isEmpty()
+        }
+
+        @Test
+        fun `세션 종료 - 방 quote 구독 자동 회수`() {
+            registry.registerSession("s1", 1L)
+            registry.subscribeRoom("s1", "sub-1", ChannelKind.QUOTE, "005930")
+
+            registry.removeSession("s1")
+
+            assertThat(subscriber.active).isEmpty()
+            assertThat(registry.roomHasQuoteViewers("005930")).isFalse()
+        }
+
+        @Test
+        fun `방 quote 구독 - room 스냅샷에 계상`() {
+            registry.registerSession("s1", 1L)
+            registry.subscribeRoom("s1", "sub-1", ChannelKind.QUOTE, "005930")
+
+            assertThat(registry.demandSnapshot().room).isEqualTo(mapOf("005930" to 1))
+        }
+    }
+
+    @Nested
     inner class Snapshot {
         @Test
         fun `quote 스냅샷 - 유저 단위로 세고 마지막 유저가 나가면 코드가 사라진다`() {

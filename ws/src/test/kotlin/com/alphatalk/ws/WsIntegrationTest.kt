@@ -136,6 +136,17 @@ class WsIntegrationTest {
     }
 
     @Test
+    fun `방 quote relay - 관심목록 없는 유저도 방 토픽 구독만으로 틱이 도착한다`() {
+        val session = connect(5L)
+        val received = subscribeQueue(session, Destinations.roomQuote("005930"))
+
+        val body = """{"type":"quote","code":"005930","ts":1719600000000,"data":{"price":71200}}"""
+        val message = publishUntilReceived(Channels.quote("005930"), body, received)
+
+        assertThat(message).contains(""""code":"005930"""").contains(""""price":71200""")
+    }
+
+    @Test
     fun `watchlist updated - 재접속 없이 새 종목 틱이 흐른다 (FR-03)`() {
         redisTemplate.opsForSet().add(Keys.watchlist(3L), "005930")
         val session = connect(3L)
