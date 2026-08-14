@@ -2,6 +2,7 @@ package com.alphatalk.worker.price.config
 
 import com.alphatalk.contracts.DemandTiming
 import com.alphatalk.worker.price.conflation.ConflationBuffer
+import com.alphatalk.worker.price.conflation.DepthConflationBuffer
 import com.alphatalk.worker.price.market.InMemoryMarketDivStore
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory
@@ -19,7 +20,7 @@ class PriceConfigTest {
     private val redisTemplate = StringRedisTemplate()
 
     private fun sessionPool(props: PriceProperties) =
-        config.sessionPool(props, ConflationBuffer(), SimpleMeterRegistry(), InMemoryMarketDivStore())
+        config.sessionPool(props, ConflationBuffer(), DepthConflationBuffer(), SimpleMeterRegistry(), InMemoryMarketDivStore())
 
     private fun demandSource(props: PriceProperties = PriceProperties()) =
         config.demandSource(props, redisTemplate, connectionFactory)

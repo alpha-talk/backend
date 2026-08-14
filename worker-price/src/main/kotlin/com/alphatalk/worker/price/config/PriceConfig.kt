@@ -34,6 +34,7 @@ import com.alphatalk.worker.price.candle.RedisMinuteRefreshLock
 import com.alphatalk.worker.price.candle.RedisMinuteRefreshWatermarkStore
 import com.alphatalk.worker.price.candle.StockMasterCodeRepository
 import com.alphatalk.worker.price.conflation.ConflationBuffer
+import com.alphatalk.worker.price.conflation.DepthConflationBuffer
 import com.alphatalk.worker.price.demand.DemandSource
 import com.alphatalk.worker.price.demand.RedisDemandSource
 import com.alphatalk.worker.price.leader.LeaderLock
@@ -68,6 +69,9 @@ class PriceConfig {
     fun conflationBuffer(): ConflationBuffer = ConflationBuffer()
 
     @Bean
+    fun depthConflationBuffer(): DepthConflationBuffer = DepthConflationBuffer()
+
+    @Bean
     @ConditionalOnProperty("alphatalk.price.enabled", havingValue = "true")
     fun demandSource(
         props: PriceProperties,
@@ -80,6 +84,7 @@ class PriceConfig {
     fun sessionPool(
         props: PriceProperties,
         buffer: ConflationBuffer,
+        depthBuffer: DepthConflationBuffer,
         meters: MeterRegistry,
         marketDivs: MarketDivStore,
     ): SessionPool {
@@ -98,6 +103,10 @@ class PriceConfig {
             marketDivs = marketDivs,
             unifiedTrId = KisFrameParser.TR_ID_TICK_TOTAL,
             krxTrId = KisFrameParser.TR_ID_TICK,
+            depthBuffer = depthBuffer,
+            depthUnifiedTrId = KisFrameParser.TR_ID_DEPTH_TOTAL,
+            depthKrxTrId = KisFrameParser.TR_ID_DEPTH,
+            depthEnabled = props.depthEnabled,
             silenceMillis = props.tickSilenceMs,
             removalGraceMillis = props.removalGraceMs,
         )

@@ -88,6 +88,48 @@ class KisFrameParserTest {
     }
 
     @Test
+    fun `호가 프레임을 59필드 레이아웃으로 파싱한다`() {
+        val frame = KisFrameParser.parse(fixture("h0stasp0-single.txt"))
+
+        val depths = assertIs<KisFrame.Depths>(frame).depths
+        assertEquals(1, depths.size)
+        val depth = depths[0]
+        assertEquals("005930", depth.code)
+        assertEquals("093012", depth.time)
+        assertEquals(10, depth.asks.size)
+        assertEquals(10, depth.bids.size)
+        assertEquals(KisDepthLevel(71300, 120), depth.asks[0])
+        assertEquals(KisDepthLevel(72200, 210), depth.asks[9])
+        assertEquals(KisDepthLevel(71200, 340), depth.bids[0])
+        assertEquals(KisDepthLevel(70300, 430), depth.bids[9])
+    }
+
+    @Test
+    fun `호가 2건 이어붙은 프레임은 필드 수로 분할한다`() {
+        val frame = KisFrameParser.parse(fixture("h0stasp0-double.txt"))
+
+        val depths = assertIs<KisFrame.Depths>(frame).depths
+        assertEquals(2, depths.size)
+        assertEquals("005930", depths[0].code)
+        assertEquals("000660", depths[1].code)
+        assertEquals(KisDepthLevel(198600, 40), depths[1].asks[0])
+        assertEquals(KisDepthLevel(198500, 70), depths[1].bids[0])
+    }
+
+    @Test
+    fun `통합 호가 프레임은 뒤에 붙는 중간가 6필드와 무관하게 공유 프리픽스로 파싱한다`() {
+        val frame = KisFrameParser.parse(fixture("h0unasp0-single.txt"))
+
+        val depths = assertIs<KisFrame.Depths>(frame).depths
+        assertEquals(1, depths.size)
+        val depth = depths[0]
+        assertEquals("005930", depth.code)
+        assertEquals(KisDepthLevel(71300, 120), depth.asks[0])
+        assertEquals(KisDepthLevel(71200, 340), depth.bids[0])
+        assertEquals(KisDepthLevel(70300, 430), depth.bids[9])
+    }
+
+    @Test
     fun `PINGPONG 프레임을 식별한다`() {
         val frame = KisFrameParser.parse(fixture("pingpong.txt"))
 

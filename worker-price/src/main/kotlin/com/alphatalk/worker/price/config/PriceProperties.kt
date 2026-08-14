@@ -17,6 +17,7 @@ data class PriceProperties(
     val pollIntervalMs: Long = 30_000,
     val tickSilenceMs: Long = 20_000,
     val pollBudgetFactor: Double = 0.5,
+    val depthEnabled: Boolean = false,
     val candleEnabled: Boolean = false,
     val candleBackfillDays: Long = 90,
     val candleSyncOnStartup: Boolean = false,

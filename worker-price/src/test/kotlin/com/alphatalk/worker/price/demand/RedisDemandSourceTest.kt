@@ -61,6 +61,24 @@ class RedisDemandSourceTest {
     }
 
     @Test
+    fun `방 수요는 게이트웨이별 refCount를 합산해 노출한다 - 0 카운트는 제외`() {
+        register("gw1")
+        register("gw2")
+        markAlive("gw1")
+        markAlive("gw2")
+        template.opsForHash<String, String>().put(Keys.demandRoom("gw1"), "005930", "2")
+        template.opsForHash<String, String>().put(Keys.demandRoom("gw1"), "000660", "1")
+        template.opsForHash<String, String>().put(Keys.demandRoom("gw1"), "999999", "0")
+        template.opsForHash<String, String>().put(Keys.demandRoom("gw2"), "005930", "3")
+
+        val source = RedisDemandSource(template, factory)
+        source.refresh()
+
+        assertEquals(mapOf("005930" to 5L, "000660" to 1L), source.roomDemand())
+        assertEquals(setOf("005930", "000660"), source.targetSymbols())
+    }
+
+    @Test
     fun `gw alive가 없는 게이트웨이의 수요는 스테일로 보고 제외한다`() {
         register("gw-dead")
         template.opsForHash<String, String>().put(Keys.demandQuote("gw-dead"), "000660", "3")
