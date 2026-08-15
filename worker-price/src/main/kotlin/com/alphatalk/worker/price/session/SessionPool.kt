@@ -77,21 +77,13 @@ class SessionPool(
             }.tag("state", state.name.lowercase()).register(meters)
         }
         Gauge.builder("kis.subscribed.symbols", this) { pool ->
-            pool.sessions.sumOf { session ->
-                session.heldRegistrations().map(Registration::symbol).distinct().size
-            }.toDouble()
+            pool.heldSymbols { true }.toDouble()
         }.register(meters)
         Gauge.builder("degraded.symbols", this) { pool ->
             pool.degraded.size.toDouble()
         }.register(meters)
         Gauge.builder("depth.symbols", this) { pool ->
-            pool.sessions.sumOf { session ->
-                session.heldRegistrations()
-                    .filter { it.trId == depthUnifiedTrId || it.trId == depthKrxTrId }
-                    .map(Registration::symbol)
-                    .distinct()
-                    .size
-            }.toDouble()
+            pool.heldSymbols { it.trId == depthUnifiedTrId || it.trId == depthKrxTrId }.toDouble()
         }.register(meters)
         Gauge.builder("depth.symbols.dropped", this) { pool ->
             pool.depthDroppedCount.toDouble()
@@ -131,6 +123,11 @@ class SessionPool(
 
     @Synchronized
     fun degradedSymbols(): Set<String> = degraded.toSet()
+
+    private fun heldSymbols(matching: (Registration) -> Boolean): Int =
+        sessions.flatMapTo(mutableSetOf()) { session ->
+            session.heldRegistrations().filter(matching).map(Registration::symbol)
+        }.size
 
     private fun trIdsFor(symbol: String): List<String> {
         val chosen = tickDivs.computeIfAbsent(symbol) { marketDivs.get(it) ?: MarketDivStore.UNIFIED }
