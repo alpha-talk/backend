@@ -55,8 +55,25 @@ abstract class RoomFanoutHandler(
 }
 
 @Component
-class QuoteRelayHandler(demand: DemandQuery, sink: ClientMessageSink, om: ObjectMapper, mr: MeterRegistry) :
-    WatchlistFanoutHandler(ChannelKind.QUOTE, demand, sink, om, mr)
+class QuoteRelayHandler(
+    private val demand: DemandQuery,
+    private val sink: ClientMessageSink,
+    om: ObjectMapper,
+    mr: MeterRegistry,
+) : EnvelopeRelayHandler(om, mr) {
+    override val kind = ChannelKind.QUOTE
+
+    override fun handle(code: String?, payload: ByteArray) {
+        if (code == null) return
+        val envelope = parseOrDrop(payload) ?: return
+        for (userId in demand.usersWatching(code)) {
+            sink.sendToUser(userId, kind, envelope)
+        }
+        if (demand.roomHasQuoteViewers(code)) {
+            sink.sendToRoom(kind, code, envelope)
+        }
+    }
+}
 
 @Component
 class StreamRelayHandler(demand: DemandQuery, sink: ClientMessageSink, om: ObjectMapper, mr: MeterRegistry) :

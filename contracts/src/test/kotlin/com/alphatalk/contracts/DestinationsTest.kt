@@ -8,6 +8,10 @@ class DestinationsTest {
     @Test
     fun `방 토픽 생성-파싱 라운드트립`() {
         assertEquals(
+            Destinations.RoomTopic("005930", ChannelKind.QUOTE),
+            Destinations.parseRoomTopic(Destinations.roomQuote("005930")),
+        )
+        assertEquals(
             Destinations.RoomTopic("005930", ChannelKind.POST),
             Destinations.parseRoomTopic(Destinations.roomPosts("005930")),
         )
