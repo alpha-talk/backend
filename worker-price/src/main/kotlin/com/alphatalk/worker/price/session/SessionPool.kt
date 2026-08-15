@@ -114,7 +114,7 @@ class SessionPool(
                 session.syncSubscriptions()
             }
         }
-        if (subscribeAllowed) escalateSilent(now)
+        if (subscribeAllowed) escalateSilent(clock())
     }
 
     @Synchronized
