@@ -606,6 +606,22 @@ class SessionPoolTest {
 
 
     @Test
+    fun `절단은 흡수된 그 정비 주기 안에서 REST 강등으로 반영된다`() {
+        val pool = pool(trIds = listOf("H0UNCNT0"), silenceMillis = Long.MAX_VALUE)
+        pool.maintain(setOf("005930"), emptyList(), subscribeAllowed = true)
+        server.awaitMessages(1)
+        assertTrue(pool.degradedSymbols().isEmpty())
+
+        server.closeAllConnections()
+
+        await().atMost(Duration.ofSeconds(10)).until {
+            now += 200
+            pool.maintain(setOf("005930"), emptyList(), subscribeAllowed = true)
+            pool.degradedSymbols() == setOf("005930")
+        }
+    }
+
+    @Test
     fun `강등된 종목은 재접속을 거쳐도 틱이 다시 흐를 때까지 REST 폴백을 유지한다`() {
         val divs = InMemoryMarketDivStore()
         val meters = SimpleMeterRegistry()
@@ -848,7 +864,6 @@ class SessionPoolTest {
             meters.counter("kis.unsubscribe.abandoned").count() == 1.0
         }
         now += 500
-        pool.maintain(setOf("000002"), emptyList(), subscribeAllowed = true)
         pool.maintain(setOf("000002"), emptyList(), subscribeAllowed = true)
 
         assertEquals(setOf("000002"), pool.degradedSymbols())
