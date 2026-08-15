@@ -166,6 +166,7 @@ class SessionPool(
     private fun consumeStaleDepthAck(symbol: String): Boolean {
         val remaining = depthStaleAcks[symbol] ?: return false
         if (remaining <= 1) depthStaleAcks.remove(symbol) else depthStaleAcks[symbol] = remaining - 1
+        meters.counter("depth.stale.ack.dropped").increment()
         return true
     }
 
@@ -492,6 +493,7 @@ class SessionPool(
             val registration = Registration(trId, trKey)
             if (success) {
                 pendingUnsubscribes.remove(registration)
+                if (isDepthRegistration(registration)) clearStaleDepthAcks(trKey)
                 return
             }
             val attempt = pendingUnsubscribes[registration] ?: return
@@ -523,10 +525,13 @@ class SessionPool(
         }
 
         fun clearSubscriptions() {
+            (confirmed + pending.keys + pendingUnsubscribes.keys)
+                .filter(::isDepthRegistration)
+                .forEach { clearStaleDepthAcks(it.symbol) }
+            depthAssigned.forEach(::clearStaleDepthAcks)
             confirmed.clear()
             pending.clear()
             pendingUnsubscribes.clear()
-            depthAssigned.forEach(::clearStaleDepthAcks)
             assigned.forEach(::rearmSilence)
         }
 
