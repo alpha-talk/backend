@@ -622,6 +622,27 @@ class SessionPoolTest {
     }
 
     @Test
+    fun `침묵 판정은 접속에 걸린 시간까지 반영한 시각으로 한다`() {
+        val pool = SessionPool(
+            accounts = (1..2).map { KisAccount("key$it", "app$it", "secret$it") },
+            wsUrl = server.url,
+            approvalKeys = { now += 2_000; "AK" },
+            buffer = ConflationBuffer(),
+            meters = SimpleMeterRegistry(),
+            tickTrIds = listOf("H0UNCNT0"),
+            marketDivs = InMemoryMarketDivStore(),
+            silenceMillis = 1_000,
+            maxRegistrationsPerSession = 1,
+            backoff = BackoffPolicy(initialMillis = 50, jitterRatio = 0.0),
+            clock = { now },
+        )
+
+        pool.maintain(linkedSetOf("005930", "000660"), emptyList(), subscribeAllowed = true)
+
+        assertEquals(setOf("005930"), pool.degradedSymbols())
+    }
+
+    @Test
     fun `최초 연결 시도가 실패하면 같은 주기에 REST로 강등한다`() {
         val pool = SessionPool(
             accounts = listOf(KisAccount("key1", "app", "secret")),
