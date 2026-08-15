@@ -1,9 +1,10 @@
-# Alpha Talk — `ws` 모듈 아키텍처 설계 v0.7
+# Alpha Talk — `ws` 모듈 아키텍처 설계 v0.8
 
-> 상위 문서: [구현 계획 v0.3](ws_module_plan.md) · [WS API 명세 v0.6](ws_api_spec.md) · [Redis 계약 v0.7](redis_contract.md)
+> 상위 문서: [구현 계획 v0.3](ws_module_plan.md) · [WS API 명세 v0.9](ws_api_spec.md) · [Redis 계약 v0.22](redis_contract.md)
 
 이 문서는 `ws` 게이트웨이의 **코드 레벨 설계 기준**이다. 컴포넌트 경계와 포트 계약, 인메모리 인덱스와 동시성 규율, 핵심 시퀀스, 에러 정책을 여기서 확정한다. `ws` 코드를 쓰거나 리뷰하기 전에 읽고, 코드와 어긋나면 둘 중 하나를 고친다. 역할 분담은 이렇다 — 단계(S0~S7)와 DoD는 계획서, 클라 ↔ 게이트웨이 STOMP 프로토콜은 API 명세, 서비스 간 채널·키 계약은 Redis 계약이 소유하고, 이 문서는 "어떤 구조로 구현하나"만 답한다.
 
+> **v0.7 → v0.8**: 방 quote 토픽(`/topic/rooms/{code}/quote`, API 명세 v0.9) 반영 — 관심목록 없이 방만 열람하는 유저에게 시세를 전달할 경로가 없던 것을 메운다. `quote:{code}` Redis 구독이 **watchlistIndex와 roomQuoteCodes 두 소유자의 합집합**으로 바뀌어(교차 refcount), 한쪽 수요가 0이 되어도 다른 쪽이 남아 있으면 해지하지 않는다(§5.1·§5.2). `QuoteRelayHandler`는 유저 큐 fan-out 뒤 방 구독자가 있으면 방 토픽으로도 발행한다(§6.2) — 두 경로에 다 걸린 유저는 같은 틱을 두 번 받고, `quote`가 최신 스냅샷이라 클라 덮어쓰기로 무해하다.
 > **v0.6 → v0.7**: 2·3차 리뷰 반영 — JWT 시크릿 fail-closed(local 프로파일 분리), 미부착 유저의 diff를 **pendingDiffs 버퍼로 병합**(무시 방식의 유실 레이스 수정), roomIndex를 **구독 수 카운트**로(동일 세션 중복 구독 보호), 수신 순서 보장을 **공개 API `StompEndpointRegistry.setPreserveReceiveOrder`** 로 전환(§11.7) + 결선 검증 테스트, `ws.stomp.errors`·`ws.relay.sent` 메트릭 추가.
 > **v0.5 → v0.6**: 외부 리뷰 반영 — **출석(등록)과 수요(관심목록 부착)를 분리**. CONNECTED에서 `registerSession`(세션↔유저, 인메모리만), 첫 SUBSCRIBE에서 resolve → `attachWatchlist`(살아있는 세션만). 프레즌스/메트릭이 접속자를 정확히 보고(리뷰 P2-4), resolve 중 끊긴 세션의 유령 등록이 차단된다(리뷰 P1-3).
 > **v0.4 → v0.5**: 관심목록 해소를 **세션의 첫 SUBSCRIBE**로 단순화(§11.6 최종) — 프리페치 인터셉터·스태시 삭제, 같은 스레드 배치를 더 적은 구조로 달성. 미구독 세션의 헛수요도 제거.
@@ -146,7 +147,7 @@ SOLID는 이음새가 있는 곳의 도구다. 이음새가 없는데 인터페�
 
 ```
 /user/queue/quote · /user/queue/stream
-/topic/rooms/{6자리 code}/posts
+/topic/rooms/{6자리 code}/quote · /posts
 /topic/rooms/{6자리 code}/trade · /depth   (피처 플래그 trade-depth-enabled로 차단 가능)
 ```
 
@@ -154,7 +155,7 @@ SOLID는 이음새가 있는 곳의 도구다. 이음새가 없는데 인터페�
 
 | 타입 | 종류 | 책임 |
 |---|---|---|
-| `DemandQuery` | **포트(읽기)** | `usersWatching(code): Set<userId>`(불변 스냅샷) 등. relay 핸들러가 의존 |
+| `DemandQuery` | **포트(읽기)** | `usersWatching(code): Set<userId>`(불변 스냅샷)·`roomHasQuoteViewers(code): Boolean` 등. relay 핸들러가 의존 — 둘 다 틱 경로에서 락 없이 읽는다 |
 | `DemandMutator` | **포트(쓰기)** | `registerSession`/`attachWatchlist`/`removeSession`/`subscribeRoom`/`unsubscribeById`/`applyWatchlistDiff`. 세션 리스너가 의존 |
 | `DemandRegistry` | 구현(셋 다) | §5 인덱스 단일 소유. 수요 전이(0↔1) 감지 시 `ChannelSubscriber` 호출 + `DemandSyncTrigger.request()`(논블로킹). **상태 변경은 락 안에서 직렬화 — 락 안에서 Redis I/O 금지** |
 | `DemandSnapshotSource` | **포트(읽기)** | `demandSnapshot(): {quote: code→유저 수, room: code→구독 수}`. 락 안 순수 메모리 복사. `DemandRegistry`가 구현 |
@@ -202,7 +203,10 @@ userWatchlists:  Map<userId, Set<code>>               // 부착된 관심목록 
 pendingDiffs:    Map<userId, (added: Set, removed: Set)>  // 부착 전 diff의 압축 누적 — 이벤트 수와 무관하게 유계 (§11.6)
 watchlistIndex:  Map<code, Set<userId>>               // quote:/stream: 라우팅 + refcount (락 없이 읽기)
 roomIndex:       Map<(kind, code), Int>               // 방 구독 수 카운트 (fan-out은 브로커가)
+roomQuoteCodes:  Set<code>                            // 방 quote 구독이 살아있는 code (락 없이 읽기)
 ```
+
+`roomQuoteCodes`는 roomIndex에서 파생되는 값이지만(= `roomIndex[(QUOTE, code)] > 0`) 별도로 둔다. 틱마다 도는 relay가 "이 code를 방에서 보는 사람이 있나"를 락 없이 물어야 하는데, `roomIndex`는 락 아래의 평범한 HashMap이기 때문이다. 변경은 roomIndex와 같은 락 안에서 함께 일어나므로 두 값이 어긋나지 않는다 — 이는 상태를 두 곳에 나눠 갖는 것이 아니라 뜨거운 읽기 경로용 투영이다(§1.5의 단일 소유는 `DemandRegistry` 안에서 유지된다).
 
 ### 5.2 수요 전이 규칙 (DemandMutator 안에서)
 
@@ -211,10 +215,13 @@ roomIndex:       Map<(kind, code), Int>               // 방 구독 수 카운�
 | 이벤트 | 전이 | 부수효과 (포트 호출) |
 |---|---|---|
 | CONNECTED (`registerSession`) | 출석부만 기입 — sessions·userSessions | 없음 (인메모리만) |
-| 첫 SUBSCRIBE (`attachWatchlist`) | resolve 결과 + pendingDiffs 병합 → 유저의 각 code에 userId 추가 | 새 code면 `subscribe(quote/stream:code)` |
-| 유저 마지막 세션 종료 | 각 code에서 userId 제거 + pendingDiffs 정리 | 집합이 비면 `unsubscribe` |
+| 첫 SUBSCRIBE (`attachWatchlist`) | resolve 결과 + pendingDiffs 병합 → 유저의 각 code에 userId 추가 | 새 code면 `subscribe(stream:code)` + **방 quote 수요가 없을 때만** `subscribe(quote:code)` |
+| 유저 마지막 세션 종료 | 각 code에서 userId 제거 + pendingDiffs 정리 | 집합이 비면 `unsubscribe(stream:code)` + **방 quote 수요가 없을 때만** `unsubscribe(quote:code)` |
 | `watchlist:updated` diff | 부착된 유저 → 즉시 적용 / 미부착 → pendingDiffs에 버퍼 | 적용 시 같은 전이 규칙 |
-| 방 SUBSCRIBE / UNSUBSCRIBE·종료 | roomIndex 카운트 증감 (같은 세션 중복 구독도 각각 셈) | 0↔1 전이 시 `subscribe/unsubscribe(post:code)` |
+| 방 SUBSCRIBE / UNSUBSCRIBE·종료 (post·trade·depth) | roomIndex 카운트 증감 (같은 세션 중복 구독도 각각 셈) | 0↔1 전이 시 `subscribe/unsubscribe(post:code)` 등 |
+| 방 quote SUBSCRIBE / UNSUBSCRIBE·종료 | roomIndex 증감 + roomQuoteCodes 갱신 | 0↔1 전이 시 **관심목록 수요가 없을 때만** `subscribe/unsubscribe(quote:code)` |
+
+**`quote:{code}` 채널은 소유자가 둘이다** — 관심목록(`watchlistIndex`)과 방 열람(`roomQuoteCodes`). 어느 한쪽이 0→1이면 구독하고, **양쪽이 모두 0이 되어야** 해지한다. 한쪽만 보고 해지하면 다른 쪽 구독자의 시세가 조용히 끊긴다(같은 종목을 관심목록에 담은 유저가 나갔다고 해서 그 방을 보고 있는 사람의 틱을 끊을 수는 없다). `stream:{code}`는 소유자가 관심목록 하나뿐이라 종전과 같다.
 
 ### 5.3 동시성 전략
 
@@ -274,16 +281,22 @@ price-worker PUBLISH quote:005930 {envelope}
 → MessageRouter (Redis 스레드): Channels.parse → kind=QUOTE, code=005930 → QuoteRelayHandler
 → QuoteRelayHandler: 역직렬화 → DemandQuery.usersWatching("005930") 스냅샷(락 없이)
     → 각 userId: ClientMessageSink.sendToUser(userId, QUOTE, envelope)
-→ BrokerMessageSink → convertAndSendToUser → 브로커 fan-out(outbound)
+    → roomHasQuoteViewers("005930") 이면 ClientMessageSink.sendToRoom(QUOTE, "005930", envelope) 1회
+→ BrokerMessageSink → convertAndSendToUser / convertAndSend → 브로커 fan-out(outbound)
 ```
+
+- 관심목록에도 담고 그 방도 보고 있는 유저는 **같은 틱을 두 번 받는다**(유저 큐 1 + 방 토픽 1). 서버에서 걸러내려면 방 구독자의 userId 집합을 따로 들고 틱마다 교집합을 빼야 하는데, 이건 뜨거운 경로에 인덱스와 계산을 하나 더 얹는 값이다. `quote`는 델타가 아니라 최신 스냅샷이라(API 명세 §6) 중복 자체는 무해하므로 허용한다.
+- 다만 **중복이 순서 역전을 드러낸다**: Redis 리스너는 4스레드 풀이고 종목별 직렬화가 없어 연속한 틱 A·B가 `A-user → B-user → B-room → A-room` 순으로 완료될 수 있다. 이러면 두 경로를 다 구독한 클라가 낡은 A로 끝난다. 역전 자체는 방 토픽 이전에도 있던 성질(한 경로에서도 A·B가 두 스레드에 걸리면 같다)이므로, 뜨거운 경로에 종목별 순서화를 넣는 대신 **클라가 `ts` 역행 봉투를 버리는 것**을 계약으로 뒀다(API 명세 §6, v0.9). 이는 완화지 보장이 아니다 — `ts`는 발행자 벽시계라 동일 밀리초에서는 듣지 않는다. 클라 규칙에 **5초 재정렬 창**을 둔 것도 이 때문이다: 상한 없이 "과거면 버린다"로 두면 시계 느린 호스트로 페일오버했을 때 마지막 `ts`가 high-water mark로 고착돼 새 틱이 전부 버려진다. 서버가 진짜로 보장하려면 종목 단위 직렬화나 발행자 시퀀스가 필요한데, best-effort 틱에 그 비용을 지불하지 않는다.
 
 ### 6.3 방 입장/퇴장
 
 ```
-SUBSCRIBE /topic/rooms/005930/posts → 인터셉터 검증 → SessionSubscribeEvent
-→ DemandMutator.subscribeRoom: roomIndex 0→1 이면 ChannelSubscriber.subscribe(post:005930)
-(fan-out은 SimpleBroker 몫 — 우리는 Redis 구독 여부만 관리)
-퇴장: UNSUBSCRIBE/DISCONNECT → 1→0 이면 unsubscribe
+SUBSCRIBE /topic/rooms/005930/quote → 인터셉터 검증 → SessionSubscribeEvent
+→ DemandMutator.subscribeRoom(QUOTE): roomIndex 0→1 이면 roomQuoteCodes += code
+   + 관심목록 수요가 없을 때만 ChannelSubscriber.subscribe(quote:005930)
+SUBSCRIBE /topic/rooms/005930/posts → 같은 경로로 roomIndex 0→1 이면 subscribe(post:005930)
+(클라 fan-out은 SimpleBroker 몫 — 우리는 Redis 구독 여부만 관리)
+퇴장: UNSUBSCRIBE/DISCONNECT → 1→0 이면 unsubscribe (quote는 관심목록 수요도 0일 때만)
 ```
 
 ### 6.4 관심목록 변경 (재접속 없이 반영 — FR-03)
@@ -312,11 +325,12 @@ DISCONNECT 또는 하트비트 미수신 → 프레임워크 세션 정리 → S
 | 상황 | 처리 |
 |---|---|
 | CONNECT JWT 실패 | `TokenVerifier`가 예외 → 프레임워크 `ERROR` + 종료. `message:unauthorized` |
-| 허용 외 SUBSCRIBE / SEND | 인터셉터 예외 → `ERROR` + 종료. `stomp_errors` 증가 |
+| 허용 외 SUBSCRIBE / SEND | 인터셉터 예외 → `ERROR` + 종료. `stomp_errors` 증가. 목적지를 새로 열 때 게이트웨이를 클라보다 먼저 올리는 이유다(API 명세 §7) |
 | watchlist 해소 실패(Redis 장애) | 세션 유지 + **빈 watchlist 시작** + 경고. 방 토픽 구독은 가능. 재연결 시 자연 복구 |
 | 봉투 역직렬화 실패 | 해당 `RedisChannelHandler`가 드랍 + 카운터. relay 계속(한 건의 독이 채널을 막지 않게) |
 | 느린 클라(송신 버퍼 초과) | 프레임워크가 세션 강제 종료 → 정리 이벤트 정상 발화 → 클라 재연결+REST 복구. `slow_client_disconnects` |
-| Redis 연결 단절 | Lettuce 자동 재연결. 복구 시 `RedisChannelSubscriber`가 `DemandQuery` 스냅샷 기준 전 채널 재구독 |
+| Redis 연결 단절 | `RedisMessageListenerContainer`가 자기 리스너 레지스트리 기준으로 재구독(`recoveryBackoff`) — 우리 코드에 재구독 경로는 없다. 등록이 구독 디스패치보다 먼저라 끊긴 뒤 살아난 연결도 컨테이너가 메운다 |
+| 채널 구독 실패(Redis 장애·컨테이너 미기동) | **우리 쪽에 처리 코드를 두지 않는다.** 컨테이너가 리스너 등록을 먼저 하고 그 등록으로 재구독(`recoveryBackoff`)하거나 기동 시 구독하므로, 수요 인덱스를 그대로 두면 복구된 구독과 맞아떨어진다. 롤백을 기각한 근거와 **아직 계측하지 못한 복구 사각(S6)**은 §11.8 |
 | graceful shutdown | 새 연결 거부 → 전 세션 close → 리스너 컨테이너 stop |
 
 ---
@@ -412,11 +426,12 @@ auth-jwt/src/main/kotlin/com/alphatalk/auth/
 | 수요 | 진실의 위치 | 스위치 |
 |---|---|---|
 | 관심목록 (quote/stream) | 서버 측 영속 상태 (core-api DB, REST로 편집) | 켬: **세션의 첫 SUBSCRIBE**(§11.6) · 끔: **종료** · 조정: **`watchlist:updated`** |
-| 보는 방 (post/trade/depth) | 클라이언트 화면 상태 (서버는 알 수 없음) | **해당 토픽의 STOMP SUBSCRIBE/UNSUBSCRIBE** |
+| 보는 방 (quote/post/trade/depth) | 클라이언트 화면 상태 (서버는 알 수 없음) | **해당 토픽의 STOMP SUBSCRIBE/UNSUBSCRIBE** |
 
 - 관심목록은 서버가 스스로 조회할 수 있으므로 접속 시점에 해소한다(명세 §3.1 서버 해소 모델). 클라의 `/user/queue/*` SUBSCRIBE는 **전달 계층의 파이프 연결일 뿐, 수요 신호가 아니다.**
 - SUBSCRIBE 기준으로 바꾸면 큐 종류별 구독 상태를 code→유저 인덱스와 조합해 추적해야 해서 refcount 모델이 복잡해진다. 정상 흐름(CONNECTED 직후 즉시 구독)에서 얻는 이득은 수 ms뿐이다.
 - 반대로 방 수요를 CONNECT 시점으로 통일할 수도 없다 — 서버는 유저가 지금 어느 방을 보는지 알 수 없고, trade/depth는 무거워 "보는 방만"이 명세 요구(기획안 §2.5-2)다.
+- **같은 `quote:{code}` 채널이 두 수요에 동시에 걸린다**(API 명세 v0.9). 스위치가 다른 두 수요가 한 채널을 공유하므로 구독 해지는 둘 다 0일 때만 한다(§5.2) — 관심목록 쪽 스위치만 보고 끄면 방 열람자의 시세가 끊긴다.
 
 ### 11.2 user-queue의 UNSUBSCRIBE는 왜 수요를 해제하지 않나 (비대칭)
 
@@ -465,3 +480,19 @@ auth-jwt/src/main/kotlin/com/alphatalk/auth/
 - **최종 적용**: `registerStompEndpoints`에서 `registry.setPreserveReceiveOrder(true)` **한 줄**. 결선 여부는 통합 테스트가 고정한다(핸들러 플래그 + `supportsOrderedMessages(clientInboundChannel)` 검증 — 조용한 비활성화 방지).
 - **기록해둘 함정 (중간에 밟았던 것)**: 공개 API 대신 핸들러에 플래그만 수동으로 켜면 **세션의 첫 프레임(CONNECT)만 처리되고 이후 프레임이 영원히 멈춘다** — 완료 콜백을 쏴줄 인터셉터가 결선되지 않아 ordered 큐가 진행되지 않기 때문(E2E 전멸로 실증). 수동으로 하려면 `configureInterceptor`까지 2단 결선이 필요하지만, 공개 API가 둘 다 해주므로 쓸 이유가 없다. 공개 API와 수동 `configureInterceptor`를 병용해도 **중복 등록되지는 않으나**(기존 `CallbackTaskInterceptor`를 `noneMatch`로 검사하는 멱등 구현 — 바이트코드 확인), 불필요한 수동 결선이므로 금지한다.
 - 효과: 세션 단위 인바운드 처리 순서 보장(전역 직렬화 아님 — 세션 간 병렬성 유지). 브로커 구독 레지스트리의 유령 구독(해제했는데 계속 전달) 가능성 제거.
+
+### 11.8 [열림] 구독 실패 — 롤백은 기각, 리컨실은 S6로 남긴다
+
+`ChannelSubscriber.subscribe`의 동기 예외를 아무도 처리하지 않는 것이 리뷰에서 "수요가 latch된다"는 지적을 받아, 롤백을 넣어봤다가 **되돌렸다.** 되돌린 근거는 의존 라이브러리 계측이다 — 빌드가 실제로 해석하는 버전(`:ws` runtimeClasspath 기준 spring-data-redis 3.5.13 · spring-websocket **6.2.19**)의 바이트코드를 읽었다.
+
+- `RedisMessageListenerContainer.addListener`는 **리스너 등록(`listenerTopics`·`channelMapping`)을 먼저 하고, 그 다음에 `isRunning()`을 보고, 그 뒤에야 구독을 디스패치**한다. 그래서 ① 운영 중 Redis 장애로 구독이 실패해도 등록은 남아 컨테이너의 `handleSubscriptionException`·`potentiallyRecover`(`recoveryBackoff`)가 재구독하고, ② 컨테이너가 아직 안 돌면 예외 없이 매핑만 보관했다가 기동 시 구독한다. **두 경우 모두 우리가 할 일이 없다** — 오히려 롤백하면 컨테이너가 되살릴 채널의 수요를 미리 버려 데이터가 끊긴다.
+- 예외를 던져 세션을 끊고 재연결로 재시도시키는 것도 불가능하다. 세션 이벤트 리스너의 예외는 `StompSubProtocolHandler.publishEvent`가 `Throwable`로 잡아 로깅만 한다.
+- 주기적 리컨실도 지금 구조로는 헛돈다. `RedisChannelSubscriber`가 호출 **전에** 자기 `channels`에 넣으므로, 수요와 그 집합을 비교하면 언제나 "빠진 것 없음"이다. 리컨실이 의미를 가지려면 컨테이너의 실제 등록·구독 상태를 읽는 출처가 따로 있어야 한다.
+
+**따라서 롤백은 기각한다.** 다만 "컨테이너가 등록해두므로 언제나 복구된다"까지 단정하지는 않는다 — 리뷰에서 아직 계측하지 못한 경로가 두 가지 제기됐다.
+
+1. **복구 중 추가되는 구독의 레이스**: 컨테이너가 이미 복구 절차에 들어간 뒤 `addListener`가 새 토픽을 기록하면, 복구가 그 이전 스냅샷으로 재구독을 끝내고 새 채널만 빠질 수 있다.
+2. **연결 장애가 아닌 구독 오류**: ACL 거부·커맨드 타임아웃처럼 `RedisConnectionFailureException`이 아닌 실패는 컨테이너의 재시도 대상이 아닐 수 있고, 이때 등록과 `RedisChannelSubscriber.channels`는 남은 채 구독만 죽는다.
+3. **여러 채널 전이의 중도 중단**: `attachWatchlist`는 관심목록 전체를 `userWatchlists`에 먼저 기록한 뒤 종목을 순회한다. 첫 종목의 `subscribe`가 던지면 루프가 거기서 끊겨 그 종목의 `stream:`과 **뒤따르는 종목 전부**가 구독되지 않는데, 유저는 이미 "부착됨"이라 `needsWatchlist`가 false다. 컨테이너가 실패한 그 한 건을 복구하더라도 건너뛴 나머지는 아무도 복구하지 않는다. 예외는 §11.8 위 항목대로 세션에도 닿지 않는다.
+
+셋 중 하나라도 성립하면 결과는 같다 — 수요는 있는데 구독이 없고, `channels`가 재시도를 막는다. **S6에서 계측하고, 필요하면 리컨실을 넣는다.** 그때 비교 대상은 우리 `channels`가 아니라 **컨테이너의 실제 등록·구독 상태**여야 한다(호출 전에 채우는 `channels`와 수요를 비교하면 항상 "빠진 것 없음"이 나온다). 이 공백은 방 quote 토픽 이전부터 있던 것이고 이 PR이 넓히지 않는다 — quote 채널의 소유자가 둘로 늘었을 뿐, 실패 처리 경로는 그대로다.

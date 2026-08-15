@@ -28,8 +28,12 @@ class MessageRouterTest {
         }
     }
 
-    private class FakeDemand(private val watchers: Map<String, Set<Long>>) : DemandQuery {
+    private class FakeDemand(
+        private val watchers: Map<String, Set<Long>>,
+        private val roomQuoteCodes: Set<String> = emptySet(),
+    ) : DemandQuery {
         override fun usersWatching(code: String) = watchers[code] ?: emptySet()
+        override fun roomHasQuoteViewers(code: String) = code in roomQuoteCodes
         override fun isUserConnected(userId: Long) = watchers.values.any { userId in it }
         override fun needsWatchlist(sessionId: String) = false
         override fun connectedUserIds() = watchers.values.flatten().toSet()
@@ -52,7 +56,7 @@ class MessageRouterTest {
     private val demand = FakeDemand(mapOf("005930" to setOf(1L, 2L)))
     private val mutator = RecordingMutator()
 
-    private fun router(): MessageRouter {
+    private fun router(demand: DemandQuery = this.demand): MessageRouter {
         val handlers = listOf(
             QuoteRelayHandler(demand, sink, objectMapper, meterRegistry),
             StreamRelayHandler(demand, sink, objectMapper, meterRegistry),
@@ -82,6 +86,33 @@ class MessageRouterTest {
     fun `보는 유저 없는 code - 발행 없음`() {
         router().onMessage(redisMessage("quote:999999", """{"type":"quote"}"""), null)
         assertThat(sink.userSends).isEmpty()
+        assertThat(sink.roomSends).isEmpty()
+    }
+
+    @Test
+    fun `quote - 방 quote 구독자가 있으면 방 토픽으로도 1회 발행`() {
+        val withRoom = FakeDemand(mapOf("005930" to setOf(1L)), roomQuoteCodes = setOf("005930"))
+        val body = """{"type":"quote","code":"005930","ts":1,"data":{"price":71200}}"""
+
+        router(withRoom).onMessage(redisMessage("quote:005930", body), null)
+
+        assertThat(sink.userSends).hasSize(1)
+        assertThat(sink.roomSends).hasSize(1)
+        val (kind, code, payload) = sink.roomSends.single()
+        assertThat(kind).isEqualTo(ChannelKind.QUOTE)
+        assertThat(code).isEqualTo("005930")
+        assertThat((payload as JsonNode)["data"]["price"].asLong()).isEqualTo(71200)
+    }
+
+    @Test
+    fun `quote - 관심목록 유저 없이 방 구독자만 있어도 방 토픽 발행`() {
+        val roomOnly = FakeDemand(emptyMap(), roomQuoteCodes = setOf("005930"))
+        val body = """{"type":"quote","code":"005930","ts":1,"data":{"price":71200}}"""
+
+        router(roomOnly).onMessage(redisMessage("quote:005930", body), null)
+
+        assertThat(sink.userSends).isEmpty()
+        assertThat(sink.roomSends).hasSize(1)
     }
 
     @Test

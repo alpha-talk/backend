@@ -1,6 +1,7 @@
-# Alpha Talk — WebSocket(STOMP) API 명세 v0.8
+# Alpha Talk — WebSocket(STOMP) API 명세 v0.9
 **WS Gateway · 실시간 푸시 전용**
 
+> **v0.8 → v0.9**: 방 토픽에 `/topic/rooms/{code}/quote` 추가 — 방 입장(SUBSCRIBE)만으로 관심목록 여부와 무관하게 그 방의 실시간 시세를 받는다(§3.2). 봉투·`quote` data는 §4.2와 동일이고, 관심목록에도 있는 종목이면 같은 틱이 `/user/queue/quote`와 방 토픽 양쪽으로 도착할 수 있다 — `quote`는 항상 "최신 스냅샷"(§6)이라 서버는 중복 제거하지 않는다. 대신 클라가 **라이브 틱끼리 `ts` 역행을 버려 완화한다**(§6 — 게이트웨이는 종목별 틱 순서를 보장하지 않고 `ts`도 단조 증가가 아니다. REST 스냅샷은 초기값 전용이라 라이브를 덮지 않는다). 게이트웨이는 방 quote 구독을 `demand:room`에 반영해 price-worker 수집을 트리거한다([Redis 계약](redis_contract.md) v0.22).
 > **v0.7 → v0.8**: `digest{}`에 optional `marketAnalysis{}` 추가 — 하루 1건 생성되는 시장 매크로 브리핑(순환매·수급·해외 지표)을 전 종목 일일 브리핑에 동일하게 삽입([뉴스 파이프라인 명세](alphatalk_news_worker_spec.md) §4.3). 생성이 늦거나 실패하면 필드가 생략된다. 기존 필드 변경 없음 — 비파괴.
 > **v0.6 → v0.7**: `opinion{}`에서 `ratingCode`·`previousRatingCode` **제거** — KIS 실계정 계측 결과 `invt_opnn_cls_code`는 등급 분류가 아니라 위치 값(현재 의견=2·직전 의견=3 고정)이라 정보가 없다([KIS 워커 명세](alphatalk_kis_worker_spec.md) §3.3·§9-7). 아직 발행 코드가 없어 기수신 클라이언트 영향도 없다. 필수 필드는 `brokerCode`·`rating`·`businessDate`.
 > **v0.5 → v0.6**: `stream`의 `category=report`에 증권사 투자의견 subtype 추가 — optional `kind=opinion`·`opinion{}` 필드. STOMP 목적지·봉투·기존 필드는 변경 없음([KIS 워커 명세](alphatalk_kis_worker_spec.md) §3.3).
@@ -72,11 +73,13 @@ accept-version:1.2
 
 | 구독 목적지 | 데이터 | 범위 |
 |---|---|---|
+| `/topic/rooms/{code}/quote` | 현재가 틱 | 보는 방 1개 |
 | `/topic/rooms/{code}/posts` | 글/댓글(post·comment) | 보는 방 1개 |
 | `/topic/rooms/{code}/trade` *(선택)* | 체결 | 보는 방 1개 |
 | `/topic/rooms/{code}/depth` *(선택)* | 호가 | 보는 방 1개 |
 
-> `trade`/`depth`는 호가창·체결 풀데이터로 무거우므로 보는 방에서만 받는다. 지금 단계에서 필수는 `post`이고 나머지는 확장이다.
+> `trade`/`depth`는 호가창·체결 풀데이터로 무거우므로 보는 방에서만 받는다. 지금 단계에서 필수는 `quote`·`post`이고 나머지는 확장이다.
+> `quote` 방 토픽은 **관심목록에 없는 방을 열람하는 유저**를 위한 것이다 — 시세 핀과 진행 중 분봉(클라 조립, [core-api 명세](alphatalk_core_api_spec.md) §8)이 이 틱으로 움직인다. 입장 직후 첫 틱까지의 공백과 장외 시간은 REST 스냅샷 `GET /rooms/{code}/quote`가 책임진다(스냅샷은 초기값 전용 — 라이브가 시작되면 덮지 않는다, §6).
 
 ---
 
@@ -205,6 +208,10 @@ accept-version:1.2
 
 - **best-effort**: WS 전달 실패는 에러가 아니다. DB가 진실의 원천이고 재연결 + REST 복구로 보강한다(§1). 아래 규칙은 전부 이 전제에서 나온다.
 - **틱 coalescing**: `quote`는 합쳐져서 온다(종목당 약 100~250ms 간격의 최신값). **델타가 아니라 항상 "최신 스냅샷"** 이므로 클라는 받은 값으로 덮어쓰면 된다. 중간 틱 누락은 정상이다.
+- **틱 순서 — 보장하지 않는다. 클라가 `ts`로 완화한다(v0.9)**: 게이트웨이는 종목별 틱 전달 순서를 보장하지 않는다. Redis 수신을 다중 스레드로 처리하므로 연속한 두 틱이 역순으로 도착할 수 있고, 관심목록과 방 토픽 양쪽을 구독하면 같은 틱이 두 경로로 오면서 그 역전이 더 잘 드러난다. 규칙은 **소스별로 다르다** — 섞으면 낡은 REST 응답이 실시간 값을 덮는다.
+  - **REST 스냅샷(`GET /rooms/{code}/quote`)은 초기값 전용이다.** WS 라이브 틱을 한 번이라도 반영한 뒤에는 그 방의 REST 응답을 표시에 쓰지 않는다 — 응답이 늦게 오면 그 사이 라이브가 이미 앞서 있고, `delayed:true` 폴백은 아예 과거 거래일 값(일봉 마감 시각)이라 `ts` 크기 비교로는 걸러지지 않는다.
+  - **WS 라이브 틱끼리는 `ts` 역행을 버린다.** 단 버리는 범위를 **재정렬 창 5초**로 한정한다: `표시중.ts - 수신.ts`가 0보다 크고 5초 이하면 버리고, 그보다 더 과거인 라이브 틱은 **발행자 시계 기준이 바뀐 것으로 보고 받아들여 기준을 옮긴다**(rebase). 상한이 없으면 워커가 시계 느린 호스트로 페일오버했을 때 지연분만큼 **모든 새 틱이 계속 버려져 화면이 멈춘다**(마지막 값이 high-water mark로 고착). 5초는 스레드 재정렬(밀리초 규모)보다 훨씬 크고 호스트 간 시계 오차(초 규모)보다는 작다.
+  - 이건 완화지 보장이 아니다. `ts`는 발행자의 **벽시계**라 종목별 단조 증가 시퀀스가 아니다 — 같은 밀리초의 두 갱신에서는 듣지 않고, 5초 창 안의 시계 오차는 재정렬과 구분되지 않는다. 진짜 순서 보장이 필요해지면 발행자가 종목별 시퀀스를 실어야 하며, best-effort 틱(위 "틱은 복구하지 않는다")에 그 비용을 지불할지는 그때 판단한다.
 - **순서 / 중복제거**: `stream`·`post`는 `eventId`(ULID) **오름차순**이 순서의 기준이다. 클라는 `eventId`로 중복을 제거하고 정렬한다.
 - **복구**: 끊긴 동안 놓친 `stream`·`post`는 **메인서버 REST로 "마지막 eventId 이후"를 조회**해 메운다. WS는 과거 메시지를 재전송하지 않는다(live-only). **틱은 복구하지 않는다**(다음 틱이 대체).
 
@@ -215,6 +222,7 @@ accept-version:1.2
 - **인증 실패/만료**: `ERROR` 프레임(예: `message:unauthorized`) 후 연결 종료. 클라는 토큰 갱신 후 재연결한다.
 - **비정상 종료**: 클라는 **지수 백오프 + 지터**로 재연결한다(동시 재접속 폭주 완화). 재연결 후: ① 서버가 관심목록 재해소 → ② 클라가 보던 방 재구독 → ③ 놓친 `stream`/`post`는 REST 복구.
 - **배포**: graceful close. 게이트웨이/메인서버가 분리돼 있어 **메인서버 배포는 WS 연결에 영향이 없다.**
+- **목적지 추가 시 게이트웨이가 먼저다**: 허용 목록에 없는 목적지의 SUBSCRIBE는 그 구독만 거부되는 게 아니라 **`ERROR` + 연결 종료**다(§5) — 클라가 새 목적지를 먼저 쓰면 그 세션의 글·관심목록 틱까지 함께 끊긴다. **게이트웨이 배포가 끝나(구버전 인스턴스가 라우팅에서 모두 빠진 뒤) 클라를 내보낸다** — 롤링 중에는 혼재 구간이 있으므로 "배포 시작"이 아니라 "완료"가 기준이다. 아직 상용 배포 전이라 이번 v0.9는 게이트웨이·클라를 함께 올리면 되고, 구버전 호환 목적지를 따로 유지하지 않는다.
 
 ---
 
@@ -241,11 +249,13 @@ WS 게이트웨이가 하지 않는 것(같은 클라가 REST로 별도 호출):
 |---|---|---|
 | `/user/queue/quote` (해당 종목) | `quote:{code}` | price-worker |
 | `/user/queue/stream` (해당 종목) | `stream:{code}` | llm-worker · batch-worker(투자의견) |
+| `/topic/rooms/{code}/quote` | `quote:{code}` | price-worker |
 | `/topic/rooms/{code}/posts` | `post:{code}` | 메인서버(글 작성 시 발행) |
 | `/topic/rooms/{code}/trade` *(선택)* | `trade:{code}` | price-worker |
 | `/topic/rooms/{code}/depth` *(선택)* | `depth:{code}` | price-worker |
 
 - 같은 종목을 보는 클라가 N명이어도 게이트웨이는 Redis 채널을 **한 번만 구독**하고 N명에게 fan-out한다(중복 제거).
+- `quote:{code}`는 목적지가 둘이다 — 관심목록 수요와 방 quote 구독 **어느 한쪽이라도** 있으면 채널을 구독하고, 수신 틱을 관심목록 유저의 `/user/queue/quote`와 (방 구독자가 있으면) `/topic/rooms/{code}/quote` 양쪽으로 fan-out한다. 채널 해지는 **양쪽 수요가 모두 사라졌을 때만** 한다.
 
 ---
 
@@ -267,12 +277,15 @@ C: SUBSCRIBE  id:sub-stream  destination:/user/queue/stream
 S: MESSAGE  destination:/user/queue/quote   {"type":"quote","code":"005930",...}
 S: MESSAGE  destination:/user/queue/stream  {"type":"stream","code":"000660","eventId":"01J...",...}
  
-# 방 입장 → 글/댓글 수신
-C: SUBSCRIBE  id:sub-room-005930  destination:/topic/rooms/005930/posts
+# 방 입장 → 시세·글/댓글 수신 (관심목록 여부 무관)
+C: SUBSCRIBE  id:sub-room-005930-quote  destination:/topic/rooms/005930/quote
+C: SUBSCRIBE  id:sub-room-005930-posts  destination:/topic/rooms/005930/posts
+S: MESSAGE  destination:/topic/rooms/005930/quote  {"type":"quote","code":"005930",...}
 S: MESSAGE  destination:/topic/rooms/005930/posts  {"type":"post","code":"005930","eventId":"01J...","data":{"kind":"post",...}}
  
 # 방 퇴장 → 종료
-C: UNSUBSCRIBE  id:sub-room-005930
+C: UNSUBSCRIBE  id:sub-room-005930-quote
+C: UNSUBSCRIBE  id:sub-room-005930-posts
 C: DISCONNECT
 ```
 
@@ -282,6 +295,6 @@ C: DISCONNECT
 
 - 게이트웨이는 **Spring MVC 스택 + `@EnableWebSocketMessageBroker`(SimpleBroker)** 로 구현한다. STOMP 프레이밍·하트비트·구독 레지스트리·`/user` 목적지 해소·MESSAGE fan-out은 프레임워크가 담당한다.
 - 인증은 `clientInboundChannel`의 `ChannelInterceptor`에서 처리한다: CONNECT의 JWT 검증, CONNECTED 이전 SUBSCRIBE 거부, 목적지 화이트리스트, **콘텐츠 SEND 무조건 거부**(§5).
-- 게이트웨이 고유 로직은 **수요 카운트**(code→유저/세션 인덱스 = Redis 채널 refcount)와 Redis 수신→브로커 발행 relay다. `quote:`/`stream:`은 관심목록 인덱스로 대상 유저를 찾아 `convertAndSendToUser`, `post:`는 `/topic/rooms/{code}/posts`로 `convertAndSend`.
+- 게이트웨이 고유 로직은 **수요 카운트**(code→유저/세션 인덱스 = Redis 채널 refcount)와 Redis 수신→브로커 발행 relay다. `quote:`/`stream:`은 관심목록 인덱스로 대상 유저를 찾아 `convertAndSendToUser`, `post:`는 `/topic/rooms/{code}/posts`로 `convertAndSend`. `quote:`는 추가로 방 quote 구독자가 있으면 `/topic/rooms/{code}/quote`로도 `convertAndSend`한다(§9).
 - SimpleBroker는 인스턴스별 인메모리지만 게이트웨이 간 버스는 Redis Pub/Sub이 담당(broadcast-and-filter)하므로 외부 브로커(RabbitMQ relay)는 불필요하다.
 - 틱 conflation(100~250ms)은 price-worker 책임이다. 게이트웨이는 전송 제한(`setSendTimeLimit`/`setSendBufferSizeLimit`)으로 느린 클라를 방어한다 — 버퍼 초과 세션은 강제 종료하고 클라가 재연결+REST 복구한다(§6·§7과 일관).

@@ -77,7 +77,12 @@ class StompAuthChannelInterceptorTest {
 
     @Test
     fun `허용 목적지 - 통과`() {
-        val allowed = listOf("/user/queue/quote", "/user/queue/stream", "/topic/rooms/005930/posts")
+        val allowed = listOf(
+            "/user/queue/quote",
+            "/user/queue/stream",
+            "/topic/rooms/005930/quote",
+            "/topic/rooms/005930/posts",
+        )
         for (dest in allowed) {
             interceptor().preSend(subscribeMessage(dest, authenticated = true), channel)
         }
