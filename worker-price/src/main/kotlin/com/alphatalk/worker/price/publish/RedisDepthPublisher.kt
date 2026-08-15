@@ -16,12 +16,11 @@ class RedisDepthPublisher(
 ) : DepthPublisher {
     private val log = LoggerFactory.getLogger(javaClass)
 
-    override fun publish(code: String, data: DepthData, ts: Long) {
+    override fun publish(code: String, data: DepthData, ts: Long): Boolean =
         runCatching {
             val envelope = Envelope(type = ChannelKind.DEPTH.prefix, code = code, ts = ts, data = data)
             redis.convertAndSend(Channels.depth(code), mapper.writeValueAsString(envelope))
         }.onFailure {
             log.warn("depth publish failed (best-effort): code={}", code, it)
-        }
-    }
+        }.isSuccess
 }
