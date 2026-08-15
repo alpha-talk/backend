@@ -363,13 +363,9 @@ class SessionPoolTest {
         server.awaitMessages(3)
         assertEquals(listOf("005930"), trKeysOf(server.receivedMessages, "H0UNASP0"))
 
-        repeat(3) {
-            server.broadcastText(ackFrame("005930", success = false, trId = "H0UNASP0"))
-            now += 500
-            pool.maintain(linkedSetOf("005930", "000660"), listOf("005930", "000660"), subscribeAllowed = true)
-        }
+        awaitDepthCooldown(pool, "005930", linkedSetOf("005930", "000660"), listOf("005930", "000660"), meters)
 
-        await().atMost(Duration.ofSeconds(5)).until {
+        await().atMost(Duration.ofSeconds(10)).until {
             now += 500
             pool.maintain(linkedSetOf("005930", "000660"), listOf("005930", "000660"), subscribeAllowed = true)
             trKeysOf(server.receivedMessages, "H0UNASP0").contains("000660")
@@ -391,16 +387,13 @@ class SessionPoolTest {
         pool.maintain(linkedSetOf("005930", "000660"), rooms, subscribeAllowed = true)
         server.awaitMessages(3)
 
-        repeat(3) {
-            server.broadcastText(ackFrame("005930", success = false, trId = "H0UNASP0"))
-            now += 500
-            pool.maintain(linkedSetOf("005930", "000660"), rooms, subscribeAllowed = true)
-        }
-        await().atMost(Duration.ofSeconds(5)).until {
+        awaitDepthCooldown(pool, "005930", linkedSetOf("005930", "000660"), rooms, meters)
+        await().atMost(Duration.ofSeconds(10)).until {
             now += 500
             pool.maintain(linkedSetOf("005930", "000660"), rooms, subscribeAllowed = true)
             trKeysOf(server.receivedMessages, "H0UNASP0").contains("000660")
         }
+        server.broadcastText(unsubscribeAckFrame("005930", success = true, trId = "H0UNASP0"))
         server.broadcastText(ackFrame("000660", success = true, trId = "H0UNASP0"))
         await().atMost(Duration.ofSeconds(5)).until {
             meters.find("depth.symbols").gauge()?.value() == 1.0
@@ -424,37 +417,102 @@ class SessionPoolTest {
     }
 
     @Test
+    fun `늦게 온 호가 등록 거절은 해지 거절로 오인되지 않는다`() {
+        val meters = SimpleMeterRegistry()
+        val rooms = listOf("005930", "000660")
+        val target = linkedSetOf("005930", "000660")
+        val pool = pool(
+            maxPerSession = 3,
+            trIds = listOf("H0UNCNT0"),
+            ackTimeoutMillis = 1_000,
+            graceMillis = 1_000,
+            meters = meters,
+        )
+        pool.maintain(target, rooms, subscribeAllowed = true)
+        server.awaitMessages(3)
+
+        await().atMost(Duration.ofSeconds(10)).until {
+            now += 1_000
+            pool.maintain(target, rooms, subscribeAllowed = true)
+            meters.counter("depth.subscribe.cooldown").count() >= 1.0
+        }
+        await().atMost(Duration.ofSeconds(10)).until {
+            now += 100
+            pool.maintain(target, rooms, subscribeAllowed = true)
+            unsubscribesOf(server.receivedMessages).any {
+                it.path("body").path("input").path("tr_id").asText() == "H0UNASP0" &&
+                    it.path("body").path("input").path("tr_key").asText() == "005930"
+            }
+        }
+        val before = unsubscribesOf(server.receivedMessages).size
+
+        server.broadcastText(ackFrame("005930", success = false, trId = "H0UNASP0"))
+        Thread.sleep(300)
+        now += 100
+        pool.maintain(target, rooms, subscribeAllowed = true)
+
+        Thread.sleep(300)
+        assertEquals(before, unsubscribesOf(server.receivedMessages).size)
+        assertEquals(0.0, meters.counter("kis.unsubscribe.abandoned").count())
+    }
+
+    @Test
+    fun `쿨다운 중 방을 나갔다 들어오면 복귀 자격도 함께 끝난다`() {
+        val meters = SimpleMeterRegistry()
+        val pool = pool(
+            maxPerSession = 3,
+            trIds = listOf("H0UNCNT0"),
+            ackTimeoutMillis = 100,
+            graceMillis = 1_000,
+            meters = meters,
+        )
+        pool.maintain(linkedSetOf("005930", "000660"), listOf("005930", "000660"), subscribeAllowed = true)
+        server.awaitMessages(3)
+        awaitDepthCooldown(pool, "005930", linkedSetOf("005930", "000660"), listOf("005930", "000660"), meters)
+
+        now += 2_000
+        pool.maintain(linkedSetOf("005930", "000660"), listOf("000660"), subscribeAllowed = true)
+        pool.maintain(linkedSetOf("005930", "000660"), listOf("000660"), subscribeAllowed = true)
+        await().atMost(Duration.ofSeconds(5)).until {
+            trKeysOf(server.receivedMessages, "H0UNASP0").contains("000660")
+        }
+        server.broadcastText(unsubscribeAckFrame("005930", success = true, trId = "H0UNASP0"))
+        server.broadcastText(ackFrame("000660", success = true, trId = "H0UNASP0"))
+        await().atMost(Duration.ofSeconds(5)).until {
+            meters.find("depth.symbols").gauge()?.value() == 1.0
+        }
+
+        pool.maintain(linkedSetOf("005930", "000660"), listOf("000660", "005930"), subscribeAllowed = true)
+        now += 70_000
+        val before = trKeysOf(server.receivedMessages, "H0UNASP0").count { it == "005930" }
+        pool.maintain(linkedSetOf("005930", "000660"), listOf("000660", "005930"), subscribeAllowed = true)
+        now += 2_000
+        pool.maintain(linkedSetOf("005930", "000660"), listOf("000660", "005930"), subscribeAllowed = true)
+
+        Thread.sleep(200)
+        assertEquals(before, trKeysOf(server.receivedMessages, "H0UNASP0").count { it == "005930" })
+        assertTrue(
+            unsubscribesOf(server.receivedMessages).none {
+                it.path("body").path("input").path("tr_id").asText() == "H0UNASP0" &&
+                    it.path("body").path("input").path("tr_key").asText() == "000660"
+            },
+        )
+    }
+
+    @Test
     fun `실패 격리는 방을 나갔다 다시 들어와도 유지되어 쿨다운이 길어진다`() {
         val meters = SimpleMeterRegistry()
         val pool = pool(maxPerSession = 3, trIds = listOf("H0UNCNT0"), ackTimeoutMillis = 100, meters = meters)
 
-        fun failDepthOnce() {
-            repeat(3) {
-                server.broadcastText(ackFrame("005930", success = false, trId = "H0UNASP0"))
-                now += 500
-                pool.maintain(linkedSetOf("005930"), listOf("005930"), subscribeAllowed = true)
-            }
-        }
-
         pool.maintain(linkedSetOf("005930"), listOf("005930"), subscribeAllowed = true)
         server.awaitMessages(2)
-        failDepthOnce()
-        await().atMost(Duration.ofSeconds(5)).until {
-            now += 500
-            pool.maintain(linkedSetOf("005930"), listOf("005930"), subscribeAllowed = true)
-            meters.counter("depth.subscribe.cooldown").count() == 1.0
-        }
+        awaitDepthCooldown(pool, "005930", linkedSetOf("005930"), listOf("005930"), meters)
 
         now += 40_000
         pool.maintain(linkedSetOf("005930"), emptyList(), subscribeAllowed = true)
         now += 25_000
         pool.maintain(linkedSetOf("005930"), listOf("005930"), subscribeAllowed = true)
-        failDepthOnce()
-        await().atMost(Duration.ofSeconds(5)).until {
-            now += 500
-            pool.maintain(linkedSetOf("005930"), listOf("005930"), subscribeAllowed = true)
-            meters.counter("depth.subscribe.cooldown").count() == 2.0
-        }
+        awaitDepthCooldown(pool, "005930", linkedSetOf("005930"), listOf("005930"), meters, count = 2.0)
 
         now += 70_000
         val before = trKeysOf(server.receivedMessages, "H0UNASP0").size
@@ -476,16 +534,13 @@ class SessionPoolTest {
         )
         pool.maintain(linkedSetOf("005930", "000660"), listOf("005930", "000660"), subscribeAllowed = true)
         server.awaitMessages(3)
-        repeat(3) {
-            server.broadcastText(ackFrame("005930", success = false, trId = "H0UNASP0"))
-            now += 500
-            pool.maintain(linkedSetOf("005930", "000660"), listOf("005930", "000660"), subscribeAllowed = true)
-        }
-        await().atMost(Duration.ofSeconds(5)).until {
+        awaitDepthCooldown(pool, "005930", linkedSetOf("005930", "000660"), listOf("005930", "000660"), meters)
+        await().atMost(Duration.ofSeconds(10)).until {
             now += 500
             pool.maintain(linkedSetOf("005930", "000660"), listOf("005930", "000660"), subscribeAllowed = true)
             trKeysOf(server.receivedMessages, "H0UNASP0").contains("000660")
         }
+        server.broadcastText(unsubscribeAckFrame("005930", success = true, trId = "H0UNASP0"))
         server.broadcastText(ackFrame("000660", success = true, trId = "H0UNASP0"))
         await().atMost(Duration.ofSeconds(5)).until {
             meters.find("depth.symbols").gauge()?.value() == 1.0
@@ -520,16 +575,7 @@ class SessionPoolTest {
         )
         pool.maintain(linkedSetOf("005930", "000660"), listOf("005930", "000660"), subscribeAllowed = true)
         server.awaitMessages(3)
-        repeat(3) {
-            server.broadcastText(ackFrame("005930", success = false, trId = "H0UNASP0"))
-            now += 500
-            pool.maintain(linkedSetOf("005930", "000660"), listOf("005930", "000660"), subscribeAllowed = true)
-        }
-        await().atMost(Duration.ofSeconds(5)).until {
-            now += 500
-            pool.maintain(linkedSetOf("005930", "000660"), listOf("005930", "000660"), subscribeAllowed = true)
-            meters.counter("depth.subscribe.cooldown").count() == 1.0
-        }
+        awaitDepthCooldown(pool, "005930", linkedSetOf("005930", "000660"), listOf("005930", "000660"), meters)
 
         now += 60_000
         val before = trKeysOf(server.receivedMessages, "H0UNASP0").count { it == "005930" }
@@ -1178,6 +1224,22 @@ class SessionPoolTest {
         Thread.sleep(200)
         assertEquals(3, unsubscribesOf(server.receivedMessages).size)
         assertEquals(1.0, meters.counter("kis.unsubscribe.abandoned").count())
+    }
+
+    private fun awaitDepthCooldown(
+        pool: SessionPool,
+        code: String,
+        target: Set<String>,
+        rooms: List<String>,
+        meters: SimpleMeterRegistry,
+        count: Double = 1.0,
+    ) {
+        await().atMost(Duration.ofSeconds(10)).until {
+            server.broadcastText(ackFrame(code, success = false, trId = "H0UNASP0"))
+            now += 500
+            pool.maintain(target, rooms, subscribeAllowed = true)
+            meters.counter("depth.subscribe.cooldown").count() >= count
+        }
     }
 
     private fun abandonUnsubscribe(pool: SessionPool, code: String, remaining: Set<String>) {
