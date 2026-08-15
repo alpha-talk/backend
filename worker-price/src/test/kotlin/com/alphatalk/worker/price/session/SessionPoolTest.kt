@@ -351,6 +351,95 @@ class SessionPoolTest {
     }
 
     @Test
+    fun `확정되지 않는 호가 등록은 슬롯을 내주고 다음 방 종목이 받는다`() {
+        val meters = SimpleMeterRegistry()
+        val pool = pool(
+            maxPerSession = 3,
+            trIds = listOf("H0UNCNT0"),
+            ackTimeoutMillis = 100,
+            meters = meters,
+        )
+        pool.maintain(linkedSetOf("005930", "000660"), listOf("005930", "000660"), subscribeAllowed = true)
+        server.awaitMessages(3)
+        assertEquals(listOf("005930"), trKeysOf(server.receivedMessages, "H0UNASP0"))
+
+        repeat(3) {
+            server.broadcastText(ackFrame("005930", success = false, trId = "H0UNASP0"))
+            now += 500
+            pool.maintain(linkedSetOf("005930", "000660"), listOf("005930", "000660"), subscribeAllowed = true)
+        }
+
+        await().atMost(Duration.ofSeconds(5)).until {
+            now += 500
+            pool.maintain(linkedSetOf("005930", "000660"), listOf("005930", "000660"), subscribeAllowed = true)
+            trKeysOf(server.receivedMessages, "H0UNASP0").contains("000660")
+        }
+        assertEquals(1.0, meters.counter("depth.subscribe.cooldown").count())
+    }
+
+    @Test
+    fun `마지막 호가 등록 요청은 ACK 유효기간이 지나기 전에 취소되지 않는다`() {
+        val meters = SimpleMeterRegistry()
+        val pool = pool(
+            maxPerSession = 3,
+            trIds = listOf("H0UNCNT0"),
+            ackTimeoutMillis = 1_000,
+            meters = meters,
+        )
+        pool.maintain(linkedSetOf("005930", "000660"), listOf("005930", "000660"), subscribeAllowed = true)
+        server.awaitMessages(3)
+
+        repeat(2) {
+            now += 1_000
+            pool.maintain(linkedSetOf("005930", "000660"), listOf("005930", "000660"), subscribeAllowed = true)
+        }
+        server.awaitMessages(5)
+
+        now += 500
+        pool.maintain(linkedSetOf("005930", "000660"), listOf("005930", "000660"), subscribeAllowed = true)
+
+        assertEquals(0.0, meters.counter("depth.subscribe.cooldown").count())
+        assertTrue(unsubscribesOf(server.receivedMessages).isEmpty())
+
+        server.broadcastText(ackFrame("005930", success = true, trId = "H0UNASP0"))
+
+        await().atMost(Duration.ofSeconds(5)).until {
+            meters.find("depth.symbols").gauge()?.value() == 1.0
+        }
+        assertEquals(0.0, meters.counter("depth.subscribe.cooldown").count())
+    }
+
+    @Test
+    fun `구분 전환 중 도착한 옛 호가 TR 프레임은 버린다`() {
+        val divs = InMemoryMarketDivStore()
+        val meters = SimpleMeterRegistry()
+        val depthBuffer = DepthConflationBuffer()
+        val pool = pool(
+            maxPerSession = 4,
+            trIds = listOf("H0UNCNT0"),
+            marketDivs = divs,
+            meters = meters,
+            depthBuffer = depthBuffer,
+        )
+        pool.maintain(linkedSetOf("047040"), listOf("047040"), subscribeAllowed = true)
+        server.awaitMessages(2)
+        server.broadcastText(ackFrame("047040", success = true, trId = "H0UNASP0"))
+
+        divs.confirm("047040", "J")
+        pool.maintain(linkedSetOf("047040"), listOf("047040"), subscribeAllowed = true)
+        await().atMost(Duration.ofSeconds(5)).until {
+            trKeysOf(server.receivedMessages, "H0STASP0").contains("047040")
+        }
+
+        server.broadcastText(depthFrame("H0UNASP0", "047040"))
+        await().atMost(Duration.ofSeconds(5)).until { meters.counter("depth.stale.dropped").count() > 0 }
+        assertTrue(depthBuffer.drainDirty().isEmpty())
+
+        server.broadcastText(depthFrame("H0STASP0", "047040"))
+        await().atMost(Duration.ofSeconds(5)).until { depthBuffer.drainDirty().isNotEmpty() }
+    }
+
+    @Test
     fun `KRX로 확정된 종목의 호가는 KRX 호가 TR로 등록한다`() {
         val pool = pool(
             maxPerSession = 4,
