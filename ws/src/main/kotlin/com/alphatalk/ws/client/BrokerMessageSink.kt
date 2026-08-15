@@ -26,6 +26,7 @@ class BrokerMessageSink(
 
     override fun sendToRoom(kind: ChannelKind, code: String, payload: Any) {
         val destination = when (kind) {
+            ChannelKind.QUOTE -> Destinations.roomQuote(code)
             ChannelKind.POST -> Destinations.roomPosts(code)
             ChannelKind.TRADE -> Destinations.roomTrade(code)
             ChannelKind.DEPTH -> Destinations.roomDepth(code)

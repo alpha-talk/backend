@@ -68,7 +68,7 @@ class StompAuthChannelInterceptor(
         }
         val room = Destinations.parseRoomTopic(destination) ?: return false
         return when (room.kind) {
-            ChannelKind.POST -> true
+            ChannelKind.QUOTE, ChannelKind.POST -> true
             ChannelKind.TRADE, ChannelKind.DEPTH -> props.features.tradeDepthEnabled
             else -> false
         }
