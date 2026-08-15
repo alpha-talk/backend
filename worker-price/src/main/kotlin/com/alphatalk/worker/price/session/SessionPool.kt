@@ -96,6 +96,7 @@ class SessionPool(
 
     @Synchronized
     fun maintain(target: Set<String>, rooms: List<String>, subscribeAllowed: Boolean) {
+        sessions.forEach { it.absorbConnectionLoss() }
         reconcileAssignments(target, rooms)
         reconcileDepth(if (depthEnabled) rooms else emptyList())
         val now = clock()
@@ -105,7 +106,6 @@ class SessionPool(
             escalateSilent(now)
         }
         sessions.forEach { session ->
-            session.absorbConnectionLoss()
             if (session.state != SessionState.CONNECTED && session.state != SessionState.CONNECTING &&
                 session.assigned.isNotEmpty() && now >= session.nextConnectAttemptAt
             ) {
