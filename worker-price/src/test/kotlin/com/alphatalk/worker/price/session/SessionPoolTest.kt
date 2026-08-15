@@ -622,6 +622,36 @@ class SessionPoolTest {
     }
 
     @Test
+    fun `접속이 진행되는 동안 도착한 틱은 강등을 막는다`() {
+        val meters = SimpleMeterRegistry()
+        var connects = 0
+        val pool = SessionPool(
+            accounts = (1..2).map { KisAccount("key$it", "app$it", "secret$it") },
+            wsUrl = server.url,
+            approvalKeys = {
+                now += 2_000
+                if (++connects == 2) {
+                    server.broadcastText(tickFrame("H0UNCNT0", "005930"))
+                    await().atMost(Duration.ofSeconds(5)).until { meters.counter("tick.in").count() > 0 }
+                }
+                "AK"
+            },
+            buffer = ConflationBuffer(),
+            meters = meters,
+            tickTrIds = listOf("H0UNCNT0"),
+            marketDivs = InMemoryMarketDivStore(),
+            silenceMillis = 1_000,
+            maxRegistrationsPerSession = 1,
+            backoff = BackoffPolicy(initialMillis = 50, jitterRatio = 0.0),
+            clock = { now },
+        )
+
+        pool.maintain(linkedSetOf("005930", "000660"), emptyList(), subscribeAllowed = true)
+
+        assertTrue(pool.degradedSymbols().isEmpty())
+    }
+
+    @Test
     fun `침묵 판정은 접속에 걸린 시간까지 반영한 시각으로 한다`() {
         val pool = SessionPool(
             accounts = (1..2).map { KisAccount("key$it", "app$it", "secret$it") },
