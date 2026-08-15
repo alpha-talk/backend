@@ -14,6 +14,8 @@ import org.springframework.data.jpa.repository.JpaRepository
 import org.springframework.data.redis.core.StringRedisTemplate
 import org.springframework.stereotype.Repository
 import java.io.Serializable
+import java.time.Clock
+import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -56,6 +58,7 @@ interface DailyCandleJpaRepository : JpaRepository<DailyCandleEntity, DailyCandl
 class RedisQuoteStore(
     private val redis: StringRedisTemplate,
     private val candles: DailyCandleJpaRepository,
+    private val clock: Clock = Clock.systemUTC(),
 ) : QuoteStore {
     private val log = LoggerFactory.getLogger(javaClass)
 
@@ -67,7 +70,7 @@ class RedisQuoteStore(
             return null
         }
         if (hash.isEmpty()) return null
-        return runCatching {
+        val quote = runCatching {
             QuoteResponse(
                 code = code,
                 price = hash.getValue("price").toLong(),
@@ -83,9 +86,14 @@ class RedisQuoteStore(
             )
         }.getOrElse {
             log.warn("live quote cache payload is invalid: code={} fields={}", code, hash.keys.sorted(), it)
-            null
+            return null
         }
+        if (tsDate(quote.ts).isBefore(tsDate(clock.millis()))) return null
+        return quote
     }
+
+    private fun tsDate(epochMilli: Long): LocalDate =
+        Instant.ofEpochMilli(epochMilli).atZone(SEOUL).toLocalDate()
 
     override fun lastCandleQuote(code: String): QuoteResponse? =
         candles.findTop2ByCodeOrderByDateDesc(code).takeIf { it.isNotEmpty() }?.let(::toQuote)
