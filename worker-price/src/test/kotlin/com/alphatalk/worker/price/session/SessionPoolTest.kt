@@ -622,6 +622,23 @@ class SessionPoolTest {
     }
 
     @Test
+    fun `절단 상태에서 새로 배정된 종목도 REST 강등에 포함된다`() {
+        val pool = pool(maxPerSession = 4, trIds = listOf("H0UNCNT0"), silenceMillis = Long.MAX_VALUE)
+        pool.maintain(setOf("005930"), emptyList(), subscribeAllowed = true)
+        server.awaitMessages(1)
+
+        server.closeAllConnections()
+        await().atMost(Duration.ofSeconds(10)).until {
+            pool.maintain(setOf("005930"), emptyList(), subscribeAllowed = true)
+            pool.degradedSymbols() == setOf("005930")
+        }
+
+        pool.maintain(linkedSetOf("005930", "000660"), emptyList(), subscribeAllowed = true)
+
+        assertEquals(setOf("005930", "000660"), pool.degradedSymbols())
+    }
+
+    @Test
     fun `강등된 종목은 재접속을 거쳐도 틱이 다시 흐를 때까지 REST 폴백을 유지한다`() {
         val divs = InMemoryMarketDivStore()
         val meters = SimpleMeterRegistry()
