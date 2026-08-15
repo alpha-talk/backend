@@ -86,7 +86,11 @@ class SessionPool(
         }.register(meters)
         Gauge.builder("depth.symbols", this) { pool ->
             pool.sessions.sumOf { session ->
-                session.heldRegistrations().count { it.trId == depthUnifiedTrId || it.trId == depthKrxTrId }
+                session.heldRegistrations()
+                    .filter { it.trId == depthUnifiedTrId || it.trId == depthKrxTrId }
+                    .map(Registration::symbol)
+                    .distinct()
+                    .size
             }.toDouble()
         }.register(meters)
         Gauge.builder("depth.symbols.dropped", this) { pool ->
@@ -114,7 +118,10 @@ class SessionPool(
                 session.syncSubscriptions()
             }
         }
-        if (subscribeAllowed) escalateSilent(clock())
+        if (subscribeAllowed) {
+            absorbSeenTicks()
+            escalateSilent(clock())
+        }
     }
 
     @Synchronized
