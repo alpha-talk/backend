@@ -424,6 +424,92 @@ class SessionPoolTest {
     }
 
     @Test
+    fun `실패 격리는 방을 나갔다 다시 들어와도 유지되어 쿨다운이 길어진다`() {
+        val meters = SimpleMeterRegistry()
+        val pool = pool(maxPerSession = 3, trIds = listOf("H0UNCNT0"), ackTimeoutMillis = 100, meters = meters)
+
+        fun failDepthOnce() {
+            repeat(3) {
+                server.broadcastText(ackFrame("005930", success = false, trId = "H0UNASP0"))
+                now += 500
+                pool.maintain(linkedSetOf("005930"), listOf("005930"), subscribeAllowed = true)
+            }
+        }
+
+        pool.maintain(linkedSetOf("005930"), listOf("005930"), subscribeAllowed = true)
+        server.awaitMessages(2)
+        failDepthOnce()
+        await().atMost(Duration.ofSeconds(5)).until {
+            now += 500
+            pool.maintain(linkedSetOf("005930"), listOf("005930"), subscribeAllowed = true)
+            meters.counter("depth.subscribe.cooldown").count() == 1.0
+        }
+
+        now += 40_000
+        pool.maintain(linkedSetOf("005930"), emptyList(), subscribeAllowed = true)
+        now += 25_000
+        pool.maintain(linkedSetOf("005930"), listOf("005930"), subscribeAllowed = true)
+        failDepthOnce()
+        await().atMost(Duration.ofSeconds(5)).until {
+            now += 500
+            pool.maintain(linkedSetOf("005930"), listOf("005930"), subscribeAllowed = true)
+            meters.counter("depth.subscribe.cooldown").count() == 2.0
+        }
+
+        now += 70_000
+        val before = trKeysOf(server.receivedMessages, "H0UNASP0").size
+        pool.maintain(linkedSetOf("005930"), listOf("005930"), subscribeAllowed = true)
+
+        Thread.sleep(200)
+        assertEquals(before, trKeysOf(server.receivedMessages, "H0UNASP0").size)
+    }
+
+    @Test
+    fun `방 수요가 끝났다 돌아온 종목은 복귀분이 아니라 신규 수요로 경쟁한다`() {
+        val meters = SimpleMeterRegistry()
+        val pool = pool(
+            maxPerSession = 3,
+            trIds = listOf("H0UNCNT0"),
+            ackTimeoutMillis = 100,
+            graceMillis = 1_000,
+            meters = meters,
+        )
+        pool.maintain(linkedSetOf("005930", "000660"), listOf("005930", "000660"), subscribeAllowed = true)
+        server.awaitMessages(3)
+        repeat(3) {
+            server.broadcastText(ackFrame("005930", success = false, trId = "H0UNASP0"))
+            now += 500
+            pool.maintain(linkedSetOf("005930", "000660"), listOf("005930", "000660"), subscribeAllowed = true)
+        }
+        await().atMost(Duration.ofSeconds(5)).until {
+            now += 500
+            pool.maintain(linkedSetOf("005930", "000660"), listOf("005930", "000660"), subscribeAllowed = true)
+            trKeysOf(server.receivedMessages, "H0UNASP0").contains("000660")
+        }
+        server.broadcastText(ackFrame("000660", success = true, trId = "H0UNASP0"))
+        await().atMost(Duration.ofSeconds(5)).until {
+            meters.find("depth.symbols").gauge()?.value() == 1.0
+        }
+
+        now += 60_000
+        pool.maintain(linkedSetOf("005930", "000660"), listOf("000660"), subscribeAllowed = true)
+        val before = trKeysOf(server.receivedMessages, "H0UNASP0").count { it == "005930" }
+
+        pool.maintain(linkedSetOf("005930", "000660"), listOf("000660", "005930"), subscribeAllowed = true)
+        now += 2_000
+        pool.maintain(linkedSetOf("005930", "000660"), listOf("000660", "005930"), subscribeAllowed = true)
+
+        Thread.sleep(200)
+        assertEquals(before, trKeysOf(server.receivedMessages, "H0UNASP0").count { it == "005930" })
+        assertTrue(
+            unsubscribesOf(server.receivedMessages).none {
+                it.path("body").path("input").path("tr_id").asText() == "H0UNASP0" &&
+                    it.path("body").path("input").path("tr_key").asText() == "000660"
+            },
+        )
+    }
+
+    @Test
     fun `쿨다운이 끝나고 슬롯이 비면 실패했던 종목이 다시 호가를 받는다`() {
         val meters = SimpleMeterRegistry()
         val pool = pool(
