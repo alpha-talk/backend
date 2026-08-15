@@ -42,8 +42,11 @@ class DemandRegistry(
     private val roomIndex = HashMap<Pair<ChannelKind, String>, Int>()
 
     private val watchlistIndex = ConcurrentHashMap<String, Set<Long>>()
+    private val roomQuoteCodes = ConcurrentHashMap.newKeySet<String>()
 
     override fun usersWatching(code: String): Set<Long> = watchlistIndex[code] ?: emptySet()
+
+    override fun roomHasQuoteViewers(code: String): Boolean = code in roomQuoteCodes
 
     override fun demandSnapshot(): DemandSnapshot = lock.withLock {
         val quote = watchlistIndex.mapValues { it.value.size }
@@ -99,7 +102,10 @@ class DemandRegistry(
     }
 
     override fun subscribeRoom(sessionId: String, subscriptionId: String, kind: ChannelKind, code: String) {
-        require(kind == ChannelKind.POST || kind == ChannelKind.TRADE || kind == ChannelKind.DEPTH) {
+        require(
+            kind == ChannelKind.QUOTE || kind == ChannelKind.POST ||
+                kind == ChannelKind.TRADE || kind == ChannelKind.DEPTH,
+        ) {
             "not a room channel kind: $kind"
         }
         lock.withLock {
@@ -108,7 +114,14 @@ class DemandRegistry(
             if (previous != null) releaseRoom(previous)
             val count = roomIndex.merge(kind to code, 1, Int::plus)
             if (count == 1) {
-                channelSubscriber.subscribe(Channels.of(kind, code))
+                if (kind == ChannelKind.QUOTE) {
+                    roomQuoteCodes.add(code)
+                    if (!watchlistIndex.containsKey(code)) {
+                        channelSubscriber.subscribe(Channels.of(kind, code))
+                    }
+                } else {
+                    channelSubscriber.subscribe(Channels.of(kind, code))
+                }
                 syncTrigger.request()
             }
         }
@@ -143,7 +156,7 @@ class DemandRegistry(
         if (userId in before) return
         watchlistIndex[code] = before + userId
         if (before.isEmpty()) {
-            channelSubscriber.subscribe(Channels.quote(code))
+            if (code !in roomQuoteCodes) channelSubscriber.subscribe(Channels.quote(code))
             channelSubscriber.subscribe(Channels.stream(code))
             syncTrigger.request()
         }
@@ -155,7 +168,7 @@ class DemandRegistry(
         val after = before - userId
         if (after.isEmpty()) {
             watchlistIndex.remove(code)
-            channelSubscriber.unsubscribe(Channels.quote(code))
+            if (code !in roomQuoteCodes) channelSubscriber.unsubscribe(Channels.quote(code))
             channelSubscriber.unsubscribe(Channels.stream(code))
             syncTrigger.request()
         } else {
@@ -168,7 +181,14 @@ class DemandRegistry(
         val count = roomIndex[key] ?: return
         if (count <= 1) {
             roomIndex.remove(key)
-            channelSubscriber.unsubscribe(Channels.of(sub.kind, sub.code))
+            if (sub.kind == ChannelKind.QUOTE) {
+                roomQuoteCodes.remove(sub.code)
+                if (!watchlistIndex.containsKey(sub.code)) {
+                    channelSubscriber.unsubscribe(Channels.of(sub.kind, sub.code))
+                }
+            } else {
+                channelSubscriber.unsubscribe(Channels.of(sub.kind, sub.code))
+            }
             syncTrigger.request()
         } else {
             roomIndex[key] = count - 1

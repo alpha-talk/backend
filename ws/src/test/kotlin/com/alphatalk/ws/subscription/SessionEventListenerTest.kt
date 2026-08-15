@@ -46,6 +46,7 @@ class SessionEventListenerTest {
         override fun unsubscribeById(sessionId: String, subscriptionId: String) = Unit
         override fun applyWatchlistDiff(userId: Long, added: Collection<String>, removed: Collection<String>) = Unit
         override fun usersWatching(code: String) = emptySet<Long>()
+        override fun roomHasQuoteViewers(code: String) = false
         override fun isUserConnected(userId: Long) = false
         override fun connectedUserIds() = emptySet<Long>()
         override fun connectedSessionCount() = 0
@@ -175,5 +176,16 @@ class SessionEventListenerTest {
 
         assertThat(demand.attachCalls).hasSize(1)
         assertThat(demand.roomCalls).containsExactly("s1" to ChannelKind.POST)
+    }
+
+    @Test
+    fun `방 quote 토픽 SUBSCRIBE - QUOTE kind로 방 구독 등록`() {
+        val resolver = CountingResolver { emptySet() }
+        val target = listener(resolver)
+
+        target.onConnected(connectedEvent("s1", 1L))
+        target.onSubscribe(subscribeEvent("s1", 1L, Destinations.roomQuote("000660")))
+
+        assertThat(demand.roomCalls).containsExactly("s1" to ChannelKind.QUOTE)
     }
 }
