@@ -189,6 +189,8 @@ class SessionPool(
     }
 
     private fun escalateSilent(now: Long) {
+        sessions.filter { !it.isConnected && it.nextConnectAttemptAt > 0 }
+            .forEach { session -> session.assigned.forEach { silenceDegraded += it } }
         assignments.keys.forEach { symbol ->
             if (symbol in silenceDegraded) {
                 degraded += symbol
@@ -311,7 +313,6 @@ class SessionPool(
             runCatching { session?.close() }
             session = null
             clearSubscriptions()
-            assigned.forEach { silenceDegraded += it }
             registerFailure()
             log.warn("kis ws connection lost: keyId={} failures={}", account.keyId, consecutiveFailures)
         }
