@@ -218,7 +218,7 @@ Micrometer: `ws_connected_clients` · `ws_sessions_per_user` · `redis_subscribe
 | **S3** 수요 인덱스 | `DemandRegistry` + STOMP 이벤트 리스너, 종료 시 전량 회수 | 구독→인덱스 반영, 멀티세션, 정리 테스트 |
 | **S4** Redis relay | refcount 구독, `post:{code}` → `/topic/rooms/{code}/posts` E2E | Testcontainers: PUBLISH → STOMP MESSAGE 수신, 채널 1회 구독 검증 |
 | **S5** 관심목록 | WatchlistResolver(임시 Redis 구현), `/user/queue/quote·stream` 라우팅, `watchlist:updated` 반영 | 구독 변경이 재접속 없이 반영 (FR-03 수용 기준) |
-| **S6** 경화 | 프레즌스, graceful shutdown, 메트릭, (필요시) quote 샘플러 | 느린 클라·재기동 시나리오 테스트 |
+| **S6** 경화 | 프레즌스, graceful shutdown, 메트릭, (필요시) quote 샘플러, **구독 실패 복구 사각 계측**([아키텍처 §11.8](ws_architecture.md)) | 느린 클라·재기동 시나리오 테스트 + **결함 주입 3종**: ① 컨테이너 복구 진행 중 새 채널 구독 → 복구 후 그 채널 틱이 도착하는가 ② 연결 장애가 아닌 구독 오류(ACL 거부·커맨드 타임아웃) → 재시도되는가 ③ **여러 종목 관심목록 부착 중 첫 종목 실패** → 나머지 종목이 구독되는가(현재는 루프가 끊기고 유저가 "부착됨"으로 남아 재해소되지 않는다). 하나라도 복구되지 않으면 리컨실을 구현해야 S6 종료 |
 | **S7** 통합 검증 | 가짜 price-worker 스크립트로 41종목 틱 fan-out 스모크 | p95 지연 측정, 동접 수백 세션 스모크, outbound 큐 깊이 확인 |
 
 각 단계는 독립 PR 단위다. S4를 전반부에 둔 이유이기도 하다 — S4까지 가면 팀원(워커) 없이도 `redis-cli PUBLISH`만으로 데모할 수 있다.

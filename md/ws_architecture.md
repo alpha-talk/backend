@@ -329,7 +329,8 @@ DISCONNECT 또는 하트비트 미수신 → 프레임워크 세션 정리 → S
 | watchlist 해소 실패(Redis 장애) | 세션 유지 + **빈 watchlist 시작** + 경고. 방 토픽 구독은 가능. 재연결 시 자연 복구 |
 | 봉투 역직렬화 실패 | 해당 `RedisChannelHandler`가 드랍 + 카운터. relay 계속(한 건의 독이 채널을 막지 않게) |
 | 느린 클라(송신 버퍼 초과) | 프레임워크가 세션 강제 종료 → 정리 이벤트 정상 발화 → 클라 재연결+REST 복구. `slow_client_disconnects` |
-| Redis 연결 단절 | Lettuce 자동 재연결. 복구 시 `RedisChannelSubscriber`가 `DemandQuery` 스냅샷 기준 전 채널 재구독 |
+| Redis 연결 단절 | `RedisMessageListenerContainer`가 자기 리스너 레지스트리 기준으로 재구독(`recoveryBackoff`) — 우리 코드에 재구독 경로는 없다. 등록이 구독 디스패치보다 먼저라 끊긴 뒤 살아난 연결도 컨테이너가 메운다 |
+| 채널 구독 실패(Redis 장애·컨테이너 미기동) | **우리 쪽에 처리 코드를 두지 않는다.** 컨테이너가 리스너 등록을 먼저 하고 그 등록으로 재구독(`recoveryBackoff`)하거나 기동 시 구독하므로, 수요 인덱스를 그대로 두면 복구된 구독과 맞아떨어진다. 롤백을 기각한 근거와 **아직 계측하지 못한 복구 사각(S6)**은 §11.8 |
 | graceful shutdown | 새 연결 거부 → 전 세션 close → 리스너 컨테이너 stop |
 
 ---
@@ -479,3 +480,19 @@ auth-jwt/src/main/kotlin/com/alphatalk/auth/
 - **최종 적용**: `registerStompEndpoints`에서 `registry.setPreserveReceiveOrder(true)` **한 줄**. 결선 여부는 통합 테스트가 고정한다(핸들러 플래그 + `supportsOrderedMessages(clientInboundChannel)` 검증 — 조용한 비활성화 방지).
 - **기록해둘 함정 (중간에 밟았던 것)**: 공개 API 대신 핸들러에 플래그만 수동으로 켜면 **세션의 첫 프레임(CONNECT)만 처리되고 이후 프레임이 영원히 멈춘다** — 완료 콜백을 쏴줄 인터셉터가 결선되지 않아 ordered 큐가 진행되지 않기 때문(E2E 전멸로 실증). 수동으로 하려면 `configureInterceptor`까지 2단 결선이 필요하지만, 공개 API가 둘 다 해주므로 쓸 이유가 없다. 공개 API와 수동 `configureInterceptor`를 병용해도 **중복 등록되지는 않으나**(기존 `CallbackTaskInterceptor`를 `noneMatch`로 검사하는 멱등 구현 — 바이트코드 확인), 불필요한 수동 결선이므로 금지한다.
 - 효과: 세션 단위 인바운드 처리 순서 보장(전역 직렬화 아님 — 세션 간 병렬성 유지). 브로커 구독 레지스트리의 유령 구독(해제했는데 계속 전달) 가능성 제거.
+
+### 11.8 [열림] 구독 실패 — 롤백은 기각, 리컨실은 S6로 남긴다
+
+`ChannelSubscriber.subscribe`의 동기 예외를 아무도 처리하지 않는 것이 리뷰에서 "수요가 latch된다"는 지적을 받아, 롤백을 넣어봤다가 **되돌렸다.** 되돌린 근거는 의존 라이브러리 계측이다 — 빌드가 실제로 해석하는 버전(`:ws` runtimeClasspath 기준 spring-data-redis 3.5.13 · spring-websocket **6.2.19**)의 바이트코드를 읽었다.
+
+- `RedisMessageListenerContainer.addListener`는 **리스너 등록(`listenerTopics`·`channelMapping`)을 먼저 하고, 그 다음에 `isRunning()`을 보고, 그 뒤에야 구독을 디스패치**한다. 그래서 ① 운영 중 Redis 장애로 구독이 실패해도 등록은 남아 컨테이너의 `handleSubscriptionException`·`potentiallyRecover`(`recoveryBackoff`)가 재구독하고, ② 컨테이너가 아직 안 돌면 예외 없이 매핑만 보관했다가 기동 시 구독한다. **두 경우 모두 우리가 할 일이 없다** — 오히려 롤백하면 컨테이너가 되살릴 채널의 수요를 미리 버려 데이터가 끊긴다.
+- 예외를 던져 세션을 끊고 재연결로 재시도시키는 것도 불가능하다. 세션 이벤트 리스너의 예외는 `StompSubProtocolHandler.publishEvent`가 `Throwable`로 잡아 로깅만 한다.
+- 주기적 리컨실도 지금 구조로는 헛돈다. `RedisChannelSubscriber`가 호출 **전에** 자기 `channels`에 넣으므로, 수요와 그 집합을 비교하면 언제나 "빠진 것 없음"이다. 리컨실이 의미를 가지려면 컨테이너의 실제 등록·구독 상태를 읽는 출처가 따로 있어야 한다.
+
+**따라서 롤백은 기각한다.** 다만 "컨테이너가 등록해두므로 언제나 복구된다"까지 단정하지는 않는다 — 리뷰에서 아직 계측하지 못한 경로가 두 가지 제기됐다.
+
+1. **복구 중 추가되는 구독의 레이스**: 컨테이너가 이미 복구 절차에 들어간 뒤 `addListener`가 새 토픽을 기록하면, 복구가 그 이전 스냅샷으로 재구독을 끝내고 새 채널만 빠질 수 있다.
+2. **연결 장애가 아닌 구독 오류**: ACL 거부·커맨드 타임아웃처럼 `RedisConnectionFailureException`이 아닌 실패는 컨테이너의 재시도 대상이 아닐 수 있고, 이때 등록과 `RedisChannelSubscriber.channels`는 남은 채 구독만 죽는다.
+3. **여러 채널 전이의 중도 중단**: `attachWatchlist`는 관심목록 전체를 `userWatchlists`에 먼저 기록한 뒤 종목을 순회한다. 첫 종목의 `subscribe`가 던지면 루프가 거기서 끊겨 그 종목의 `stream:`과 **뒤따르는 종목 전부**가 구독되지 않는데, 유저는 이미 "부착됨"이라 `needsWatchlist`가 false다. 컨테이너가 실패한 그 한 건을 복구하더라도 건너뛴 나머지는 아무도 복구하지 않는다. 예외는 §11.8 위 항목대로 세션에도 닿지 않는다.
+
+셋 중 하나라도 성립하면 결과는 같다 — 수요는 있는데 구독이 없고, `channels`가 재시도를 막는다. **S6에서 계측하고, 필요하면 리컨실을 넣는다.** 그때 비교 대상은 우리 `channels`가 아니라 **컨테이너의 실제 등록·구독 상태**여야 한다(호출 전에 채우는 `channels`와 수요를 비교하면 항상 "빠진 것 없음"이 나온다). 이 공백은 방 quote 토픽 이전부터 있던 것이고 이 PR이 넓히지 않는다 — quote 채널의 소유자가 둘로 늘었을 뿐, 실패 처리 경로는 그대로다.
