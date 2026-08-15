@@ -417,6 +417,105 @@ class SessionPoolTest {
     }
 
     @Test
+    fun `타임아웃 처리한 요청의 늦은 거절은 흘려보낸다`() {
+        val meters = SimpleMeterRegistry()
+        val rooms = listOf("005930")
+        val target = linkedSetOf("005930")
+        val pool = pool(maxPerSession = 3, trIds = listOf("H0UNCNT0"), ackTimeoutMillis = 1_000, meters = meters)
+        pool.maintain(target, rooms, subscribeAllowed = true)
+        server.awaitMessages(2)
+
+        now += 1_000
+        pool.maintain(target, rooms, subscribeAllowed = true)
+
+        server.broadcastText(ackFrame("005930", success = false, trId = "H0UNASP0"))
+
+        await().atMost(Duration.ofSeconds(5)).until {
+            meters.counter("depth.stale.ack.dropped").count() == 1.0
+        }
+    }
+
+    @Test
+    fun `해지가 확정되면 그 등록 주기의 늦은 ACK 대기도 끝난다`() {
+        val meters = SimpleMeterRegistry()
+        val rooms = listOf("005930")
+        val target = linkedSetOf("005930")
+        val pool = pool(maxPerSession = 3, trIds = listOf("H0UNCNT0"), meters = meters)
+        pool.maintain(target, rooms, subscribeAllowed = true)
+        server.awaitMessages(2)
+
+        await().atMost(Duration.ofSeconds(10)).until {
+            now += 1_000
+            pool.maintain(target, rooms, subscribeAllowed = true)
+            meters.counter("depth.subscribe.cooldown").count() >= 1.0
+        }
+        pool.maintain(target, rooms, subscribeAllowed = true)
+        await().atMost(Duration.ofSeconds(10)).until {
+            unsubscribesOf(server.receivedMessages).any {
+                it.path("body").path("input").path("tr_id").asText() == "H0UNASP0"
+            }
+        }
+
+        server.broadcastText(unsubscribeAckFrame("005930", success = true, trId = "H0UNASP0"))
+        Thread.sleep(300)
+
+        val afterCooldown = trKeysOf(server.receivedMessages, "H0UNASP0").size
+        now += 60_000
+        await().atMost(Duration.ofSeconds(10)).until {
+            now += 100
+            pool.maintain(target, rooms, subscribeAllowed = true)
+            trKeysOf(server.receivedMessages, "H0UNASP0").size > afterCooldown
+        }
+
+        server.broadcastText(ackFrame("005930", success = false, trId = "H0UNASP0"))
+        Thread.sleep(300)
+
+        assertEquals(0.0, meters.counter("depth.stale.ack.dropped").count())
+    }
+
+    @Test
+    fun `재접속하면 늦은 ACK 대기 상태를 버린다`() {
+        val meters = SimpleMeterRegistry()
+        val rooms = listOf("005930")
+        val target = linkedSetOf("005930")
+        val pool = pool(maxPerSession = 3, trIds = listOf("H0UNCNT0"), meters = meters)
+        pool.maintain(target, rooms, subscribeAllowed = true)
+        server.awaitMessages(2)
+
+        await().atMost(Duration.ofSeconds(10)).until {
+            now += 1_000
+            pool.maintain(target, rooms, subscribeAllowed = true)
+            meters.counter("depth.subscribe.cooldown").count() >= 1.0
+        }
+
+        pool.maintain(target, rooms, subscribeAllowed = true)
+        val beforeReconnect = trKeysOf(server.receivedMessages, "H0UNCNT0").size
+        server.closeAllConnections()
+        await().atMost(Duration.ofSeconds(10)).until {
+            now += 100
+            pool.maintain(target, rooms, subscribeAllowed = true)
+            trKeysOf(server.receivedMessages, "H0UNCNT0").size > beforeReconnect
+        }
+
+        val afterCooldown = trKeysOf(server.receivedMessages, "H0UNASP0").size
+        now += 60_000
+        await().atMost(Duration.ofSeconds(10)).until {
+            now += 100
+            pool.maintain(target, rooms, subscribeAllowed = true)
+            trKeysOf(server.receivedMessages, "H0UNASP0").size > afterCooldown
+        }
+
+        val before = trKeysOf(server.receivedMessages, "H0UNASP0").size
+        server.broadcastText(ackFrame("005930", success = false, trId = "H0UNASP0"))
+        Thread.sleep(300)
+        pool.maintain(target, rooms, subscribeAllowed = true)
+
+        Thread.sleep(300)
+        assertEquals(0.0, meters.counter("depth.stale.ack.dropped").count())
+        assertEquals(before + 1, trKeysOf(server.receivedMessages, "H0UNASP0").size)
+    }
+
+    @Test
     fun `늦게 온 호가 등록 거절은 해지 거절로 오인되지 않는다`() {
         val meters = SimpleMeterRegistry()
         val rooms = listOf("005930", "000660")
