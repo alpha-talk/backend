@@ -17,7 +17,7 @@ class RedisQuotePublisher(
 ) : QuotePublisher {
     private val log = LoggerFactory.getLogger(javaClass)
 
-    override fun publish(code: String, data: QuoteData, ts: Long) {
+    override fun publish(code: String, data: QuoteData, ts: Long): Boolean =
         runCatching {
             redis.opsForHash<String, String>().putAll(
                 Keys.price(code),
@@ -37,6 +37,5 @@ class RedisQuotePublisher(
             redis.convertAndSend(Channels.quote(code), mapper.writeValueAsString(envelope))
         }.onFailure {
             log.warn("quote publish failed (best-effort): code={}", code, it)
-        }
-    }
+        }.isSuccess
 }

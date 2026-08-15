@@ -13,6 +13,7 @@ object KisFrameParser {
     const val TR_ID_DEPTH_TOTAL = "H0UNASP0"
     val DEPTH_TR_IDS = setOf(TR_ID_DEPTH, TR_ID_DEPTH_TOTAL)
     const val PINGPONG_TR_ID = "PINGPONG"
+    private const val UNSUBSCRIBE_MESSAGE_PREFIX = "UNSUB"
 
     private const val ENCRYPTED_FLAG = "1"
     private const val IDX_CODE = 0
@@ -45,11 +46,14 @@ object KisFrameParser {
         val header = json.path("header")
         val trId = header.path("tr_id").takeIf { it.isTextual }?.asText()
         if (trId == PINGPONG_TR_ID) return KisFrame.PingPong(text)
-        val rtCd = json.path("body").path("rt_cd").takeIf { it.isTextual }?.asText()
+        val body = json.path("body")
+        val rtCd = body.path("rt_cd").takeIf { it.isTextual }?.asText()
+        val message = body.path("msg1").takeIf { it.isTextual }?.asText().orEmpty().trim().uppercase()
         return KisFrame.Control(
             trId = trId,
             trKey = header.path("tr_key").takeIf { it.isTextual }?.asText(),
             success = rtCd == null || rtCd == "0",
+            unsubscribe = message.startsWith(UNSUBSCRIBE_MESSAGE_PREFIX),
             raw = text,
         )
     }

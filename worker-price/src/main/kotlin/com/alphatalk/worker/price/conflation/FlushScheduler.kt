@@ -24,13 +24,9 @@ class FlushScheduler(
         val depths = depthBuffer.drainDirty()
         if (quotes.isEmpty() && depths.isEmpty()) return
         val ts = clock.millis()
-        if (quotes.isNotEmpty()) {
-            quotes.forEach { (code, data) -> publisher.publish(code, data, ts) }
-            meters.counter("quote.published").increment(quotes.size.toDouble())
-        }
-        if (depths.isNotEmpty()) {
-            depths.forEach { (code, data) -> depthPublisher.publish(code, data, ts) }
-            meters.counter("depth.published").increment(depths.size.toDouble())
-        }
+        val publishedQuotes = quotes.count { (code, data) -> publisher.publish(code, data, ts) }
+        if (publishedQuotes > 0) meters.counter("quote.published").increment(publishedQuotes.toDouble())
+        val publishedDepths = depths.count { (code, data) -> depthPublisher.publish(code, data, ts) }
+        if (publishedDepths > 0) meters.counter("depth.published").increment(publishedDepths.toDouble())
     }
 }

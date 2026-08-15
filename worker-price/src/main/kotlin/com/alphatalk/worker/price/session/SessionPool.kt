@@ -62,6 +62,12 @@ class SessionPool(
 
     private data class Registration(val trId: String, val symbol: String)
 
+    private data class UnsubscribeAttempt(val at: Long, val attempts: Int, val retryNow: Boolean = false)
+
+    private companion object {
+        const val MAX_UNSUBSCRIBE_ATTEMPTS = 3
+    }
+
     private data class SeenTick(val div: String, val at: Long)
 
     init {
@@ -71,13 +77,17 @@ class SessionPool(
             }.tag("state", state.name.lowercase()).register(meters)
         }
         Gauge.builder("kis.subscribed.symbols", this) { pool ->
-            pool.sessions.sumOf { session -> session.confirmed.map(Registration::symbol).distinct().size }.toDouble()
+            pool.sessions.sumOf { session ->
+                session.heldRegistrations().map(Registration::symbol).distinct().size
+            }.toDouble()
         }.register(meters)
         Gauge.builder("degraded.symbols", this) { pool ->
             pool.degraded.size.toDouble()
         }.register(meters)
         Gauge.builder("depth.symbols", this) { pool ->
-            pool.sessions.sumOf { it.depthAssigned.size }.toDouble()
+            pool.sessions.sumOf { session ->
+                session.heldRegistrations().count { it.trId == depthUnifiedTrId || it.trId == depthKrxTrId }
+            }.toDouble()
         }.register(meters)
         Gauge.builder("depth.symbols.dropped", this) { pool ->
             pool.depthDroppedCount.toDouble()
@@ -239,6 +249,11 @@ class SessionPool(
         pooled.onAck(trId, trKey, success)
     }
 
+    @Synchronized
+    private fun applyUnsubscribeAck(pooled: PooledSession, trId: String?, trKey: String?, success: Boolean) {
+        pooled.onUnsubscribeAck(trId, trKey, success)
+    }
+
     private fun reconcileAssignments(target: Set<String>, rooms: List<String>) {
         val now = clock()
         degraded.clear()
@@ -276,6 +291,9 @@ class SessionPool(
         val depthAssigned = mutableSetOf<String>()
         val confirmed: MutableSet<Registration> = ConcurrentHashMap.newKeySet()
         val pending = mutableMapOf<Registration, Long>()
+        val pendingUnsubscribes = ConcurrentHashMap<Registration, UnsubscribeAttempt>()
+
+        fun heldRegistrations(): Set<Registration> = confirmed + pendingUnsubscribes.keys
         var session: KisWebSocketSession? = null
         var nextConnectAttemptAt = 0L
         var consecutiveFailures = 0
@@ -293,6 +311,7 @@ class SessionPool(
             runCatching { session?.close() }
             session = null
             clearSubscriptions()
+            assigned.forEach { silenceDegraded += it }
             registerFailure()
             log.warn("kis ws connection lost: keyId={} failures={}", account.keyId, consecutiveFailures)
         }
@@ -322,23 +341,20 @@ class SessionPool(
                 trIdsFor(symbol).map { Registration(it, symbol) }
             }
             depthAssigned.mapTo(wanted) { Registration(depthTrFor(it), it) }
-            (confirmed + pending.keys - wanted).forEach { registration ->
-                runCatching { current.unsubscribe(registration.symbol, registration.trId) }
-                    .onSuccess {
-                        confirmed -= registration
-                        pending.remove(registration)
-                    }
-                    .onFailure {
-                        log.warn(
-                            "unsubscribe failed - retried next maintain: keyId={} trId={} code={}",
-                            account.keyId, registration.trId, registration.symbol, it,
-                        )
-                    }
+            pendingUnsubscribes.keys.removeAll(wanted)
+            val retried = pendingUnsubscribes
+                .filterValues { it.retryNow || now - it.at >= ackTimeoutMillis }
+                .keys
+            (confirmed + pending.keys - wanted + retried).forEach { registration ->
+                sendUnsubscribe(current, registration, now)
             }
             val awaitingAck = pending.filterValues { now - it < ackTimeoutMillis }.keys
             (wanted - confirmed - awaitingAck).forEach { registration ->
                 runCatching { current.subscribe(registration.symbol, registration.trId) }
-                    .onSuccess { pending[registration] = now }
+                    .onSuccess {
+                        pending[registration] = now
+                        armSilence(registration, now)
+                    }
                     .onFailure {
                         log.warn(
                             "subscribe failed: keyId={} trId={} code={}",
@@ -348,9 +364,57 @@ class SessionPool(
             }
         }
 
+        private fun armSilence(registration: Registration, now: Long) {
+            if (registration.trId == unifiedTrId || registration.trId == krxTrId) {
+                subscribedAt.putIfAbsent(registration.symbol, now)
+            }
+        }
+
+        private fun sendUnsubscribe(current: KisWebSocketSession, registration: Registration, now: Long) {
+            val attempts = (pendingUnsubscribes[registration]?.attempts ?: 0) + 1
+            if (attempts > MAX_UNSUBSCRIBE_ATTEMPTS) {
+                if (connectionLost.compareAndSet(false, true)) {
+                    log.error(
+                        "unsubscribe 재시도 한도 초과 - 세션을 재접속해 등록을 회수한다: keyId={} trId={} code={}",
+                        account.keyId, registration.trId, registration.symbol,
+                    )
+                    meters.counter("kis.unsubscribe.abandoned").increment()
+                }
+                return
+            }
+            runCatching { current.unsubscribe(registration.symbol, registration.trId) }
+                .onSuccess {
+                    confirmed -= registration
+                    pending.remove(registration)
+                    pendingUnsubscribes[registration] = UnsubscribeAttempt(now, attempts)
+                }
+                .onFailure {
+                    log.warn(
+                        "unsubscribe failed - retried next maintain: keyId={} trId={} code={}",
+                        account.keyId, registration.trId, registration.symbol, it,
+                    )
+                }
+        }
+
+        fun onUnsubscribeAck(trId: String?, trKey: String?, success: Boolean) {
+            if (trId == null || trKey == null) return
+            val registration = Registration(trId, trKey)
+            if (success) {
+                pendingUnsubscribes.remove(registration)
+                return
+            }
+            val attempt = pendingUnsubscribes[registration] ?: return
+            pendingUnsubscribes[registration] = attempt.copy(retryNow = true)
+            log.warn("unsubscribe rejected, retrying: keyId={} trId={} code={}", account.keyId, trId, trKey)
+        }
+
         fun onAck(trId: String?, trKey: String?, success: Boolean) {
             if (trId == null || trKey == null) return
             val registration = Registration(trId, trKey)
+            if (!success && registration !in pending && pendingUnsubscribes.containsKey(registration)) {
+                onUnsubscribeAck(trId, trKey, success)
+                return
+            }
             if (pending.remove(registration) == null) return
             if (success) {
                 confirmed += registration
@@ -365,6 +429,7 @@ class SessionPool(
         fun clearSubscriptions() {
             confirmed.clear()
             pending.clear()
+            pendingUnsubscribes.clear()
             assigned.forEach(::rearmSilence)
         }
 
@@ -375,6 +440,7 @@ class SessionPool(
             }
             session = null
             clearSubscriptions()
+            depthAssigned.clear()
             state = SessionState.DISCONNECTED
             consecutiveFailures = 0
             nextConnectAttemptAt = 0
@@ -405,6 +471,10 @@ class SessionPool(
 
         override fun onSubscribeAck(trId: String?, trKey: String?, success: Boolean) {
             applyAck(pooled, trId, trKey, success)
+        }
+
+        override fun onUnsubscribeAck(trId: String?, trKey: String?, success: Boolean) {
+            applyUnsubscribeAck(pooled, trId, trKey, success)
         }
 
         override fun onEncryptedDropped(trId: String) {

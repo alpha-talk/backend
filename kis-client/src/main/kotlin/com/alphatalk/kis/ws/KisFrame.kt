@@ -11,6 +11,7 @@ sealed interface KisFrame {
         val trId: String?,
         val trKey: String?,
         val success: Boolean,
+        val unsubscribe: Boolean = false,
         val raw: String,
     ) : KisFrame
 

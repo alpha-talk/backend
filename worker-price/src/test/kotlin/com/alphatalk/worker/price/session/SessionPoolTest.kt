@@ -304,12 +304,38 @@ class SessionPoolTest {
 
     @Test
     fun `방 수요 종목은 잔여 슬롯 안에서 호가 TR을 등록한다`() {
-        val pool = pool(maxPerSession = 3, trIds = listOf("H0UNCNT0"))
+        val meters = SimpleMeterRegistry()
+        val pool = pool(maxPerSession = 3, trIds = listOf("H0UNCNT0"), meters = meters)
 
         pool.maintain(linkedSetOf("005930", "000660"), listOf("005930"), subscribeAllowed = true)
 
         server.awaitMessages(3)
         assertEquals(listOf("005930"), trKeysOf(server.receivedMessages, "H0UNASP0"))
+
+        server.broadcastText(ackFrame("005930", success = true, trId = "H0UNASP0"))
+
+        await().atMost(Duration.ofSeconds(5)).until {
+            meters.find("depth.symbols").gauge()?.value() == 1.0
+        }
+    }
+
+    @Test
+    fun `호가 게이지는 확정 등록만 세고 연결이 끊기면 0으로 돌아간다`() {
+        val meters = SimpleMeterRegistry()
+        val pool = pool(maxPerSession = 3, trIds = listOf("H0UNCNT0"), meters = meters)
+        pool.maintain(linkedSetOf("005930"), listOf("005930"), subscribeAllowed = true)
+        server.awaitMessages(2)
+
+        assertEquals(0.0, meters.find("depth.symbols").gauge()?.value())
+
+        server.broadcastText(ackFrame("005930", success = true, trId = "H0UNASP0"))
+        await().atMost(Duration.ofSeconds(5)).until {
+            meters.find("depth.symbols").gauge()?.value() == 1.0
+        }
+
+        pool.disconnectAll()
+
+        assertEquals(0.0, meters.find("depth.symbols").gauge()?.value())
     }
 
     @Test
@@ -321,7 +347,6 @@ class SessionPoolTest {
 
         server.awaitMessages(3)
         assertEquals(listOf("000660"), trKeysOf(server.receivedMessages, "H0UNASP0"))
-        assertEquals(1.0, meters.find("depth.symbols").gauge()?.value())
         assertEquals(1.0, meters.find("depth.symbols.dropped").gauge()?.value())
     }
 
@@ -702,6 +727,208 @@ class SessionPoolTest {
 
         Thread.sleep(200)
         assertEquals(1, subscribesOf(server.receivedMessages).size)
+    }
+
+    private fun unsubscribeAckFrame(code: String, success: Boolean, trId: String = "H0STCNT0"): String {
+        val rtCd = if (success) "0" else "1"
+        val message = if (success) "UNSUBSCRIBE SUCCESS" else "UNSUBSCRIBE ERROR"
+        return """{"header":{"tr_id":"$trId","tr_key":"$code","encrypt":"N"},""" +
+            """"body":{"rt_cd":"$rtCd","msg_cd":"OPSP0002","msg1":"$message"}}"""
+    }
+
+    @Test
+    fun `해지가 거절되면 다음 정비에서 다시 보낸다`() {
+        val pool = pool(graceMillis = 1_000)
+        pool.maintain(setOf("000001"), emptyList(), subscribeAllowed = true)
+        server.awaitMessages(1)
+        server.broadcastText(ackFrame("000001", success = true))
+
+        pool.maintain(emptySet(), emptyList(), subscribeAllowed = true)
+        now += 1_500
+        pool.maintain(emptySet(), emptyList(), subscribeAllowed = true)
+        server.awaitMessages(2)
+        assertEquals(1, unsubscribesOf(server.receivedMessages).size)
+
+        server.broadcastText(unsubscribeAckFrame("000001", success = false))
+        await().atMost(Duration.ofSeconds(5)).until {
+            pool.maintain(emptySet(), emptyList(), subscribeAllowed = true)
+            unsubscribesOf(server.receivedMessages).size >= 2
+        }
+    }
+
+    @Test
+    fun `해지 성공 ACK를 받으면 재시도를 멈춘다`() {
+        val pool = pool(ackTimeoutMillis = 100, graceMillis = 1_000)
+        pool.maintain(setOf("000001"), emptyList(), subscribeAllowed = true)
+        server.awaitMessages(1)
+        server.broadcastText(ackFrame("000001", success = true))
+
+        pool.maintain(emptySet(), emptyList(), subscribeAllowed = true)
+        now += 1_500
+        pool.maintain(emptySet(), emptyList(), subscribeAllowed = true)
+        server.awaitMessages(2)
+        server.broadcastText(unsubscribeAckFrame("000001", success = true))
+        Thread.sleep(200)
+
+        now += 1_000
+        repeat(3) { pool.maintain(emptySet(), emptyList(), subscribeAllowed = true) }
+
+        Thread.sleep(200)
+        assertEquals(1, unsubscribesOf(server.receivedMessages).size)
+    }
+
+    @Test
+    fun `해지 대기 중인 등록은 성공 ACK 전까지 등록 게이지에 남는다`() {
+        val meters = SimpleMeterRegistry()
+        val pool = pool(maxPerSession = 3, trIds = listOf("H0UNCNT0"), graceMillis = 1_000, meters = meters)
+        pool.maintain(linkedSetOf("005930"), listOf("005930"), subscribeAllowed = true)
+        server.awaitMessages(2)
+        server.broadcastText(ackFrame("005930", success = true, trId = "H0UNASP0"))
+        await().atMost(Duration.ofSeconds(5)).until {
+            meters.find("depth.symbols").gauge()?.value() == 1.0
+        }
+
+        pool.maintain(linkedSetOf("005930"), emptyList(), subscribeAllowed = true)
+        now += 1_500
+        pool.maintain(linkedSetOf("005930"), emptyList(), subscribeAllowed = true)
+        server.awaitMessages(3)
+
+        assertEquals(1.0, meters.find("depth.symbols").gauge()?.value())
+
+        server.broadcastText(unsubscribeAckFrame("005930", success = true, trId = "H0UNASP0"))
+
+        await().atMost(Duration.ofSeconds(5)).until {
+            meters.find("depth.symbols").gauge()?.value() == 0.0
+        }
+    }
+
+    @Test
+    fun `해지 ACK가 없으면 유효기간 뒤 재시도하고 한도를 넘으면 포기한다`() {
+        val meters = SimpleMeterRegistry()
+        val pool = pool(ackTimeoutMillis = 100, graceMillis = 1_000, meters = meters)
+        pool.maintain(setOf("000001"), emptyList(), subscribeAllowed = true)
+        server.awaitMessages(1)
+        server.broadcastText(ackFrame("000001", success = true))
+
+        pool.maintain(emptySet(), emptyList(), subscribeAllowed = true)
+        now += 1_500
+        repeat(5) {
+            now += 500
+            pool.maintain(emptySet(), emptyList(), subscribeAllowed = true)
+        }
+
+        server.awaitMessages(4)
+        Thread.sleep(200)
+        assertEquals(3, unsubscribesOf(server.receivedMessages).size)
+        assertEquals(1.0, meters.counter("kis.unsubscribe.abandoned").count())
+    }
+
+    private fun abandonUnsubscribe(pool: SessionPool, code: String, remaining: Set<String>) {
+        pool.maintain(remaining, emptyList(), subscribeAllowed = true)
+        now += 1_500
+        repeat(5) {
+            now += 500
+            pool.maintain(remaining, emptyList(), subscribeAllowed = true)
+        }
+    }
+
+    @Test
+    fun `해지를 포기하면 세션을 재접속해 등록을 회수한다`() {
+        val meters = SimpleMeterRegistry()
+        val pool = pool(maxPerSession = 2, ackTimeoutMillis = 100, graceMillis = 1_000, meters = meters)
+        pool.maintain(linkedSetOf("000001", "000002"), emptyList(), subscribeAllowed = true)
+        server.awaitMessages(2)
+        server.broadcastText(ackFrame("000001", success = true))
+        server.broadcastText(ackFrame("000002", success = true))
+        awaitConfirmed(meters, 2)
+
+        abandonUnsubscribe(pool, "000001", setOf("000002"))
+
+        await().atMost(Duration.ofSeconds(5)).until {
+            meters.counter("kis.unsubscribe.abandoned").count() == 1.0
+        }
+        now += 500
+        pool.maintain(setOf("000002"), emptyList(), subscribeAllowed = true)
+        pool.maintain(setOf("000002"), emptyList(), subscribeAllowed = true)
+
+        assertEquals(setOf("000002"), pool.degradedSymbols())
+
+        await().atMost(Duration.ofSeconds(10)).until {
+            now += 500
+            pool.maintain(setOf("000002"), emptyList(), subscribeAllowed = true)
+            trKeysOf(server.receivedMessages, "H0STCNT0").count { it == "000002" } >= 2
+        }
+    }
+
+    @Test
+    fun `UNSUB로 시작하지 않는 거절 응답도 해지 대기 상태로 알아본다`() {
+        val pool = pool(ackTimeoutMillis = 10_000, graceMillis = 1_000)
+        pool.maintain(setOf("000001"), emptyList(), subscribeAllowed = true)
+        server.awaitMessages(1)
+        server.broadcastText(ackFrame("000001", success = true))
+
+        pool.maintain(emptySet(), emptyList(), subscribeAllowed = true)
+        now += 1_500
+        pool.maintain(emptySet(), emptyList(), subscribeAllowed = true)
+        server.awaitMessages(2)
+
+        server.broadcastText(ackFrame("000001", success = false))
+
+        await().atMost(Duration.ofSeconds(5)).until {
+            pool.maintain(emptySet(), emptyList(), subscribeAllowed = true)
+            unsubscribesOf(server.receivedMessages).size >= 2
+        }
+    }
+
+    @Test
+    fun `해지 포기가 여러 등록에서 겹쳐도 재접속과 메트릭은 한 번이다`() {
+        val meters = SimpleMeterRegistry()
+        val pool = pool(
+            maxPerSession = 4,
+            trIds = listOf("H0UNCNT0", "H0STOUP0"),
+            ackTimeoutMillis = 100,
+            graceMillis = 1_000,
+            meters = meters,
+        )
+        pool.maintain(setOf("000001"), emptyList(), subscribeAllowed = true)
+        server.awaitMessages(2)
+
+        abandonUnsubscribe(pool, "000001", emptySet())
+
+        await().atMost(Duration.ofSeconds(5)).until {
+            meters.counter("kis.unsubscribe.abandoned").count() >= 1.0
+        }
+        assertEquals(1.0, meters.counter("kis.unsubscribe.abandoned").count())
+    }
+
+    @Test
+    fun `등록이 확정되지 않아도 침묵 감시가 시작되어 REST 폴백이 받는다`() {
+        val pool = pool(silenceMillis = 1_000)
+
+        pool.maintain(setOf("000001"), emptyList(), subscribeAllowed = true)
+        server.awaitMessages(1)
+        now += 2_000
+        pool.maintain(setOf("000001"), emptyList(), subscribeAllowed = true)
+
+        assertEquals(setOf("000001"), pool.degradedSymbols())
+    }
+
+    @Test
+    fun `해지 대기 중 수요가 돌아오면 재등록한다`() {
+        val pool = pool(graceMillis = 1_000)
+        pool.maintain(setOf("000001"), emptyList(), subscribeAllowed = true)
+        server.awaitMessages(1)
+        server.broadcastText(ackFrame("000001", success = true))
+
+        pool.maintain(emptySet(), emptyList(), subscribeAllowed = true)
+        now += 1_500
+        pool.maintain(emptySet(), emptyList(), subscribeAllowed = true)
+        server.awaitMessages(2)
+
+        pool.maintain(setOf("000001"), emptyList(), subscribeAllowed = true)
+
+        server.awaitMessages(3)
+        assertEquals(2, subscribesOf(server.receivedMessages).size)
     }
 
     @Test
