@@ -54,6 +54,8 @@ class SessionPool(
     private val depthOwners = ConcurrentHashMap<String, PooledSession>()
     private val depthAttempts = mutableMapOf<String, Int>()
     private val depthCooldownUntil = mutableMapOf<String, Long>()
+    private val depthCooldownLevel = mutableMapOf<String, Int>()
+    private val depthDemoted = mutableSetOf<String>()
 
     @Volatile
     private var depthDroppedCount = 0
@@ -71,6 +73,7 @@ class SessionPool(
     private companion object {
         const val MAX_UNSUBSCRIBE_ATTEMPTS = 3
         const val MAX_DEPTH_ATTEMPTS = 3
+        const val MAX_DEPTH_COOLDOWN_LEVEL = 8
     }
 
     private data class SeenTick(val div: String, val at: Long)
@@ -133,7 +136,9 @@ class SessionPool(
         val attempts = depthAttempts.merge(symbol, 1, Int::plus) ?: 1
         if (attempts < MAX_DEPTH_ATTEMPTS) return
         depthAttempts.remove(symbol)
-        depthCooldownUntil[symbol] = now + depthCooldownMillis
+        depthDemoted -= symbol
+        val level = (depthCooldownLevel.merge(symbol, 1, Int::plus) ?: 1).coerceAtMost(MAX_DEPTH_COOLDOWN_LEVEL)
+        depthCooldownUntil[symbol] = now + depthCooldownMillis * (1L shl (level - 1))
         log.warn(
             "호가 등록이 확정되지 않는다 - 슬롯을 다른 방 종목에 넘긴다: code={} failures={}",
             symbol,
@@ -151,6 +156,8 @@ class SessionPool(
     private fun clearDepthFailures(symbol: String) {
         depthAttempts.remove(symbol)
         depthCooldownUntil.remove(symbol)
+        depthCooldownLevel.remove(symbol)
+        depthDemoted -= symbol
     }
 
     private fun heldSymbols(matching: (Registration) -> Boolean): Int =
@@ -176,8 +183,12 @@ class SessionPool(
         val now = clock()
         val live = LinkedHashSet(depthTarget)
         live.forEach(depthRemovals::remove)
+        depthCooldownUntil.entries.removeIf { (symbol, until) ->
+            (until <= now).also { if (it) depthDemoted += symbol }
+        }
         val previous = sessions.flatMapTo(mutableSetOf()) { it.depthAssigned }
-        val established = previous.filter { assignments[it]?.depthEstablished(it, now) == true }.toSet()
+        val established = previous.filter { assignments[it]?.depthEstablished(it, now) == true }.toSet() +
+            depthDemoted
         previous.filter { it !in live }.forEach { depthRemovals.putIfAbsent(it, now + removalGraceMillis) }
         depthRemovals.entries.removeIf { it.value <= now }
         val holdovers = previous.filter { it in depthRemovals && it in established }
@@ -214,6 +225,7 @@ class SessionPool(
         if (depthCooledDown(symbol, now)) return false
         val used = session.assigned.size * tickTrIds.size + session.depthAssigned.size
         if (used >= maxRegistrationsPerSession) return false
+        depthDemoted -= symbol
         session.depthAssigned += symbol
         return true
     }

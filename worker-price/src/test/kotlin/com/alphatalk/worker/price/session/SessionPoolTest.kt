@@ -378,6 +378,83 @@ class SessionPoolTest {
     }
 
     @Test
+    fun `쿨다운이 끝나면 용량이 꽉 차 있어도 우선순위 높은 방이 슬롯을 되찾는다`() {
+        val meters = SimpleMeterRegistry()
+        val rooms = listOf("005930", "000660")
+        val pool = pool(
+            maxPerSession = 3,
+            trIds = listOf("H0UNCNT0"),
+            ackTimeoutMillis = 100,
+            graceMillis = 1_000,
+            meters = meters,
+        )
+        pool.maintain(linkedSetOf("005930", "000660"), rooms, subscribeAllowed = true)
+        server.awaitMessages(3)
+
+        repeat(3) {
+            server.broadcastText(ackFrame("005930", success = false, trId = "H0UNASP0"))
+            now += 500
+            pool.maintain(linkedSetOf("005930", "000660"), rooms, subscribeAllowed = true)
+        }
+        await().atMost(Duration.ofSeconds(5)).until {
+            now += 500
+            pool.maintain(linkedSetOf("005930", "000660"), rooms, subscribeAllowed = true)
+            trKeysOf(server.receivedMessages, "H0UNASP0").contains("000660")
+        }
+        server.broadcastText(ackFrame("000660", success = true, trId = "H0UNASP0"))
+        await().atMost(Duration.ofSeconds(5)).until {
+            meters.find("depth.symbols").gauge()?.value() == 1.0
+        }
+
+        now += 60_000
+        val before = trKeysOf(server.receivedMessages, "H0UNASP0").count { it == "005930" }
+        pool.maintain(linkedSetOf("005930", "000660"), rooms, subscribeAllowed = true)
+
+        await().atMost(Duration.ofSeconds(5)).until {
+            trKeysOf(server.receivedMessages, "H0UNASP0").count { it == "005930" } > before
+        }
+        now += 2_000
+        pool.maintain(linkedSetOf("005930", "000660"), rooms, subscribeAllowed = true)
+        await().atMost(Duration.ofSeconds(5)).until {
+            unsubscribesOf(server.receivedMessages).any {
+                it.path("body").path("input").path("tr_key").asText() == "000660" &&
+                    it.path("body").path("input").path("tr_id").asText() == "H0UNASP0"
+            }
+        }
+    }
+
+    @Test
+    fun `쿨다운이 끝나고 슬롯이 비면 실패했던 종목이 다시 호가를 받는다`() {
+        val meters = SimpleMeterRegistry()
+        val pool = pool(
+            maxPerSession = 3,
+            trIds = listOf("H0UNCNT0"),
+            ackTimeoutMillis = 100,
+            meters = meters,
+        )
+        pool.maintain(linkedSetOf("005930", "000660"), listOf("005930", "000660"), subscribeAllowed = true)
+        server.awaitMessages(3)
+        repeat(3) {
+            server.broadcastText(ackFrame("005930", success = false, trId = "H0UNASP0"))
+            now += 500
+            pool.maintain(linkedSetOf("005930", "000660"), listOf("005930", "000660"), subscribeAllowed = true)
+        }
+        await().atMost(Duration.ofSeconds(5)).until {
+            now += 500
+            pool.maintain(linkedSetOf("005930", "000660"), listOf("005930", "000660"), subscribeAllowed = true)
+            meters.counter("depth.subscribe.cooldown").count() == 1.0
+        }
+
+        now += 60_000
+        val before = trKeysOf(server.receivedMessages, "H0UNASP0").count { it == "005930" }
+        pool.maintain(linkedSetOf("005930"), listOf("005930"), subscribeAllowed = true)
+
+        await().atMost(Duration.ofSeconds(5)).until {
+            trKeysOf(server.receivedMessages, "H0UNASP0").count { it == "005930" } > before
+        }
+    }
+
+    @Test
     fun `마지막 호가 등록 요청은 ACK 유효기간이 지나기 전에 취소되지 않는다`() {
         val meters = SimpleMeterRegistry()
         val pool = pool(
