@@ -103,7 +103,6 @@ class SessionPool(
         if (subscribeAllowed) {
             adoptUpdatedDivs()
             absorbSeenTicks()
-            escalateSilent(now)
         }
         sessions.forEach { session ->
             if (session.state != SessionState.CONNECTED && session.state != SessionState.CONNECTING &&
@@ -115,6 +114,7 @@ class SessionPool(
                 session.syncSubscriptions()
             }
         }
+        if (subscribeAllowed) escalateSilent(now)
     }
 
     @Synchronized

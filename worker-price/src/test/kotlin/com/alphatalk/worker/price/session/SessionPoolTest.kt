@@ -622,6 +622,27 @@ class SessionPoolTest {
     }
 
     @Test
+    fun `최초 연결 시도가 실패하면 같은 주기에 REST로 강등한다`() {
+        val pool = SessionPool(
+            accounts = listOf(KisAccount("key1", "app", "secret")),
+            wsUrl = "ws://127.0.0.1:1",
+            approvalKeys = { "AK" },
+            buffer = ConflationBuffer(),
+            meters = SimpleMeterRegistry(),
+            tickTrIds = listOf("H0UNCNT0"),
+            marketDivs = InMemoryMarketDivStore(),
+            silenceMillis = Long.MAX_VALUE,
+            backoff = BackoffPolicy(initialMillis = 50, jitterRatio = 0.0),
+            connectTimeoutSeconds = 1,
+            clock = { now },
+        )
+
+        pool.maintain(setOf("005930"), emptyList(), subscribeAllowed = true)
+
+        assertEquals(setOf("005930"), pool.degradedSymbols())
+    }
+
+    @Test
     fun `절단 상태에서 새로 배정된 종목도 REST 강등에 포함된다`() {
         val pool = pool(maxPerSession = 4, trIds = listOf("H0UNCNT0"), silenceMillis = Long.MAX_VALUE)
         pool.maintain(setOf("005930"), emptyList(), subscribeAllowed = true)
