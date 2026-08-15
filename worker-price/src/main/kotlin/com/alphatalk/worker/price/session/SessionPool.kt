@@ -32,6 +32,7 @@ class SessionPool(
     private val depthKrxTrId: String = KisFrameParser.TR_ID_DEPTH,
     private val depthEnabled: Boolean = false,
     private val depthCooldownMillis: Long = 60_000,
+    private val depthQuarantineDecayMillis: Long = 3_600_000,
     private val silenceMillis: Long = 20_000,
     private val maxRegistrationsPerSession: Int = KisLimits.MAX_REGISTRATIONS_PER_SESSION,
     private val removalGraceMillis: Long = 30_000,
@@ -54,7 +55,7 @@ class SessionPool(
     private val depthOwners = ConcurrentHashMap<String, PooledSession>()
     private val depthAttempts = mutableMapOf<String, Int>()
     private val depthCooldownUntil = mutableMapOf<String, Long>()
-    private val depthCooldownLevel = mutableMapOf<String, Int>()
+    private val depthQuarantine = mutableMapOf<String, DepthQuarantine>()
     private val depthDemoted = mutableSetOf<String>()
 
     @Volatile
@@ -69,6 +70,8 @@ class SessionPool(
     private data class Registration(val trId: String, val symbol: String)
 
     private data class UnsubscribeAttempt(val at: Long, val attempts: Int, val retryNow: Boolean = false)
+
+    private data class DepthQuarantine(val level: Int, val at: Long)
 
     private companion object {
         const val MAX_UNSUBSCRIBE_ATTEMPTS = 3
@@ -137,7 +140,9 @@ class SessionPool(
         if (attempts < MAX_DEPTH_ATTEMPTS) return
         depthAttempts.remove(symbol)
         depthDemoted -= symbol
-        val level = (depthCooldownLevel.merge(symbol, 1, Int::plus) ?: 1).coerceAtMost(MAX_DEPTH_COOLDOWN_LEVEL)
+        val prior = depthQuarantine[symbol]?.takeIf { now - it.at <= depthQuarantineDecayMillis }
+        val level = ((prior?.level ?: 0) + 1).coerceAtMost(MAX_DEPTH_COOLDOWN_LEVEL)
+        depthQuarantine[symbol] = DepthQuarantine(level, now)
         depthCooldownUntil[symbol] = now + depthCooldownMillis * (1L shl (level - 1))
         log.warn(
             "호가 등록이 확정되지 않는다 - 슬롯을 다른 방 종목에 넘긴다: code={} failures={}",
@@ -156,7 +161,7 @@ class SessionPool(
     private fun clearDepthFailures(symbol: String) {
         depthAttempts.remove(symbol)
         depthCooldownUntil.remove(symbol)
-        depthCooldownLevel.remove(symbol)
+        depthQuarantine.remove(symbol)
         depthDemoted -= symbol
     }
 
@@ -183,14 +188,17 @@ class SessionPool(
         val now = clock()
         val live = LinkedHashSet(depthTarget)
         live.forEach(depthRemovals::remove)
+        val previous = sessions.flatMapTo(mutableSetOf()) { it.depthAssigned }
+        previous.filter { it !in live }.forEach { depthRemovals.putIfAbsent(it, now + removalGraceMillis) }
+        depthRemovals.entries.removeIf { it.value <= now }
         depthCooldownUntil.entries.removeIf { (symbol, until) ->
             (until <= now).also { if (it) depthDemoted += symbol }
         }
-        val previous = sessions.flatMapTo(mutableSetOf()) { it.depthAssigned }
+        depthDemoted.retainAll { it in live || it in depthRemovals }
+        depthAttempts.keys.retainAll { it in live || it in depthRemovals }
+        depthQuarantine.entries.removeIf { now - it.value.at > depthQuarantineDecayMillis }
         val established = previous.filter { assignments[it]?.depthEstablished(it, now) == true }.toSet() +
             depthDemoted
-        previous.filter { it !in live }.forEach { depthRemovals.putIfAbsent(it, now + removalGraceMillis) }
-        depthRemovals.entries.removeIf { it.value <= now }
         val holdovers = previous.filter { it in depthRemovals && it in established }
         sessions.forEach { it.depthAssigned.clear() }
         var dropped = 0
@@ -294,7 +302,7 @@ class SessionPool(
     }
 
     private fun forgetSymbol(symbol: String) {
-        clearDepthFailures(symbol)
+        depthDemoted -= symbol
         seenTicks.remove(symbol)
         tickDivs.remove(symbol)
         lastTickAt.remove(symbol)
