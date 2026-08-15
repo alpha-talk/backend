@@ -56,6 +56,7 @@ class SessionPool(
     private val depthAttempts = mutableMapOf<String, Int>()
     private val depthCooldownUntil = mutableMapOf<String, Long>()
     private val depthQuarantine = mutableMapOf<String, DepthQuarantine>()
+    private val depthStaleAcks = mutableMapOf<String, Int>()
     private val depthDemoted = mutableSetOf<String>()
 
     @Volatile
@@ -139,7 +140,7 @@ class SessionPool(
         val attempts = depthAttempts.merge(symbol, 1, Int::plus) ?: 1
         if (attempts < MAX_DEPTH_ATTEMPTS) return
         depthAttempts.remove(symbol)
-        depthDemoted -= symbol
+        depthDemoted += symbol
         val prior = depthQuarantine[symbol]?.takeIf { now - it.at <= depthQuarantineDecayMillis }
         val level = ((prior?.level ?: 0) + 1).coerceAtMost(MAX_DEPTH_COOLDOWN_LEVEL)
         depthQuarantine[symbol] = DepthQuarantine(level, now)
@@ -158,7 +159,18 @@ class SessionPool(
     private fun depthCooledDown(symbol: String, now: Long): Boolean =
         depthCooldownUntil[symbol]?.let { now < it } == true
 
+    private fun clearStaleDepthAcks(symbol: String) {
+        depthStaleAcks.remove(symbol)
+    }
+
+    private fun consumeStaleDepthAck(symbol: String): Boolean {
+        val remaining = depthStaleAcks[symbol] ?: return false
+        if (remaining <= 1) depthStaleAcks.remove(symbol) else depthStaleAcks[symbol] = remaining - 1
+        return true
+    }
+
     private fun clearDepthFailures(symbol: String) {
+        depthStaleAcks.remove(symbol)
         depthAttempts.remove(symbol)
         depthCooldownUntil.remove(symbol)
         depthQuarantine.remove(symbol)
@@ -191,11 +203,10 @@ class SessionPool(
         val previous = sessions.flatMapTo(mutableSetOf()) { it.depthAssigned }
         previous.filter { it !in live }.forEach { depthRemovals.putIfAbsent(it, now + removalGraceMillis) }
         depthRemovals.entries.removeIf { it.value <= now }
-        depthCooldownUntil.entries.removeIf { (symbol, until) ->
-            (until <= now).also { if (it) depthDemoted += symbol }
-        }
+        depthCooldownUntil.entries.removeIf { it.value <= now }
         depthDemoted.retainAll { it in live || it in depthRemovals }
         depthAttempts.keys.retainAll { it in live || it in depthRemovals }
+        depthStaleAcks.keys.retainAll { it in live || it in depthRemovals }
         depthQuarantine.entries.removeIf { now - it.value.at > depthQuarantineDecayMillis }
         val established = previous.filter { assignments[it]?.depthEstablished(it, now) == true }.toSet() +
             depthDemoted
@@ -416,7 +427,10 @@ class SessionPool(
             depthAssigned.mapTo(wanted) { Registration(depthTrFor(it), it) }
             pending.entries
                 .filter { isDepthRegistration(it.key) && now - it.value >= ackTimeoutMillis }
-                .forEach { noteDepthFailure(it.key.symbol, now) }
+                .forEach {
+                    depthStaleAcks.merge(it.key.symbol, 1, Int::plus)
+                    noteDepthFailure(it.key.symbol, now)
+                }
             wanted.removeAll { isDepthRegistration(it) && depthCooledDown(it.symbol, now) }
             pendingUnsubscribes.keys.removeAll(wanted)
             val retried = pendingUnsubscribes
@@ -488,6 +502,7 @@ class SessionPool(
         fun onAck(trId: String?, trKey: String?, success: Boolean) {
             if (trId == null || trKey == null) return
             val registration = Registration(trId, trKey)
+            if (!success && isDepthRegistration(registration) && consumeStaleDepthAck(trKey)) return
             if (!success && registration !in pending && pendingUnsubscribes.containsKey(registration)) {
                 onUnsubscribeAck(trId, trKey, success)
                 return
@@ -511,6 +526,7 @@ class SessionPool(
             confirmed.clear()
             pending.clear()
             pendingUnsubscribes.clear()
+            depthAssigned.forEach(::clearStaleDepthAcks)
             assigned.forEach(::rearmSilence)
         }
 
