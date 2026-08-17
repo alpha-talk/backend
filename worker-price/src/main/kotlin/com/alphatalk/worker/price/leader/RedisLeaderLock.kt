@@ -1,12 +1,17 @@
 package com.alphatalk.worker.price.leader
 
+import com.alphatalk.worker.price.config.ConditionalOnKisAccounts
 import org.springframework.data.redis.core.StringRedisTemplate
 import org.springframework.data.redis.core.script.DefaultRedisScript
+import org.springframework.stereotype.Component
+import java.lang.management.ManagementFactory
 import java.time.Duration
 
+@Component
+@ConditionalOnKisAccounts
 class RedisLeaderLock(
     private val redis: StringRedisTemplate,
-    private val instanceId: String,
+    private val instanceId: String = ManagementFactory.getRuntimeMXBean().name,
     private val ttl: Duration = Duration.ofSeconds(30),
 ) : LeaderLock {
     override fun tryAcquire(): Boolean {

@@ -2,11 +2,15 @@ package com.alphatalk.worker.price.poll
 
 import com.alphatalk.worker.price.calendar.MarketCalendar
 import com.alphatalk.worker.price.calendar.MarketPhase
+import com.alphatalk.worker.price.config.ConditionalOnKisAccounts
 import com.alphatalk.worker.price.demand.DemandSource
 import com.alphatalk.worker.price.leader.LeaderLock
 import org.slf4j.LoggerFactory
 import org.springframework.scheduling.annotation.Scheduled
+import org.springframework.stereotype.Component
 
+@Component
+@ConditionalOnKisAccounts
 class WarmupPoller(
     private val demand: DemandSource,
     private val poller: RestPollingScheduler,

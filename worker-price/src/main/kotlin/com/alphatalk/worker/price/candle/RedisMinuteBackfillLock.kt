@@ -1,13 +1,18 @@
 package com.alphatalk.worker.price.candle
 
 import com.alphatalk.contracts.Keys
+import com.alphatalk.worker.price.config.ConditionalOnKisAccounts
 import org.springframework.data.redis.core.StringRedisTemplate
 import org.springframework.data.redis.core.script.DefaultRedisScript
+import org.springframework.stereotype.Component
+import java.lang.management.ManagementFactory
 import java.time.Duration
 
+@Component
+@ConditionalOnKisAccounts
 class RedisMinuteBackfillLock(
     private val redis: StringRedisTemplate,
-    private val instanceId: String,
+    private val instanceId: String = ManagementFactory.getRuntimeMXBean().name,
 ) : MinuteBackfillLock {
     override fun tryAcquire(code: String, ttl: Duration): Boolean =
         redis.opsForValue().setIfAbsent(Keys.minuteBackfillLock(code), instanceId, ttl) == true

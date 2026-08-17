@@ -1,27 +1,37 @@
 package com.alphatalk.worker.price.session
 
+import com.alphatalk.kis.auth.KisApprovalClient
 import com.alphatalk.kis.model.KisAccount
+import com.alphatalk.kis.model.KisApi
 import com.alphatalk.kis.model.KisLimits
 import com.alphatalk.kis.ws.KisFrameParser
 import com.alphatalk.kis.ws.KisSessionListener
 import com.alphatalk.kis.ws.KisTick
 import com.alphatalk.kis.ws.KisWebSocketSession
+import com.alphatalk.worker.price.config.ConditionalOnKisAccounts
+import com.alphatalk.worker.price.config.KisAccounts
+import com.alphatalk.worker.price.config.PriceProperties
 import com.alphatalk.worker.price.conflation.ConflationBuffer
 import com.alphatalk.worker.price.market.MarketDivStore
+import com.alphatalk.worker.price.poll.DegradedSymbolsSource
 import io.micrometer.core.instrument.Gauge
 import io.micrometer.core.instrument.MeterRegistry
 import org.slf4j.LoggerFactory
+import org.springframework.beans.factory.annotation.Autowired
+import org.springframework.stereotype.Component
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
+@Component
+@ConditionalOnKisAccounts
 class SessionPool(
     accounts: List<KisAccount>,
-    private val wsUrl: String,
+    private val wsUrl: String = KisApi.WS_URL,
     private val approvalKeys: (KisAccount) -> String,
     private val buffer: ConflationBuffer,
     private val meters: MeterRegistry,
-    private val tickTrIds: List<String>,
+    private val tickTrIds: List<String> = DEFAULT_TICK_TR_IDS,
     private val marketDivs: MarketDivStore,
     private val unifiedTrId: String = KisFrameParser.TR_ID_TICK_TOTAL,
     private val krxTrId: String = KisFrameParser.TR_ID_TICK,
@@ -33,7 +43,25 @@ class SessionPool(
     private val degradedThreshold: Int = 5,
     private val ackTimeoutMillis: Long = 5_000,
     private val clock: () -> Long = System::currentTimeMillis,
-) {
+) : DegradedSymbolsSource {
+    @Autowired
+    constructor(
+        accounts: KisAccounts,
+        approvals: KisApprovalClient,
+        buffer: ConflationBuffer,
+        meters: MeterRegistry,
+        marketDivs: MarketDivStore,
+        props: PriceProperties,
+    ) : this(
+        accounts = accounts.values,
+        approvalKeys = approvals::approvalKey,
+        buffer = buffer,
+        meters = meters,
+        marketDivs = marketDivs,
+        silenceMillis = props.tickSilenceMs,
+        removalGraceMillis = props.removalGraceMs,
+    )
+
     init {
         require(tickTrIds.isNotEmpty()) { "tickTrIds는 최소 1개 필요하다" }
     }
@@ -96,7 +124,7 @@ class SessionPool(
     }
 
     @Synchronized
-    fun degradedSymbols(): Set<String> = degraded.toSet()
+    override fun degradedSymbols(): Set<String> = degraded.toSet()
 
     private fun trIdsFor(symbol: String): List<String> {
         val chosen = tickDivs.computeIfAbsent(symbol) { marketDivs.get(it) ?: MarketDivStore.UNIFIED }
@@ -310,6 +338,11 @@ class SessionPool(
             state = if (consecutiveFailures >= degradedThreshold) SessionState.DEGRADED else SessionState.DISCONNECTED
             nextConnectAttemptAt = clock() + backoff.delayFor(consecutiveFailures)
         }
+    }
+
+    companion object {
+        val DEFAULT_TICK_TR_IDS: List<String> =
+            listOf(KisFrameParser.TR_ID_TICK_TOTAL, KisFrameParser.TR_ID_TICK_OVERTIME)
     }
 
     private inner class FrameHandler(private val pooled: PooledSession) : KisSessionListener {
