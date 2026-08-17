@@ -1,9 +1,13 @@
 package com.alphatalk.worker.price.candle
 
 import com.alphatalk.contracts.Keys
+import com.alphatalk.worker.price.config.ConditionalOnKisAccounts
 import org.springframework.data.redis.core.StringRedisTemplate
+import org.springframework.stereotype.Component
 import java.time.Duration
 
+@Component
+@ConditionalOnKisAccounts
 class RedisMinuteMarketDivStore(
     private val redis: StringRedisTemplate,
     private val ttl: Duration = Duration.ofDays(2),

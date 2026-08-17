@@ -1,6 +1,6 @@
 package com.alphatalk.worker.price.candle
 
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
+import com.alphatalk.worker.price.config.ConditionalOnKisAccounts
 import org.springframework.http.HttpStatus
 import org.springframework.web.bind.annotation.PathVariable
 import org.springframework.web.bind.annotation.PostMapping
@@ -8,10 +8,7 @@ import org.springframework.web.bind.annotation.RestController
 import org.springframework.web.server.ResponseStatusException
 
 @RestController
-@ConditionalOnProperty(
-    name = ["alphatalk.price.enabled", "alphatalk.price.minute-candle-enabled"],
-    havingValue = "true",
-)
+@ConditionalOnKisAccounts
 class MinuteCandleRefreshController(
     private val service: MinuteCandleRefreshService,
     private val backfill: MinuteCandleBackfillService,

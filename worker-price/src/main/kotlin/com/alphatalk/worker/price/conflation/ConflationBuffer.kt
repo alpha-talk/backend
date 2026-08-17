@@ -2,8 +2,12 @@ package com.alphatalk.worker.price.conflation
 
 import com.alphatalk.contracts.envelope.QuoteData
 import com.alphatalk.kis.ws.KisTick
+import com.alphatalk.worker.price.config.ConditionalOnKisAccounts
+import org.springframework.stereotype.Component
 import java.util.concurrent.ConcurrentHashMap
 
+@Component
+@ConditionalOnKisAccounts
 class ConflationBuffer {
     private val latest = ConcurrentHashMap<String, KisTick>()
     private val dirty = ConcurrentHashMap.newKeySet<String>()
