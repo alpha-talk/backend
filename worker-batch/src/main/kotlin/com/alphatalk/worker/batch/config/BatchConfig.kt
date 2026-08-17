@@ -8,6 +8,8 @@ import com.alphatalk.kis.model.KisApi
 import com.alphatalk.kis.model.KisLimits
 import com.alphatalk.kis.rate.KisRateGate
 import com.alphatalk.kis.rate.KisRateLimiters
+import com.alphatalk.kis.redis.RedisKisRateGate
+import com.alphatalk.kis.redis.RedisKisTokenStore
 import com.alphatalk.kis.rest.KisRestClient
 import com.alphatalk.worker.batch.industry.HttpDartClient
 import com.alphatalk.worker.batch.industry.IndustryStore
@@ -16,8 +18,6 @@ import com.alphatalk.worker.batch.industry.KsicCatalog
 import com.alphatalk.worker.batch.job.BatchJobRunStore
 import com.alphatalk.worker.batch.job.CatchUpTask
 import com.alphatalk.worker.batch.job.StartupCatchUp
-import com.alphatalk.worker.batch.kis.RedisKisRateGate
-import com.alphatalk.worker.batch.kis.RedisKisTokenStore
 import com.alphatalk.worker.batch.master.MasterFileFetcher
 import com.alphatalk.worker.batch.master.StockMasterStore
 import com.alphatalk.worker.batch.master.StockMasterSyncJob
