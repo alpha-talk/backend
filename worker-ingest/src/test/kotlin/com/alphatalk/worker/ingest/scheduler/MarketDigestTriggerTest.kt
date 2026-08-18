@@ -3,8 +3,8 @@ package com.alphatalk.worker.ingest.scheduler
 import com.alphatalk.contracts.queue.IngestQueueEntry
 import com.alphatalk.contracts.queue.IngestType
 import com.alphatalk.worker.ingest.config.IngestProperties
-import com.alphatalk.worker.ingest.queue.DigestEnqueueResult
-import com.alphatalk.worker.ingest.queue.DigestJobQueue
+import com.alphatalk.worker.ingest.queue.EnqueueResult
+import com.alphatalk.worker.ingest.queue.IngestQueue
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import org.junit.jupiter.api.Test
 import java.time.Clock
@@ -101,7 +101,7 @@ class MarketDigestTriggerTest {
         assertEquals(0, queue.entries.size)
     }
 
-    private class RecordingDigestJobQueue : DigestJobQueue {
+    private class RecordingDigestJobQueue : IngestQueue {
         val entries = mutableListOf<IngestQueueEntry>()
         private val marked = mutableSetOf<String>()
         private var failingAll = false
@@ -110,11 +110,11 @@ class MarketDigestTriggerTest {
             failingAll = failing
         }
 
-        override fun enqueueIfNew(entry: IngestQueueEntry): DigestEnqueueResult {
+        override fun enqueueIfNew(entry: IngestQueueEntry): EnqueueResult {
             if (failingAll) throw IllegalStateException("queue down")
-            if (!marked.add(entry.sourceId)) return DigestEnqueueResult.ALREADY_ENQUEUED
+            if (!marked.add(entry.sourceId)) return EnqueueResult.ALREADY_ENQUEUED
             entries.add(entry)
-            return DigestEnqueueResult.ENQUEUED
+            return EnqueueResult.ENQUEUED
         }
     }
 }
