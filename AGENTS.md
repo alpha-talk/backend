@@ -4,7 +4,7 @@
 **한 저장소에 여러 서버(Spring Boot 앱)를 Gradle 서브모듈로 담는다.** 서버끼리는 코드로 의존하지 않고 Redis/DB 계약으로만 통신한다. 전체 모듈 목록·의존 규칙·포트 배치는 [md/기획안.md](md/기획안.md) §3.1이 단일 진실.
 
 - **서버(앱)**: `core-api`(메인 REST) · `ws`(WS 게이트웨이) · `worker-price/batch/ingest/llm`
-- **라이브러리(공유)**: `contracts`(채널·키·봉투 DTO) · `auth-jwt`(JWT 발급·검증) · `kis-client`(KIS 연동) · `db-migrations`(Liquibase changelog — DB 스키마 단일 소유)
+- **라이브러리(공유)**: `contracts`(채널·키·봉투 DTO) · `auth-jwt`(JWT 발급·검증) · `kis-client`(KIS 연동) · `kis-redis`(kis-client 포트의 Redis 어댑터 — 토큰 공유·합산 유량 게이트) · `db-migrations`(Liquibase changelog — DB 스키마 단일 소유)
 
 **현재 집중 = `ws` 모듈** (실시간 푸시 전용 WebSocket(STOMP) 게이트웨이). 아래 스택·불변 규칙은 `ws` 모듈 기준이며, 다른 서버는 각자 착수 시 문서를 보강한다.
 
@@ -44,6 +44,7 @@ backend/
 ├─ contracts/    [라이브러리] 채널·키·STOMP 목적지·봉투 DTO (Spring 무의존)
 ├─ auth-jwt/     [라이브러리] JWT 발급·검증 (TokenIssuer/TokenVerifier, Spring 무의존) — core-api·ws 공유
 ├─ kis-client/   [라이브러리] KIS 인증·유량제어·REST/WS 클라
+├─ kis-redis/    [라이브러리] kis-client 포트(KisTokenStore·KisRateGate)의 Redis 어댑터
 ├─ db-migrations/[라이브러리] Liquibase changelog — DB 쓰는 서버가 의존, 기동 시 적용
 ├─ core-api/     [서버:8080]  메인 REST (MVC + Modulith)
 ├─ ws/           [서버:8081]  게이트웨이 — config/ auth/ subscription/ relay/ client/ watchlist/ presence/

@@ -1,4 +1,4 @@
-package com.alphatalk.worker.price.rate
+package com.alphatalk.kis.redis
 
 import com.alphatalk.contracts.Keys
 import com.alphatalk.kis.KisClientException

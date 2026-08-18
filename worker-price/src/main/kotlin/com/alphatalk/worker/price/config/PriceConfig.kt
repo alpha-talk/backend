@@ -8,6 +8,8 @@ import com.alphatalk.kis.model.KisApi
 import com.alphatalk.kis.model.KisLimits
 import com.alphatalk.kis.rate.KisRateGate
 import com.alphatalk.kis.rate.KisRateLimiters
+import com.alphatalk.kis.redis.RedisKisRateGate
+import com.alphatalk.kis.redis.RedisKisTokenStore
 import com.alphatalk.kis.rest.KisRestClient
 import com.alphatalk.kis.ws.KisFrameParser
 import com.alphatalk.worker.price.calendar.MarketCalendar
@@ -44,7 +46,6 @@ import com.alphatalk.worker.price.poll.QuoteSnapshotFetcher
 import com.alphatalk.worker.price.poll.RestPollingScheduler
 import com.alphatalk.worker.price.poll.WarmupPoller
 import com.alphatalk.worker.price.publish.QuotePublisher
-import com.alphatalk.worker.price.rate.RedisKisRateGate
 import com.alphatalk.worker.price.session.PriceLifecycle
 import com.alphatalk.worker.price.session.PriceOrchestrator
 import com.alphatalk.worker.price.session.SessionPool
@@ -133,6 +134,10 @@ class PriceConfig {
     @ConditionalOnProperty("alphatalk.price.enabled", havingValue = "true")
     fun priceLifecycle(orchestrator: PriceOrchestrator, props: PriceProperties): PriceLifecycle =
         PriceLifecycle(orchestrator, props.maintainIntervalMs)
+
+    @Bean
+    @ConditionalOnProperty("alphatalk.price.enabled", havingValue = "true")
+    fun kisTokenStore(redis: StringRedisTemplate): KisTokenStore = RedisKisTokenStore(redis)
 
     @Bean
     @ConditionalOnProperty("alphatalk.price.enabled", havingValue = "true")
