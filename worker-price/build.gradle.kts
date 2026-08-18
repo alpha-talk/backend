@@ -24,6 +24,7 @@ extra["kotlin.version"] = libs.versions.kotlin.get()
 dependencies {
     implementation(project(":contracts"))
     implementation(project(":kis-client"))
+    implementation(project(":kis-redis"))
     implementation(project(":db-migrations"))
 
     implementation("org.springframework.boot:spring-boot-starter-web")

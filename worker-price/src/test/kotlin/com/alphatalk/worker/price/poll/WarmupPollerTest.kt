@@ -58,8 +58,9 @@ class WarmupPollerTest {
     private class RecordingPublisher : QuotePublisher {
         val published = mutableListOf<Pair<String, QuoteData>>()
 
-        override fun publish(code: String, data: QuoteData, ts: Long) {
+        override fun publish(code: String, data: QuoteData, ts: Long): Boolean {
             published += code to data
+            return true
         }
     }
 

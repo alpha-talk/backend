@@ -32,12 +32,18 @@ class PriceOrchestrator(
         }
         val target = demand.targetSymbols()
         demandCount = target.size
+        val rooms = roomPriority()
         when (calendar.phase()) {
             MarketPhase.CLOSED -> pool.disconnectAll()
-            MarketPhase.PREPARE -> pool.maintain(target, subscribeAllowed = false)
-            MarketPhase.OPEN -> pool.maintain(target, subscribeAllowed = true)
+            MarketPhase.PREPARE -> pool.maintain(target, rooms, subscribeAllowed = false)
+            MarketPhase.OPEN -> pool.maintain(target, rooms, subscribeAllowed = true)
         }
     }
+
+    private fun roomPriority(): List<String> =
+        demand.roomDemand().entries
+            .sortedWith(compareByDescending<Map.Entry<String, Long>> { it.value }.thenBy { it.key })
+            .map { it.key }
 
     fun shutdown() {
         pool.disconnectAll()
