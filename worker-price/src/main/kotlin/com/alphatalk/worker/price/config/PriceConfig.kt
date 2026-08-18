@@ -7,6 +7,8 @@ import com.alphatalk.kis.model.KisApi
 import com.alphatalk.kis.model.KisLimits
 import com.alphatalk.kis.rate.KisRateGate
 import com.alphatalk.kis.rate.KisRateLimiters
+import com.alphatalk.kis.redis.RedisKisRateGate
+import com.alphatalk.kis.redis.RedisKisTokenStore
 import com.alphatalk.kis.rest.KisRestClient
 import com.alphatalk.worker.price.calendar.MarketCalendar
 import com.alphatalk.worker.price.candle.CandleSyncJob
@@ -31,7 +33,6 @@ import com.alphatalk.worker.price.demand.DemandSource
 import com.alphatalk.worker.price.leader.LeaderLock
 import com.alphatalk.worker.price.market.MarketDivStore
 import com.alphatalk.worker.price.poll.QuoteSnapshotFetcher
-import com.alphatalk.worker.price.rate.RedisKisRateGate
 import io.micrometer.core.instrument.MeterRegistry
 import org.springframework.boot.ApplicationRunner
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
@@ -50,6 +51,9 @@ class PriceConfig {
 
     @Bean
     fun kisApprovalClient(): KisApprovalClient = KisApprovalClient(KisApi.REST_BASE_URL)
+
+    @Bean
+    fun kisTokenStore(redis: StringRedisTemplate): KisTokenStore = RedisKisTokenStore(redis)
 
     @Bean
     fun kisTokenManager(store: KisTokenStore): KisTokenManager =

@@ -13,6 +13,11 @@ data class QuoteData(
     val low: Long,
 )
 
+data class DepthData(
+    val bids: List<List<Long>>,
+    val asks: List<List<Long>>,
+)
+
 @JsonInclude(JsonInclude.Include.NON_NULL)
 data class StreamData(
     val category: String,

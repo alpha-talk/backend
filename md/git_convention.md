@@ -54,6 +54,7 @@ scope는 Gradle 모듈명이 기본이고 모듈이 아닌 영역은 아래 전�
 | `contracts` | `:contracts` |
 | `auth-jwt` | `:auth-jwt` |
 | `kis-client` | `:kis-client` |
+| `kis-redis` | `:kis-redis` |
 | `db-migrations` | `:db-migrations` |
 | `core-api` | `:core-api` |
 | `ws` | `:ws` |

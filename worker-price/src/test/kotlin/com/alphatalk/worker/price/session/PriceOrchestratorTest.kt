@@ -6,6 +6,7 @@ import com.alphatalk.worker.price.calendar.MarketCalendar
 import com.alphatalk.worker.price.conflation.ConflationBuffer
 import com.alphatalk.worker.price.demand.DemandSource
 import com.alphatalk.worker.price.leader.LeaderLock
+import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import org.awaitility.Awaitility.await
 import java.time.Duration
@@ -20,6 +21,7 @@ import kotlin.test.assertTrue
 
 class PriceOrchestratorTest {
     private lateinit var server: FakeKisServer
+    private val mapper = jacksonObjectMapper()
 
     @BeforeTest
     fun setUp() {
@@ -80,6 +82,67 @@ class PriceOrchestratorTest {
 
         Thread.sleep(200)
         assertEquals(0, server.connectionCount)
+    }
+
+    @Test
+    fun `depth가 켜져 있으면 방 수요를 refCount 내림차순으로 호가 등록에 넘긴다`() {
+        val demand = object : DemandSource {
+            override fun targetSymbols() = setOf("005930", "000660")
+            override fun roomDemand() = mapOf("005930" to 1L, "000660" to 5L)
+        }
+        val pool = SessionPool(
+            accounts = listOf(KisAccount("key1", "app", "secret")),
+            wsUrl = server.url,
+            approvalKeys = { "AK" },
+            buffer = ConflationBuffer(),
+            meters = SimpleMeterRegistry(),
+            tickTrIds = listOf("H0UNCNT0"),
+            marketDivs = com.alphatalk.worker.price.market.InMemoryMarketDivStore(),
+            depthEnabled = true,
+            silenceMillis = Long.MAX_VALUE,
+            maxRegistrationsPerSession = 3,
+            backoff = BackoffPolicy(initialMillis = 50, jitterRatio = 0.0),
+        )
+        val orchestrator = PriceOrchestrator(
+            demand,
+            pool,
+            MarketCalendar(enforced = false),
+            ToggleLeaderLock(leader = true),
+            SimpleMeterRegistry(),
+        )
+
+        orchestrator.tick()
+
+        server.awaitMessages(3)
+        val depthKeys = server.receivedMessages
+            .map { mapper.readTree(it).path("body").path("input") }
+            .filter { it.path("tr_id").asText() == "H0UNASP0" }
+            .map { it.path("tr_key").asText() }
+        assertEquals(listOf("000660"), depthKeys)
+    }
+
+    @Test
+    fun `depth가 꺼져 있으면 방 수요가 있어도 호가를 등록하지 않는다`() {
+        val demand = object : DemandSource {
+            override fun targetSymbols() = setOf("005930")
+            override fun roomDemand() = mapOf("005930" to 5L)
+        }
+        val orchestrator = PriceOrchestrator(
+            demand,
+            pool(),
+            MarketCalendar(enforced = false),
+            ToggleLeaderLock(leader = true),
+            SimpleMeterRegistry(),
+        )
+
+        orchestrator.tick()
+
+        server.awaitMessages(2)
+        Thread.sleep(200)
+        val depthSubscribes = server.receivedMessages
+            .map { mapper.readTree(it).path("body").path("input").path("tr_id").asText() }
+            .filter { it == "H0UNASP0" || it == "H0STASP0" }
+        assertEquals(emptyList(), depthSubscribes)
     }
 
     @Test
