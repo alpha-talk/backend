@@ -17,17 +17,16 @@ import kotlin.test.assertTrue
 
 class DigestTriggerTest {
     private val queue = RecordingDigestJobQueue()
-    private val stocks = listOf(
-        IngestProperties.Stock("005930", "삼성전자"),
-        IngestProperties.Stock("000660", "SK하이닉스"),
-    )
+    private val universe = ControllableUniverse(listOf("005930", "000660"))
 
     private fun triggerAt(instant: String, digest: IngestProperties.Digest = IngestProperties.Digest()) =
         DigestTrigger(
             queue = queue,
-            props = IngestProperties(stocks = stocks, digest = digest),
+            universe = universe,
+            props = IngestProperties(digest = digest),
             meters = SimpleMeterRegistry(),
             catchUpExecutor = { it.run() },
+            enqueueExecutor = { it.run() },
             clock = Clock.fixed(Instant.parse(instant), ZoneOffset.UTC),
         )
 
@@ -150,6 +149,51 @@ class DigestTriggerTest {
         trigger.reconcileCatchUp()
 
         assertEquals(0, queue.entries.size)
+    }
+
+    @Test
+    fun `관심목록 조회가 실패하면 적재 없이 미완료로 남아 다음 재조정에서 다시 적재한다`() {
+        universe.fail(true)
+        val trigger = triggerAt("2026-07-16T11:30:00Z")
+
+        trigger.catchUpOnStartup()
+        assertEquals(0, queue.entries.size)
+
+        universe.fail(false)
+        trigger.reconcileCatchUp()
+
+        assertEquals(2, queue.entries.size)
+        assertTrue(queue.entries.all { it.sourceId.endsWith("2026-07-16") })
+    }
+
+    @Test
+    fun `구독 종목이 하나도 없으면 적재 없이 완료로 처리한다`() {
+        universe.replace(emptyList())
+        val trigger = triggerAt("2026-07-16T11:30:00Z")
+
+        trigger.catchUpOnStartup()
+        universe.replace(listOf("005930"))
+        trigger.reconcileCatchUp()
+
+        assertEquals(0, queue.entries.size)
+    }
+
+    private class ControllableUniverse(initial: List<String>) : DigestUniverse {
+        private var codes = initial
+        private var failing = false
+
+        fun replace(next: List<String>) {
+            codes = next
+        }
+
+        fun fail(value: Boolean) {
+            failing = value
+        }
+
+        override fun codes(): List<String> {
+            check(!failing) { "watchlist lookup down" }
+            return codes
+        }
     }
 
     private class RecordingDigestJobQueue : IngestQueue {
