@@ -1,15 +1,15 @@
 package com.alphatalk.worker.price.conflation
 
+import com.alphatalk.worker.price.config.ConditionalOnKisAccounts
 import com.alphatalk.worker.price.publish.DepthPublisher
 import com.alphatalk.worker.price.publish.QuotePublisher
 import io.micrometer.core.instrument.MeterRegistry
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
 import org.springframework.scheduling.annotation.Scheduled
 import org.springframework.stereotype.Component
 import java.time.Clock
 
 @Component
-@ConditionalOnProperty("alphatalk.price.enabled", havingValue = "true")
+@ConditionalOnKisAccounts
 class FlushScheduler(
     private val buffer: ConflationBuffer,
     private val publisher: QuotePublisher,

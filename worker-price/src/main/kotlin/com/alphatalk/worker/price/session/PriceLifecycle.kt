@@ -1,14 +1,24 @@
 package com.alphatalk.worker.price.session
 
+import com.alphatalk.worker.price.config.ConditionalOnKisAccounts
+import com.alphatalk.worker.price.config.PriceProperties
 import org.slf4j.LoggerFactory
+import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.context.SmartLifecycle
+import org.springframework.stereotype.Component
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
 
+@Component
+@ConditionalOnKisAccounts
 class PriceLifecycle(
     private val orchestrator: PriceOrchestrator,
     private val maintainIntervalMs: Long,
 ) : SmartLifecycle {
+    @Autowired
+    constructor(orchestrator: PriceOrchestrator, props: PriceProperties) :
+        this(orchestrator, props.maintainIntervalMs)
+
     private val log = LoggerFactory.getLogger(javaClass)
     private val running = AtomicBoolean(false)
     private var worker: Thread? = null

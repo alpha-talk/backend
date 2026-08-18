@@ -5,7 +5,6 @@ import org.springframework.boot.context.properties.ConfigurationProperties
 
 @ConfigurationProperties("alphatalk.price")
 data class PriceProperties(
-    val enabled: Boolean = false,
     val accountsJson: String = "[]",
     val conflationMs: Long = 200,
     val rateFactor: Double = 0.75,
@@ -18,10 +17,8 @@ data class PriceProperties(
     val tickSilenceMs: Long = 20_000,
     val pollBudgetFactor: Double = 0.5,
     val depthEnabled: Boolean = false,
-    val candleEnabled: Boolean = false,
     val candleBackfillDays: Long = 90,
     val candleSyncOnStartup: Boolean = false,
-    val minuteCandleEnabled: Boolean = false,
     val minuteCandleFreshSec: Long = 60,
     val minuteCandleRetentionDays: Long = 30,
     val minuteCandleBackfillDays: Int = 7,

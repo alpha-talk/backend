@@ -2,16 +2,20 @@ package com.alphatalk.worker.price.poll
 
 import com.alphatalk.worker.price.calendar.MarketCalendar
 import com.alphatalk.worker.price.calendar.MarketPhase
+import com.alphatalk.worker.price.config.ConditionalOnKisAccounts
 import com.alphatalk.worker.price.leader.LeaderLock
 import com.alphatalk.worker.price.market.MarketDivStore
 import com.alphatalk.worker.price.publish.QuotePublisher
 import io.micrometer.core.instrument.MeterRegistry
 import org.slf4j.LoggerFactory
 import org.springframework.scheduling.annotation.Scheduled
+import org.springframework.stereotype.Component
 import java.time.Clock
 
+@Component
+@ConditionalOnKisAccounts
 class RestPollingScheduler(
-    private val degraded: () -> Set<String>,
+    private val degraded: DegradedSymbolsSource,
     private val fetcher: QuoteSnapshotFetcher,
     private val marketDivs: MarketDivStore,
     private val publisher: QuotePublisher,
@@ -26,7 +30,7 @@ class RestPollingScheduler(
     fun poll() {
         if (!leader.tryAcquire()) return
         if (calendar.phase() != MarketPhase.OPEN) return
-        pollSymbols(degraded())
+        pollSymbols(degraded.degradedSymbols())
     }
 
     fun pollSymbols(symbols: Set<String>): Int {
