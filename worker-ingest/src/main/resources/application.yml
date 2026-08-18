@@ -1,6 +1,14 @@
 spring:
   application:
     name: worker-ingest
+  datasource:                                   # 스키마는 :db-migrations Liquibase master changelog가 기동 시 적용 (단일 소유)
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/alphatalk}
+    username: ${DB_USER:alphatalk}
+    password: ${DB_PASSWORD:alphatalk}
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
   data:
     redis:
       host: ${REDIS_HOST:localhost}
@@ -56,13 +64,11 @@ alphatalk:
       - id: newsis-industry
         source: newsis
         url: https://www.newsis.com/RSS/industry.xml
-    stocks: []        # 시드 종목 — 일일 다이제스트 대상 (사전 매핑 아님)
-                      # - code: "005930"
-                      #   name: 삼성전자
     digest:
       enabled: true
-      cron: "0 0 18 * * *"                  # 매일 18:00 KST — 뉴스 워커 명세 §4.1
+      cron: "0 0 18 * * *"                  # 매일 18:00 KST — 뉴스 워커 명세 §4.1. 대상 종목은 watchlist distinct 코드 (명세 §2.2)
       zone: Asia/Seoul
+      enqueue-concurrency: ${DIGEST_ENQUEUE_CONCURRENCY:1}  # 적재 스레드풀 크기 — 종목 규모가 커지면 상향
       catch-up-on-startup: true             # 예정 시각에 워커가 죽어 있었으면 기동 직후 보충 — 명세 §4.1
       catch-up-reconcile-delay: 1m          # Redis 장애로 불완전한 보충을 다시 대조하는 주기
       market-enabled: true                  # 시장 다이제스트 잡 — 첫 배포는 llm-worker(N7)를 먼저 올린다(명세 §4.3)
