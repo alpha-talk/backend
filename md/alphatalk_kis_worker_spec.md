@@ -60,7 +60,7 @@ KIS 유량은 슬라이딩 윈도로 측정되는 것으로 알려져 있다. �
 
 구현: Resilience4j `RateLimiter`를 **계정(keyId) 단위**로 생성하고 모든 REST 호출이 이를 통과한다. 429/유량 오류를 받으면 지수 백오프 후 재시도하고 메트릭 `rest_throttled`를 올린다.
 
-프로세스별 limiter만으로는 부족하다. `worker-price`와 `worker-batch`가 같은 계정을 공유하면 각자 한도를 지켜도 합산 유량이 한도를 넘는다. 그래서 `:kis-client`에 `KisRateGate` 포트를 두고, 서버는 Redis 토큰 버킷 `rate:kis-rest:{keyId}` 구현을 주입한다. 모든 일반 REST 시세·배치 호출은 **로컬 smoothing limiter → 공용 Redis gate** 순서로 통과한다. 토큰 버킷은 Lua로 `{tokens, updatedAt}` 계산·차감을 원자화한다. 파라미터는 `capacity=15, refill=15/s`, 마지막 소비 후 TTL 2분. permit이 없으면 다음 충전 시각까지 기다리고, 호출별 타임아웃을 넘으면 실패 처리한다. 토큰 발급의 1분 가드와 Approval 발급은 §1.2의 별도 제한을 따른다. **구현 상태**: 포트는 `:kis-client`(`KisRateGate`), Redis 토큰 버킷 구현은 worker-price(`RedisKisRateGate`)가 주입해 REST 전 호출이 통과한다. worker-batch는 KIS REST 잡 착수 시 같은 구현을 주입한다. 버킷의 시각은 **Lua 안에서 Redis `TIME`으로 읽는다** — 호출자 프로세스 시각을 쓰면 인스턴스 간 시계 오차가 `updatedAt`을 과거로 되돌려 매 호출이 큰 경과시간만큼 재충전되므로 합산 한도가 깨진다. Redis 호스트 시각이 뒤로 점프하는 경우를 대비해 경과시간은 음수를 0으로 절삭한다.
+프로세스별 limiter만으로는 부족하다. `worker-price`와 `worker-batch`가 같은 계정을 공유하면 각자 한도를 지켜도 합산 유량이 한도를 넘는다. 그래서 `:kis-client`에 `KisRateGate` 포트를 두고, 서버는 Redis 토큰 버킷 `rate:kis-rest:{keyId}` 구현을 주입한다. 모든 일반 REST 시세·배치 호출은 **로컬 smoothing limiter → 공용 Redis gate** 순서로 통과한다. 토큰 버킷은 Lua로 `{tokens, updatedAt}` 계산·차감을 원자화한다. 파라미터는 `capacity=15, refill=15/s`, 마지막 소비 후 TTL 2분. permit이 없으면 다음 충전 시각까지 기다리고, 호출별 타임아웃을 넘으면 실패 처리한다. 토큰 발급의 1분 가드와 Approval 발급은 §1.2의 별도 제한을 따른다. **구현 상태**: 포트는 `:kis-client`(`KisRateGate`), Redis 토큰 버킷 구현은 `:kis-redis`(`RedisKisRateGate`) 라이브러리가 단일 소유하고 worker-price·worker-batch가 주입해 REST 전 호출이 통과한다. 버킷의 시각은 **Lua 안에서 Redis `TIME`으로 읽는다** — 호출자 프로세스 시각을 쓰면 인스턴스 간 시계 오차가 `updatedAt`을 과거로 되돌려 매 호출이 큰 경과시간만큼 재충전되므로 합산 한도가 깨진다. Redis 호스트 시각이 뒤로 점프하는 경우를 대비해 경과시간은 음수를 0으로 절삭한다.
 
 ### 1.4 REST 공통 헤더
 

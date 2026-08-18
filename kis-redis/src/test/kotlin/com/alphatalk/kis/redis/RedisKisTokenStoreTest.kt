@@ -1,4 +1,4 @@
-package com.alphatalk.worker.price.redis
+package com.alphatalk.kis.redis
 
 import org.junit.jupiter.api.AfterAll
 import org.junit.jupiter.api.BeforeEach
