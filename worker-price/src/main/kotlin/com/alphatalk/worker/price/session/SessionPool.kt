@@ -2,11 +2,13 @@ package com.alphatalk.worker.price.session
 
 import com.alphatalk.kis.model.KisAccount
 import com.alphatalk.kis.model.KisLimits
+import com.alphatalk.kis.ws.KisDepth
 import com.alphatalk.kis.ws.KisFrameParser
 import com.alphatalk.kis.ws.KisSessionListener
 import com.alphatalk.kis.ws.KisTick
 import com.alphatalk.kis.ws.KisWebSocketSession
 import com.alphatalk.worker.price.conflation.ConflationBuffer
+import com.alphatalk.worker.price.conflation.DepthConflationBuffer
 import com.alphatalk.worker.price.market.MarketDivStore
 import io.micrometer.core.instrument.Gauge
 import io.micrometer.core.instrument.MeterRegistry
@@ -25,8 +27,14 @@ class SessionPool(
     private val marketDivs: MarketDivStore,
     private val unifiedTrId: String = KisFrameParser.TR_ID_TICK_TOTAL,
     private val krxTrId: String = KisFrameParser.TR_ID_TICK,
+    private val depthBuffer: DepthConflationBuffer = DepthConflationBuffer(),
+    private val depthUnifiedTrId: String = KisFrameParser.TR_ID_DEPTH_TOTAL,
+    private val depthKrxTrId: String = KisFrameParser.TR_ID_DEPTH,
+    private val depthEnabled: Boolean = false,
+    private val depthCooldownMillis: Long = 60_000,
+    private val depthQuarantineDecayMillis: Long = 3_600_000,
     private val silenceMillis: Long = 20_000,
-    maxRegistrationsPerSession: Int = KisLimits.MAX_REGISTRATIONS_PER_SESSION,
+    private val maxRegistrationsPerSession: Int = KisLimits.MAX_REGISTRATIONS_PER_SESSION,
     private val removalGraceMillis: Long = 30_000,
     private val backoff: BackoffPolicy = BackoffPolicy(),
     private val connectTimeoutSeconds: Long = 10,
@@ -43,6 +51,16 @@ class SessionPool(
     private val sessions = accounts.map { PooledSession(it) }
     private val assignments = mutableMapOf<String, PooledSession>()
     private val pendingRemovals = mutableMapOf<String, Long>()
+    private val depthRemovals = mutableMapOf<String, Long>()
+    private val depthOwners = ConcurrentHashMap<String, PooledSession>()
+    private val depthAttempts = mutableMapOf<String, Int>()
+    private val depthCooldownUntil = mutableMapOf<String, Long>()
+    private val depthQuarantine = mutableMapOf<String, DepthQuarantine>()
+    private val depthStaleAcks = mutableMapOf<String, Int>()
+    private val depthDemoted = mutableSetOf<String>()
+
+    @Volatile
+    private var depthDroppedCount = 0
     private val degraded = linkedSetOf<String>()
     private val tickDivs = ConcurrentHashMap<String, String>()
     private val lastTickAt = ConcurrentHashMap<String, Long>()
@@ -51,6 +69,16 @@ class SessionPool(
     private val seenTicks = ConcurrentHashMap<String, SeenTick>()
 
     private data class Registration(val trId: String, val symbol: String)
+
+    private data class UnsubscribeAttempt(val at: Long, val attempts: Int, val retryNow: Boolean = false)
+
+    private data class DepthQuarantine(val level: Int, val at: Long)
+
+    private companion object {
+        const val MAX_UNSUBSCRIBE_ATTEMPTS = 3
+        const val MAX_DEPTH_ATTEMPTS = 3
+        const val MAX_DEPTH_COOLDOWN_LEVEL = 8
+    }
 
     private data class SeenTick(val div: String, val at: Long)
 
@@ -61,24 +89,30 @@ class SessionPool(
             }.tag("state", state.name.lowercase()).register(meters)
         }
         Gauge.builder("kis.subscribed.symbols", this) { pool ->
-            pool.sessions.sumOf { session -> session.confirmed.map(Registration::symbol).distinct().size }.toDouble()
+            pool.heldSymbols { true }.toDouble()
         }.register(meters)
         Gauge.builder("degraded.symbols", this) { pool ->
             pool.degraded.size.toDouble()
         }.register(meters)
+        Gauge.builder("depth.symbols", this) { pool ->
+            pool.heldSymbols { it.trId == depthUnifiedTrId || it.trId == depthKrxTrId }.toDouble()
+        }.register(meters)
+        Gauge.builder("depth.symbols.dropped", this) { pool ->
+            pool.depthDroppedCount.toDouble()
+        }.register(meters)
     }
 
     @Synchronized
-    fun maintain(target: Set<String>, subscribeAllowed: Boolean) {
-        reconcileAssignments(target)
+    fun maintain(target: Set<String>, rooms: List<String>, subscribeAllowed: Boolean) {
+        sessions.forEach { it.absorbConnectionLoss() }
+        reconcileAssignments(target, rooms)
+        reconcileDepth(if (depthEnabled) rooms else emptyList())
         val now = clock()
         if (subscribeAllowed) {
             adoptUpdatedDivs()
             absorbSeenTicks()
-            escalateSilent(now)
         }
         sessions.forEach { session ->
-            session.absorbConnectionLoss()
             if (session.state != SessionState.CONNECTED && session.state != SessionState.CONNECTING &&
                 session.assigned.isNotEmpty() && now >= session.nextConnectAttemptAt
             ) {
@@ -87,6 +121,10 @@ class SessionPool(
             if (session.isConnected && subscribeAllowed) {
                 session.syncSubscriptions()
             }
+        }
+        if (subscribeAllowed) {
+            absorbSeenTicks()
+            escalateSilent(clock())
         }
     }
 
@@ -98,10 +136,118 @@ class SessionPool(
     @Synchronized
     fun degradedSymbols(): Set<String> = degraded.toSet()
 
+    private fun noteDepthFailure(symbol: String, now: Long) {
+        val attempts = depthAttempts.merge(symbol, 1, Int::plus) ?: 1
+        if (attempts < MAX_DEPTH_ATTEMPTS) return
+        depthAttempts.remove(symbol)
+        depthDemoted += symbol
+        val prior = depthQuarantine[symbol]?.takeIf { now - it.at <= depthQuarantineDecayMillis }
+        val level = ((prior?.level ?: 0) + 1).coerceAtMost(MAX_DEPTH_COOLDOWN_LEVEL)
+        depthQuarantine[symbol] = DepthQuarantine(level, now)
+        depthCooldownUntil[symbol] = now + depthCooldownMillis * (1L shl (level - 1))
+        log.warn(
+            "호가 등록이 확정되지 않는다 - 슬롯을 다른 방 종목에 넘긴다: code={} failures={}",
+            symbol,
+            attempts,
+        )
+        meters.counter("depth.subscribe.cooldown").increment()
+    }
+
+    private fun isDepthRegistration(registration: Registration): Boolean =
+        registration.trId == depthUnifiedTrId || registration.trId == depthKrxTrId
+
+    private fun depthCooledDown(symbol: String, now: Long): Boolean =
+        depthCooldownUntil[symbol]?.let { now < it } == true
+
+    private fun clearStaleDepthAcks(symbol: String) {
+        depthStaleAcks.remove(symbol)
+    }
+
+    private fun consumeStaleDepthAck(symbol: String): Boolean {
+        val remaining = depthStaleAcks[symbol] ?: return false
+        if (remaining <= 1) depthStaleAcks.remove(symbol) else depthStaleAcks[symbol] = remaining - 1
+        meters.counter("depth.stale.ack.dropped").increment()
+        return true
+    }
+
+    private fun clearDepthFailures(symbol: String) {
+        depthStaleAcks.remove(symbol)
+        depthAttempts.remove(symbol)
+        depthCooldownUntil.remove(symbol)
+        depthQuarantine.remove(symbol)
+        depthDemoted -= symbol
+    }
+
+    private fun heldSymbols(matching: (Registration) -> Boolean): Int =
+        sessions.flatMapTo(mutableSetOf()) { session ->
+            session.heldRegistrations().filter(matching).map(Registration::symbol)
+        }.size
+
     private fun trIdsFor(symbol: String): List<String> {
         val chosen = tickDivs.computeIfAbsent(symbol) { marketDivs.get(it) ?: MarketDivStore.UNIFIED }
         val tick = if (chosen == MarketDivStore.KRX) krxTrId else unifiedTrId
         return tickTrIds.map { if (it == unifiedTrId) tick else it }
+    }
+
+    private fun depthTrFor(symbol: String): String {
+        val chosen = tickDivs.computeIfAbsent(symbol) { marketDivs.get(it) ?: MarketDivStore.UNIFIED }
+        return if (chosen == MarketDivStore.KRX) depthKrxTrId else depthUnifiedTrId
+    }
+
+    private fun currentDepthTrId(symbol: String): String =
+        if (tickDivs[symbol] == MarketDivStore.KRX) depthKrxTrId else depthUnifiedTrId
+
+    private fun reconcileDepth(depthTarget: List<String>) {
+        val now = clock()
+        val live = LinkedHashSet(depthTarget)
+        live.forEach(depthRemovals::remove)
+        val previous = sessions.flatMapTo(mutableSetOf()) { it.depthAssigned }
+        previous.filter { it !in live }.forEach { depthRemovals.putIfAbsent(it, now + removalGraceMillis) }
+        depthRemovals.entries.removeIf { it.value <= now }
+        depthCooldownUntil.entries.removeIf { it.value <= now }
+        depthDemoted.retainAll { it in live || it in depthRemovals }
+        depthAttempts.keys.retainAll { it in live || it in depthRemovals }
+        depthStaleAcks.keys.retainAll { it in live || it in depthRemovals }
+        depthQuarantine.entries.removeIf { now - it.value.at > depthQuarantineDecayMillis }
+        val established = previous.filter { assignments[it]?.depthEstablished(it, now) == true }.toSet() +
+            depthDemoted
+        val holdovers = previous.filter { it in depthRemovals && it in established }
+        sessions.forEach { it.depthAssigned.clear() }
+        var dropped = 0
+        live.filter { it in established }.forEach { if (!tryAssignDepth(it, now)) dropped += 1 }
+        holdovers.forEach { tryAssignDepth(it, now) }
+        live.filter { it !in established }.forEach { if (!tryAssignDepth(it, now)) dropped += 1 }
+        depthDroppedCount = dropped
+        depthOwners.clear()
+        sessions.forEach { session -> session.depthAssigned.forEach { depthOwners[it] = session } }
+    }
+
+    private fun acceptsDepthFrame(pooled: PooledSession, trId: String, code: String): Boolean =
+        depthOwners[code] === pooled && trId == currentDepthTrId(code)
+
+    private fun evictQuoteOnly(roomSet: Set<String>): PooledSession? {
+        val victim = assignments.keys.firstOrNull { it in pendingRemovals && it !in roomSet }
+            ?: assignments.keys.firstOrNull { it !in roomSet }
+            ?: return null
+        val session = assignments.remove(victim) ?: return null
+        session.assigned.remove(victim)
+        pendingRemovals.remove(victim)
+        forgetSymbol(victim)
+        degraded += victim
+        log.info("방 수요가 quote 전용 등록을 선점한다 - REST 폴링으로 넘긴다: evicted={}", victim)
+        meters.counter("tick.room.preempted").increment()
+        return session
+    }
+
+    private fun tryAssignDepth(symbol: String, now: Long): Boolean {
+        val session = assignments[symbol] ?: return false
+        if (symbol in session.depthAssigned) return true
+        if (depthCooledDown(symbol, now)) return false
+        val used = session.assigned.size * tickTrIds.size + session.depthAssigned.size
+        if (used >= maxRegistrationsPerSession) return false
+        depthDemoted -= symbol
+        session.depthAssigned += symbol
+        return true
     }
 
     private fun adoptUpdatedDivs() {
@@ -118,6 +264,8 @@ class SessionPool(
     }
 
     private fun escalateSilent(now: Long) {
+        sessions.filter { !it.isConnected && it.nextConnectAttemptAt > 0 }
+            .forEach { session -> session.assigned.forEach { silenceDegraded += it } }
         assignments.keys.forEach { symbol ->
             if (symbol in silenceDegraded) {
                 degraded += symbol
@@ -166,6 +314,7 @@ class SessionPool(
     }
 
     private fun forgetSymbol(symbol: String) {
+        depthDemoted -= symbol
         seenTicks.remove(symbol)
         tickDivs.remove(symbol)
         lastTickAt.remove(symbol)
@@ -178,14 +327,24 @@ class SessionPool(
         pooled.onAck(trId, trKey, success)
     }
 
-    private fun reconcileAssignments(target: Set<String>) {
+    @Synchronized
+    private fun applyUnsubscribeAck(pooled: PooledSession, trId: String?, trKey: String?, success: Boolean) {
+        pooled.onUnsubscribeAck(trId, trKey, success)
+    }
+
+    private fun reconcileAssignments(target: Set<String>, rooms: List<String>) {
         val now = clock()
         degraded.clear()
-        target.forEach { symbol ->
+        val roomSet = rooms.toSet()
+        val ordered = LinkedHashSet<String>(rooms.size + target.size)
+        rooms.filterTo(ordered) { it in target }
+        ordered.addAll(target)
+        ordered.forEach { symbol ->
             pendingRemovals.remove(symbol)
             if (symbol !in assignments) {
                 val candidate = sessions.minByOrNull { it.assigned.size }
                     ?.takeIf { it.assigned.size < maxSymbolsPerSession }
+                    ?: if (symbol in roomSet) evictQuoteOnly(roomSet) else null
                 if (candidate == null) {
                     degraded += symbol
                 } else {
@@ -207,8 +366,20 @@ class SessionPool(
     private inner class PooledSession(val account: KisAccount) {
         var state: SessionState = SessionState.DISCONNECTED
         val assigned = mutableSetOf<String>()
+        val depthAssigned = mutableSetOf<String>()
         val confirmed: MutableSet<Registration> = ConcurrentHashMap.newKeySet()
         val pending = mutableMapOf<Registration, Long>()
+        val pendingUnsubscribes = ConcurrentHashMap<Registration, UnsubscribeAttempt>()
+
+        fun heldRegistrations(): Set<Registration> = confirmed + pendingUnsubscribes.keys
+
+        fun depthEstablished(symbol: String, now: Long): Boolean {
+            val registration = Registration(depthTrFor(symbol), symbol)
+            if (registration in confirmed) return true
+            val sentAt = pending[registration] ?: return false
+            return now - sentAt < ackTimeoutMillis
+        }
+
         var session: KisWebSocketSession? = null
         var nextConnectAttemptAt = 0L
         var consecutiveFailures = 0
@@ -251,13 +422,31 @@ class SessionPool(
         fun syncSubscriptions() {
             val current = session ?: return
             val now = clock()
-            pending.entries.removeIf { now - it.value >= ackTimeoutMillis }
             val wanted = assigned.flatMapTo(mutableSetOf()) { symbol ->
                 trIdsFor(symbol).map { Registration(it, symbol) }
             }
-            (wanted - confirmed - pending.keys).forEach { registration ->
+            depthAssigned.mapTo(wanted) { Registration(depthTrFor(it), it) }
+            pending.entries
+                .filter { isDepthRegistration(it.key) && now - it.value >= ackTimeoutMillis }
+                .forEach {
+                    depthStaleAcks.merge(it.key.symbol, 1, Int::plus)
+                    noteDepthFailure(it.key.symbol, now)
+                }
+            wanted.removeAll { isDepthRegistration(it) && depthCooledDown(it.symbol, now) }
+            pendingUnsubscribes.keys.removeAll(wanted)
+            val retried = pendingUnsubscribes
+                .filterValues { it.retryNow || now - it.at >= ackTimeoutMillis }
+                .keys
+            (confirmed + pending.keys - wanted + retried).forEach { registration ->
+                sendUnsubscribe(current, registration, now)
+            }
+            val awaitingAck = pending.filterValues { now - it < ackTimeoutMillis }.keys
+            (wanted - confirmed - awaitingAck).forEach { registration ->
                 runCatching { current.subscribe(registration.symbol, registration.trId) }
-                    .onSuccess { pending[registration] = now }
+                    .onSuccess {
+                        pending[registration] = now
+                        armSilence(registration, now)
+                    }
                     .onFailure {
                         log.warn(
                             "subscribe failed: keyId={} trId={} code={}",
@@ -265,30 +454,84 @@ class SessionPool(
                         )
                     }
             }
-            (confirmed + pending.keys - wanted).forEach { registration ->
-                runCatching { current.unsubscribe(registration.symbol, registration.trId) }
-                confirmed -= registration
-                pending.remove(registration)
+        }
+
+        private fun armSilence(registration: Registration, now: Long) {
+            if (registration.trId == unifiedTrId || registration.trId == krxTrId) {
+                subscribedAt.putIfAbsent(registration.symbol, now)
             }
+        }
+
+        private fun sendUnsubscribe(current: KisWebSocketSession, registration: Registration, now: Long) {
+            val attempts = (pendingUnsubscribes[registration]?.attempts ?: 0) + 1
+            if (attempts > MAX_UNSUBSCRIBE_ATTEMPTS) {
+                if (connectionLost.compareAndSet(false, true)) {
+                    log.error(
+                        "unsubscribe 재시도 한도 초과 - 세션을 재접속해 등록을 회수한다: keyId={} trId={} code={}",
+                        account.keyId, registration.trId, registration.symbol,
+                    )
+                    meters.counter("kis.unsubscribe.abandoned").increment()
+                }
+                return
+            }
+            runCatching { current.unsubscribe(registration.symbol, registration.trId) }
+                .onSuccess {
+                    confirmed -= registration
+                    pending.remove(registration)
+                    pendingUnsubscribes[registration] = UnsubscribeAttempt(now, attempts)
+                }
+                .onFailure {
+                    log.warn(
+                        "unsubscribe failed - retried next maintain: keyId={} trId={} code={}",
+                        account.keyId, registration.trId, registration.symbol, it,
+                    )
+                }
+        }
+
+        fun onUnsubscribeAck(trId: String?, trKey: String?, success: Boolean) {
+            if (trId == null || trKey == null) return
+            val registration = Registration(trId, trKey)
+            if (success) {
+                pendingUnsubscribes.remove(registration)
+                if (isDepthRegistration(registration)) clearStaleDepthAcks(trKey)
+                return
+            }
+            val attempt = pendingUnsubscribes[registration] ?: return
+            pendingUnsubscribes[registration] = attempt.copy(retryNow = true)
+            log.warn("unsubscribe rejected, retrying: keyId={} trId={} code={}", account.keyId, trId, trKey)
         }
 
         fun onAck(trId: String?, trKey: String?, success: Boolean) {
             if (trId == null || trKey == null) return
             val registration = Registration(trId, trKey)
+            if (!success && isDepthRegistration(registration) && consumeStaleDepthAck(trKey)) return
+            if (!success && registration !in pending && pendingUnsubscribes.containsKey(registration)) {
+                onUnsubscribeAck(trId, trKey, success)
+                return
+            }
             if (pending.remove(registration) == null) return
             if (success) {
                 confirmed += registration
                 if (registration.trId == unifiedTrId || registration.trId == krxTrId) {
                     subscribedAt.putIfAbsent(trKey, clock())
                 }
+                if (registration.trId == depthUnifiedTrId || registration.trId == depthKrxTrId) {
+                    clearDepthFailures(trKey)
+                }
             } else {
+                if (isDepthRegistration(registration)) noteDepthFailure(trKey, clock())
                 log.warn("subscribe rejected, retrying: keyId={} trId={} code={}", account.keyId, trId, trKey)
             }
         }
 
         fun clearSubscriptions() {
+            (confirmed + pending.keys + pendingUnsubscribes.keys)
+                .filter(::isDepthRegistration)
+                .forEach { clearStaleDepthAcks(it.symbol) }
+            depthAssigned.forEach(::clearStaleDepthAcks)
             confirmed.clear()
             pending.clear()
+            pendingUnsubscribes.clear()
             assigned.forEach(::rearmSilence)
         }
 
@@ -299,6 +542,8 @@ class SessionPool(
             }
             session = null
             clearSubscriptions()
+            depthAssigned.clear()
+            depthOwners.entries.removeIf { it.value === this }
             state = SessionState.DISCONNECTED
             consecutiveFailures = 0
             nextConnectAttemptAt = 0
@@ -322,8 +567,21 @@ class SessionPool(
             meters.counter("tick.in").increment(ticks.size.toDouble())
         }
 
+        override fun onDepths(trId: String, depths: List<KisDepth>) {
+            meters.counter("depth.in").increment(depths.size.toDouble())
+            val (accepted, stale) = depths.partition { acceptsDepthFrame(pooled, trId, it.code) }
+            accepted.forEach(depthBuffer::offer)
+            if (stale.isNotEmpty()) {
+                meters.counter("depth.stale.dropped").increment(stale.size.toDouble())
+            }
+        }
+
         override fun onSubscribeAck(trId: String?, trKey: String?, success: Boolean) {
             applyAck(pooled, trId, trKey, success)
+        }
+
+        override fun onUnsubscribeAck(trId: String?, trKey: String?, success: Boolean) {
+            applyUnsubscribeAck(pooled, trId, trKey, success)
         }
 
         override fun onEncryptedDropped(trId: String) {

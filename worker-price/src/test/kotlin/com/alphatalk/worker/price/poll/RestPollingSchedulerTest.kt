@@ -101,8 +101,9 @@ class RestPollingSchedulerTest {
     private class RecordingPublisher : QuotePublisher {
         val published = mutableListOf<Triple<String, QuoteData, Long>>()
 
-        override fun publish(code: String, data: QuoteData, ts: Long) {
+        override fun publish(code: String, data: QuoteData, ts: Long): Boolean {
             published += Triple(code, data, ts)
+            return true
         }
     }
 

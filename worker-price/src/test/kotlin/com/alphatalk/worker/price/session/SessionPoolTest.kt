@@ -3,6 +3,7 @@ package com.alphatalk.worker.price.session
 import com.alphatalk.kis.model.KisAccount
 import com.alphatalk.kis.test.FakeKisServer
 import com.alphatalk.worker.price.conflation.ConflationBuffer
+import com.alphatalk.worker.price.conflation.DepthConflationBuffer
 import com.alphatalk.worker.price.market.InMemoryMarketDivStore
 import com.alphatalk.worker.price.market.MarketDivStore
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
@@ -42,6 +43,8 @@ class SessionPoolTest {
         silenceMillis: Long = Long.MAX_VALUE,
         meters: SimpleMeterRegistry = SimpleMeterRegistry(),
         buffer: ConflationBuffer = ConflationBuffer(),
+        depthBuffer: DepthConflationBuffer = DepthConflationBuffer(),
+        depthEnabled: Boolean = true,
     ) = SessionPool(
         accounts = (1..accounts).map { KisAccount("key$it", "app$it", "secret$it") },
         wsUrl = server.url,
@@ -50,6 +53,8 @@ class SessionPoolTest {
         meters = meters,
         tickTrIds = trIds,
         marketDivs = marketDivs,
+        depthBuffer = depthBuffer,
+        depthEnabled = depthEnabled,
         silenceMillis = silenceMillis,
         maxRegistrationsPerSession = maxPerSession,
         removalGraceMillis = graceMillis,
@@ -93,7 +98,7 @@ class SessionPoolTest {
             marketDivs = InMemoryMarketDivStore(mapOf("047040" to "J")),
         )
 
-        pool.maintain(linkedSetOf("047040", "005930"), subscribeAllowed = true)
+        pool.maintain(linkedSetOf("047040", "005930"), emptyList(), subscribeAllowed = true)
 
         server.awaitMessages(4)
         assertEquals(listOf("005930"), trKeysOf(server.receivedMessages, "H0UNCNT0"))
@@ -107,13 +112,13 @@ class SessionPoolTest {
         val meters = SimpleMeterRegistry()
         val pool = pool(trIds = listOf("H0UNCNT0"), marketDivs = divs, silenceMillis = 1_000, meters = meters)
 
-        pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
+        pool.maintain(linkedSetOf("047040"), emptyList(), subscribeAllowed = true)
         server.awaitMessages(1)
         server.broadcastText(ackFrame("047040", success = true, trId = "H0UNCNT0"))
         awaitConfirmed(meters, 1)
 
         now += 2_000
-        pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
+        pool.maintain(linkedSetOf("047040"), emptyList(), subscribeAllowed = true)
 
         assertEquals(setOf("047040"), pool.degradedSymbols())
         assertEquals(null, divs.get("047040"))
@@ -126,16 +131,16 @@ class SessionPoolTest {
         val meters = SimpleMeterRegistry()
         val pool = pool(trIds = listOf("H0UNCNT0"), marketDivs = divs, silenceMillis = 1_000, meters = meters)
 
-        pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
+        pool.maintain(linkedSetOf("047040"), emptyList(), subscribeAllowed = true)
         server.awaitMessages(1)
         server.broadcastText(ackFrame("047040", success = true, trId = "H0UNCNT0"))
         awaitConfirmed(meters, 1)
         now += 2_000
-        pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
+        pool.maintain(linkedSetOf("047040"), emptyList(), subscribeAllowed = true)
         assertEquals(setOf("047040"), pool.degradedSymbols())
 
         divs.confirm("047040", "J")
-        pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
+        pool.maintain(linkedSetOf("047040"), emptyList(), subscribeAllowed = true)
 
         server.awaitMessages(3)
         assertEquals(listOf("047040"), trKeysOf(server.receivedMessages, "H0STCNT0"))
@@ -144,7 +149,7 @@ class SessionPoolTest {
 
         server.broadcastText(tickFrame("H0STCNT0", "047040"))
         await().atMost(Duration.ofSeconds(5)).until { meters.counter("tick.in").count() > 0 }
-        pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
+        pool.maintain(linkedSetOf("047040"), emptyList(), subscribeAllowed = true)
 
         assertTrue(pool.degradedSymbols().isEmpty())
     }
@@ -155,25 +160,25 @@ class SessionPoolTest {
         val meters = SimpleMeterRegistry()
         val pool = pool(trIds = listOf("H0UNCNT0"), marketDivs = divs, silenceMillis = 1_000, meters = meters)
 
-        pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
+        pool.maintain(linkedSetOf("047040"), emptyList(), subscribeAllowed = true)
         server.awaitMessages(1)
         server.broadcastText(ackFrame("047040", success = true, trId = "H0UNCNT0"))
         awaitConfirmed(meters, 1)
         now += 2_000
-        pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
+        pool.maintain(linkedSetOf("047040"), emptyList(), subscribeAllowed = true)
         assertEquals(setOf("047040"), pool.degradedSymbols())
 
         server.broadcastText(tickFrame("H0UNCNT0", "047040"))
         awaitTicksReceived(meters, 1)
         divs.confirm("047040", "J")
 
-        pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
+        pool.maintain(linkedSetOf("047040"), emptyList(), subscribeAllowed = true)
 
         assertEquals(setOf("047040"), pool.degradedSymbols())
         assertEquals("J", divs.get("047040"))
 
         now += 2_000
-        pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
+        pool.maintain(linkedSetOf("047040"), emptyList(), subscribeAllowed = true)
         assertEquals(setOf("047040"), pool.degradedSymbols())
     }
 
@@ -183,17 +188,17 @@ class SessionPoolTest {
         val meters = SimpleMeterRegistry()
         val pool = pool(trIds = listOf("H0UNCNT0"), marketDivs = divs, silenceMillis = 1_000, meters = meters)
 
-        pool.maintain(linkedSetOf("005930"), subscribeAllowed = true)
+        pool.maintain(linkedSetOf("005930"), emptyList(), subscribeAllowed = true)
         server.awaitMessages(1)
         server.broadcastText(ackFrame("005930", success = true, trId = "H0UNCNT0"))
         awaitConfirmed(meters, 1)
         now += 2_000
-        pool.maintain(linkedSetOf("005930"), subscribeAllowed = true)
+        pool.maintain(linkedSetOf("005930"), emptyList(), subscribeAllowed = true)
         assertEquals(setOf("005930"), pool.degradedSymbols())
 
         server.broadcastText(tickFrame("H0UNCNT0", "005930"))
         awaitTicksReceived(meters, 1)
-        pool.maintain(linkedSetOf("005930"), subscribeAllowed = true)
+        pool.maintain(linkedSetOf("005930"), emptyList(), subscribeAllowed = true)
 
         assertTrue(pool.degradedSymbols().isEmpty())
         assertEquals("UN", divs.get("005930"))
@@ -205,17 +210,17 @@ class SessionPoolTest {
         val meters = SimpleMeterRegistry()
         val pool = pool(trIds = listOf("H0UNCNT0"), marketDivs = divs, silenceMillis = 1_000, meters = meters)
 
-        pool.maintain(linkedSetOf("005930"), subscribeAllowed = true)
+        pool.maintain(linkedSetOf("005930"), emptyList(), subscribeAllowed = true)
         server.awaitMessages(1)
         server.broadcastText(ackFrame("005930", success = true, trId = "H0UNCNT0"))
         awaitConfirmed(meters, 1)
         server.broadcastText(tickFrame("H0UNCNT0", "005930"))
         awaitTicksReceived(meters, 1)
-        pool.maintain(linkedSetOf("005930"), subscribeAllowed = true)
+        pool.maintain(linkedSetOf("005930"), emptyList(), subscribeAllowed = true)
 
         divs.confirm("005930", "J")
         now += 2_000
-        pool.maintain(linkedSetOf("005930"), subscribeAllowed = true)
+        pool.maintain(linkedSetOf("005930"), emptyList(), subscribeAllowed = true)
 
         assertEquals(0.0, meters.counter("tick.div.resubscribed").count())
         assertTrue(trKeysOf(server.receivedMessages, "H0STCNT0").isEmpty())
@@ -229,7 +234,7 @@ class SessionPoolTest {
         divs.confirmed.clear()
         divs.confirm("047040", "J")
 
-        pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
+        pool.maintain(linkedSetOf("047040"), emptyList(), subscribeAllowed = true)
         server.awaitMessages(1)
         server.broadcastText(ackFrame("047040", success = true, trId = "H0STCNT0"))
         awaitConfirmed(meters, 1)
@@ -247,14 +252,14 @@ class SessionPoolTest {
         val meters = SimpleMeterRegistry()
         val pool = pool(trIds = listOf("H0UNCNT0"), marketDivs = divs, silenceMillis = 1_000, meters = meters)
 
-        pool.maintain(linkedSetOf("005930"), subscribeAllowed = true)
+        pool.maintain(linkedSetOf("005930"), emptyList(), subscribeAllowed = true)
         server.awaitMessages(1)
         server.broadcastText(ackFrame("005930", success = true, trId = "H0UNCNT0"))
         awaitConfirmed(meters, 1)
 
         server.broadcastText(tickFrame("H0UNCNT0", "005930"))
         awaitTicksReceived(meters, 1)
-        pool.maintain(linkedSetOf("005930"), subscribeAllowed = true)
+        pool.maintain(linkedSetOf("005930"), emptyList(), subscribeAllowed = true)
 
         assertEquals("UN", divs.get("005930"))
     }
@@ -265,19 +270,19 @@ class SessionPoolTest {
         val meters = SimpleMeterRegistry()
         val pool = pool(trIds = listOf("H0UNCNT0"), marketDivs = divs, silenceMillis = 1_000, meters = meters)
 
-        pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
+        pool.maintain(linkedSetOf("047040"), emptyList(), subscribeAllowed = true)
         server.awaitMessages(1)
         server.broadcastText(ackFrame("047040", success = true, trId = "H0STCNT0"))
         awaitConfirmed(meters, 1)
         now += 2_000
-        pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
+        pool.maintain(linkedSetOf("047040"), emptyList(), subscribeAllowed = true)
         assertEquals(setOf("047040"), pool.degradedSymbols())
 
         server.broadcastText(tickFrame("H0UNCNT0", "047040"))
         await().atMost(Duration.ofSeconds(5)).until { meters.counter("tick.in").count() > 0 }
 
         now += 2_000
-        pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
+        pool.maintain(linkedSetOf("047040"), emptyList(), subscribeAllowed = true)
 
         assertEquals(setOf("047040"), pool.degradedSymbols())
         assertEquals("J", divs.get("047040"))
@@ -286,6 +291,649 @@ class SessionPoolTest {
 
     private fun tickFrame(trId: String, code: String) =
         "0|$trId|001|$code^134058^16110^2^10^0.06^16000^16200^16000^0^0^0^0^4355991"
+
+    private fun depthFrame(trId: String, code: String): String {
+        val fields = mutableListOf(code, "093012", "0")
+        fields += (0 until 10).map { (71300 + it * 100).toString() }
+        fields += (0 until 10).map { (71200 - it * 100).toString() }
+        fields += (0 until 10).map { (100 + it).toString() }
+        fields += (0 until 10).map { (200 + it).toString() }
+        fields += listOf("1810", "2400", "0", "0", "71250", "1200", "34567", "750", "2", "1.06", "1234567", "15", "-20", "0", "0", "00")
+        return "0|$trId|001|" + fields.joinToString("^")
+    }
+
+    @Test
+    fun `방 수요 종목은 잔여 슬롯 안에서 호가 TR을 등록한다`() {
+        val meters = SimpleMeterRegistry()
+        val pool = pool(maxPerSession = 3, trIds = listOf("H0UNCNT0"), meters = meters)
+
+        pool.maintain(linkedSetOf("005930", "000660"), listOf("005930"), subscribeAllowed = true)
+
+        server.awaitMessages(3)
+        assertEquals(listOf("005930"), trKeysOf(server.receivedMessages, "H0UNASP0"))
+
+        server.broadcastText(ackFrame("005930", success = true, trId = "H0UNASP0"))
+
+        await().atMost(Duration.ofSeconds(5)).until {
+            meters.find("depth.symbols").gauge()?.value() == 1.0
+        }
+    }
+
+    @Test
+    fun `호가 게이지는 확정 등록만 세고 연결이 끊기면 0으로 돌아간다`() {
+        val meters = SimpleMeterRegistry()
+        val pool = pool(maxPerSession = 3, trIds = listOf("H0UNCNT0"), meters = meters)
+        pool.maintain(linkedSetOf("005930"), listOf("005930"), subscribeAllowed = true)
+        server.awaitMessages(2)
+
+        assertEquals(0.0, meters.find("depth.symbols").gauge()?.value())
+
+        server.broadcastText(ackFrame("005930", success = true, trId = "H0UNASP0"))
+        await().atMost(Duration.ofSeconds(5)).until {
+            meters.find("depth.symbols").gauge()?.value() == 1.0
+        }
+
+        pool.disconnectAll()
+
+        assertEquals(0.0, meters.find("depth.symbols").gauge()?.value())
+    }
+
+    @Test
+    fun `잔여 슬롯을 넘는 방 수요는 우선순위 순으로 등록하고 초과분은 드랍 게이지에 남긴다`() {
+        val meters = SimpleMeterRegistry()
+        val pool = pool(maxPerSession = 3, trIds = listOf("H0UNCNT0"), meters = meters)
+
+        pool.maintain(linkedSetOf("005930", "000660"), listOf("000660", "005930"), subscribeAllowed = true)
+
+        server.awaitMessages(3)
+        assertEquals(listOf("000660"), trKeysOf(server.receivedMessages, "H0UNASP0"))
+        assertEquals(1.0, meters.find("depth.symbols.dropped").gauge()?.value())
+    }
+
+    @Test
+    fun `확정되지 않는 호가 등록은 슬롯을 내주고 다음 방 종목이 받는다`() {
+        val meters = SimpleMeterRegistry()
+        val pool = pool(
+            maxPerSession = 3,
+            trIds = listOf("H0UNCNT0"),
+            ackTimeoutMillis = 100,
+            meters = meters,
+        )
+        pool.maintain(linkedSetOf("005930", "000660"), listOf("005930", "000660"), subscribeAllowed = true)
+        server.awaitMessages(3)
+        assertEquals(listOf("005930"), trKeysOf(server.receivedMessages, "H0UNASP0"))
+
+        awaitDepthCooldown(pool, "005930", linkedSetOf("005930", "000660"), listOf("005930", "000660"), meters)
+
+        await().atMost(Duration.ofSeconds(10)).until {
+            now += 500
+            pool.maintain(linkedSetOf("005930", "000660"), listOf("005930", "000660"), subscribeAllowed = true)
+            trKeysOf(server.receivedMessages, "H0UNASP0").contains("000660")
+        }
+        assertEquals(1.0, meters.counter("depth.subscribe.cooldown").count())
+    }
+
+    @Test
+    fun `쿨다운이 끝나면 용량이 꽉 차 있어도 우선순위 높은 방이 슬롯을 되찾는다`() {
+        val meters = SimpleMeterRegistry()
+        val rooms = listOf("005930", "000660")
+        val pool = pool(
+            maxPerSession = 3,
+            trIds = listOf("H0UNCNT0"),
+            ackTimeoutMillis = 100,
+            graceMillis = 1_000,
+            meters = meters,
+        )
+        pool.maintain(linkedSetOf("005930", "000660"), rooms, subscribeAllowed = true)
+        server.awaitMessages(3)
+
+        awaitDepthCooldown(pool, "005930", linkedSetOf("005930", "000660"), rooms, meters)
+        await().atMost(Duration.ofSeconds(10)).until {
+            now += 500
+            pool.maintain(linkedSetOf("005930", "000660"), rooms, subscribeAllowed = true)
+            trKeysOf(server.receivedMessages, "H0UNASP0").contains("000660")
+        }
+        server.broadcastText(unsubscribeAckFrame("005930", success = true, trId = "H0UNASP0"))
+        server.broadcastText(ackFrame("000660", success = true, trId = "H0UNASP0"))
+        await().atMost(Duration.ofSeconds(5)).until {
+            meters.find("depth.symbols").gauge()?.value() == 1.0
+        }
+
+        now += 60_000
+        val before = trKeysOf(server.receivedMessages, "H0UNASP0").count { it == "005930" }
+        pool.maintain(linkedSetOf("005930", "000660"), rooms, subscribeAllowed = true)
+
+        await().atMost(Duration.ofSeconds(5)).until {
+            trKeysOf(server.receivedMessages, "H0UNASP0").count { it == "005930" } > before
+        }
+        now += 2_000
+        pool.maintain(linkedSetOf("005930", "000660"), rooms, subscribeAllowed = true)
+        await().atMost(Duration.ofSeconds(5)).until {
+            unsubscribesOf(server.receivedMessages).any {
+                it.path("body").path("input").path("tr_key").asText() == "000660" &&
+                    it.path("body").path("input").path("tr_id").asText() == "H0UNASP0"
+            }
+        }
+    }
+
+    @Test
+    fun `타임아웃 처리한 요청의 늦은 거절은 흘려보낸다`() {
+        val meters = SimpleMeterRegistry()
+        val rooms = listOf("005930")
+        val target = linkedSetOf("005930")
+        val pool = pool(maxPerSession = 3, trIds = listOf("H0UNCNT0"), ackTimeoutMillis = 1_000, meters = meters)
+        pool.maintain(target, rooms, subscribeAllowed = true)
+        server.awaitMessages(2)
+
+        now += 1_000
+        pool.maintain(target, rooms, subscribeAllowed = true)
+
+        server.broadcastText(ackFrame("005930", success = false, trId = "H0UNASP0"))
+
+        await().atMost(Duration.ofSeconds(5)).until {
+            meters.counter("depth.stale.ack.dropped").count() == 1.0
+        }
+    }
+
+    @Test
+    fun `해지가 확정되면 그 등록 주기의 늦은 ACK 대기도 끝난다`() {
+        val meters = SimpleMeterRegistry()
+        val rooms = listOf("005930")
+        val target = linkedSetOf("005930")
+        val pool = pool(maxPerSession = 3, trIds = listOf("H0UNCNT0"), meters = meters)
+        pool.maintain(target, rooms, subscribeAllowed = true)
+        server.awaitMessages(2)
+
+        await().atMost(Duration.ofSeconds(10)).until {
+            now += 1_000
+            pool.maintain(target, rooms, subscribeAllowed = true)
+            meters.counter("depth.subscribe.cooldown").count() >= 1.0
+        }
+        pool.maintain(target, rooms, subscribeAllowed = true)
+        await().atMost(Duration.ofSeconds(10)).until {
+            unsubscribesOf(server.receivedMessages).any {
+                it.path("body").path("input").path("tr_id").asText() == "H0UNASP0"
+            }
+        }
+
+        server.broadcastText(unsubscribeAckFrame("005930", success = true, trId = "H0UNASP0"))
+        Thread.sleep(300)
+
+        val afterCooldown = trKeysOf(server.receivedMessages, "H0UNASP0").size
+        now += 60_000
+        await().atMost(Duration.ofSeconds(10)).until {
+            now += 100
+            pool.maintain(target, rooms, subscribeAllowed = true)
+            trKeysOf(server.receivedMessages, "H0UNASP0").size > afterCooldown
+        }
+
+        server.broadcastText(ackFrame("005930", success = false, trId = "H0UNASP0"))
+        Thread.sleep(300)
+
+        assertEquals(0.0, meters.counter("depth.stale.ack.dropped").count())
+    }
+
+    @Test
+    fun `재접속하면 늦은 ACK 대기 상태를 버린다`() {
+        val meters = SimpleMeterRegistry()
+        val rooms = listOf("005930")
+        val target = linkedSetOf("005930")
+        val pool = pool(maxPerSession = 3, trIds = listOf("H0UNCNT0"), meters = meters)
+        pool.maintain(target, rooms, subscribeAllowed = true)
+        server.awaitMessages(2)
+
+        await().atMost(Duration.ofSeconds(10)).until {
+            now += 1_000
+            pool.maintain(target, rooms, subscribeAllowed = true)
+            meters.counter("depth.subscribe.cooldown").count() >= 1.0
+        }
+
+        pool.maintain(target, rooms, subscribeAllowed = true)
+        val beforeReconnect = trKeysOf(server.receivedMessages, "H0UNCNT0").size
+        server.closeAllConnections()
+        await().atMost(Duration.ofSeconds(10)).until {
+            now += 100
+            pool.maintain(target, rooms, subscribeAllowed = true)
+            trKeysOf(server.receivedMessages, "H0UNCNT0").size > beforeReconnect
+        }
+
+        val afterCooldown = trKeysOf(server.receivedMessages, "H0UNASP0").size
+        now += 60_000
+        await().atMost(Duration.ofSeconds(10)).until {
+            now += 100
+            pool.maintain(target, rooms, subscribeAllowed = true)
+            trKeysOf(server.receivedMessages, "H0UNASP0").size > afterCooldown
+        }
+
+        val before = trKeysOf(server.receivedMessages, "H0UNASP0").size
+        server.broadcastText(ackFrame("005930", success = false, trId = "H0UNASP0"))
+        Thread.sleep(300)
+        pool.maintain(target, rooms, subscribeAllowed = true)
+
+        Thread.sleep(300)
+        assertEquals(0.0, meters.counter("depth.stale.ack.dropped").count())
+        assertEquals(before + 1, trKeysOf(server.receivedMessages, "H0UNASP0").size)
+    }
+
+    @Test
+    fun `늦게 온 호가 등록 거절은 해지 거절로 오인되지 않는다`() {
+        val meters = SimpleMeterRegistry()
+        val rooms = listOf("005930", "000660")
+        val target = linkedSetOf("005930", "000660")
+        val pool = pool(
+            maxPerSession = 3,
+            trIds = listOf("H0UNCNT0"),
+            ackTimeoutMillis = 1_000,
+            graceMillis = 1_000,
+            meters = meters,
+        )
+        pool.maintain(target, rooms, subscribeAllowed = true)
+        server.awaitMessages(3)
+
+        await().atMost(Duration.ofSeconds(10)).until {
+            now += 1_000
+            pool.maintain(target, rooms, subscribeAllowed = true)
+            meters.counter("depth.subscribe.cooldown").count() >= 1.0
+        }
+        await().atMost(Duration.ofSeconds(10)).until {
+            now += 100
+            pool.maintain(target, rooms, subscribeAllowed = true)
+            unsubscribesOf(server.receivedMessages).any {
+                it.path("body").path("input").path("tr_id").asText() == "H0UNASP0" &&
+                    it.path("body").path("input").path("tr_key").asText() == "005930"
+            }
+        }
+        val before = unsubscribesOf(server.receivedMessages).size
+
+        server.broadcastText(ackFrame("005930", success = false, trId = "H0UNASP0"))
+        Thread.sleep(300)
+        now += 100
+        pool.maintain(target, rooms, subscribeAllowed = true)
+
+        Thread.sleep(300)
+        assertEquals(before, unsubscribesOf(server.receivedMessages).size)
+        assertEquals(0.0, meters.counter("kis.unsubscribe.abandoned").count())
+    }
+
+    @Test
+    fun `쿨다운 중 방을 나갔다 들어오면 복귀 자격도 함께 끝난다`() {
+        val meters = SimpleMeterRegistry()
+        val pool = pool(
+            maxPerSession = 3,
+            trIds = listOf("H0UNCNT0"),
+            ackTimeoutMillis = 100,
+            graceMillis = 1_000,
+            meters = meters,
+        )
+        pool.maintain(linkedSetOf("005930", "000660"), listOf("005930", "000660"), subscribeAllowed = true)
+        server.awaitMessages(3)
+        awaitDepthCooldown(pool, "005930", linkedSetOf("005930", "000660"), listOf("005930", "000660"), meters)
+
+        now += 2_000
+        pool.maintain(linkedSetOf("005930", "000660"), listOf("000660"), subscribeAllowed = true)
+        pool.maintain(linkedSetOf("005930", "000660"), listOf("000660"), subscribeAllowed = true)
+        await().atMost(Duration.ofSeconds(5)).until {
+            trKeysOf(server.receivedMessages, "H0UNASP0").contains("000660")
+        }
+        server.broadcastText(unsubscribeAckFrame("005930", success = true, trId = "H0UNASP0"))
+        server.broadcastText(ackFrame("000660", success = true, trId = "H0UNASP0"))
+        await().atMost(Duration.ofSeconds(5)).until {
+            meters.find("depth.symbols").gauge()?.value() == 1.0
+        }
+
+        pool.maintain(linkedSetOf("005930", "000660"), listOf("000660", "005930"), subscribeAllowed = true)
+        now += 70_000
+        val before = trKeysOf(server.receivedMessages, "H0UNASP0").count { it == "005930" }
+        pool.maintain(linkedSetOf("005930", "000660"), listOf("000660", "005930"), subscribeAllowed = true)
+        now += 2_000
+        pool.maintain(linkedSetOf("005930", "000660"), listOf("000660", "005930"), subscribeAllowed = true)
+
+        Thread.sleep(200)
+        assertEquals(before, trKeysOf(server.receivedMessages, "H0UNASP0").count { it == "005930" })
+        assertTrue(
+            unsubscribesOf(server.receivedMessages).none {
+                it.path("body").path("input").path("tr_id").asText() == "H0UNASP0" &&
+                    it.path("body").path("input").path("tr_key").asText() == "000660"
+            },
+        )
+    }
+
+    @Test
+    fun `실패 격리는 방을 나갔다 다시 들어와도 유지되어 쿨다운이 길어진다`() {
+        val meters = SimpleMeterRegistry()
+        val pool = pool(maxPerSession = 3, trIds = listOf("H0UNCNT0"), ackTimeoutMillis = 100, meters = meters)
+
+        pool.maintain(linkedSetOf("005930"), listOf("005930"), subscribeAllowed = true)
+        server.awaitMessages(2)
+        awaitDepthCooldown(pool, "005930", linkedSetOf("005930"), listOf("005930"), meters)
+
+        now += 40_000
+        pool.maintain(linkedSetOf("005930"), emptyList(), subscribeAllowed = true)
+        now += 25_000
+        pool.maintain(linkedSetOf("005930"), listOf("005930"), subscribeAllowed = true)
+        awaitDepthCooldown(pool, "005930", linkedSetOf("005930"), listOf("005930"), meters, count = 2.0)
+
+        now += 70_000
+        val before = trKeysOf(server.receivedMessages, "H0UNASP0").size
+        pool.maintain(linkedSetOf("005930"), listOf("005930"), subscribeAllowed = true)
+
+        Thread.sleep(200)
+        assertEquals(before, trKeysOf(server.receivedMessages, "H0UNASP0").size)
+    }
+
+    @Test
+    fun `방 수요가 끝났다 돌아온 종목은 복귀분이 아니라 신규 수요로 경쟁한다`() {
+        val meters = SimpleMeterRegistry()
+        val pool = pool(
+            maxPerSession = 3,
+            trIds = listOf("H0UNCNT0"),
+            ackTimeoutMillis = 100,
+            graceMillis = 1_000,
+            meters = meters,
+        )
+        pool.maintain(linkedSetOf("005930", "000660"), listOf("005930", "000660"), subscribeAllowed = true)
+        server.awaitMessages(3)
+        awaitDepthCooldown(pool, "005930", linkedSetOf("005930", "000660"), listOf("005930", "000660"), meters)
+        await().atMost(Duration.ofSeconds(10)).until {
+            now += 500
+            pool.maintain(linkedSetOf("005930", "000660"), listOf("005930", "000660"), subscribeAllowed = true)
+            trKeysOf(server.receivedMessages, "H0UNASP0").contains("000660")
+        }
+        server.broadcastText(unsubscribeAckFrame("005930", success = true, trId = "H0UNASP0"))
+        server.broadcastText(ackFrame("000660", success = true, trId = "H0UNASP0"))
+        await().atMost(Duration.ofSeconds(5)).until {
+            meters.find("depth.symbols").gauge()?.value() == 1.0
+        }
+
+        now += 60_000
+        pool.maintain(linkedSetOf("005930", "000660"), listOf("000660"), subscribeAllowed = true)
+        val before = trKeysOf(server.receivedMessages, "H0UNASP0").count { it == "005930" }
+
+        pool.maintain(linkedSetOf("005930", "000660"), listOf("000660", "005930"), subscribeAllowed = true)
+        now += 2_000
+        pool.maintain(linkedSetOf("005930", "000660"), listOf("000660", "005930"), subscribeAllowed = true)
+
+        Thread.sleep(200)
+        assertEquals(before, trKeysOf(server.receivedMessages, "H0UNASP0").count { it == "005930" })
+        assertTrue(
+            unsubscribesOf(server.receivedMessages).none {
+                it.path("body").path("input").path("tr_id").asText() == "H0UNASP0" &&
+                    it.path("body").path("input").path("tr_key").asText() == "000660"
+            },
+        )
+    }
+
+    @Test
+    fun `쿨다운이 끝나고 슬롯이 비면 실패했던 종목이 다시 호가를 받는다`() {
+        val meters = SimpleMeterRegistry()
+        val pool = pool(
+            maxPerSession = 3,
+            trIds = listOf("H0UNCNT0"),
+            ackTimeoutMillis = 100,
+            meters = meters,
+        )
+        pool.maintain(linkedSetOf("005930", "000660"), listOf("005930", "000660"), subscribeAllowed = true)
+        server.awaitMessages(3)
+        awaitDepthCooldown(pool, "005930", linkedSetOf("005930", "000660"), listOf("005930", "000660"), meters)
+
+        now += 60_000
+        val before = trKeysOf(server.receivedMessages, "H0UNASP0").count { it == "005930" }
+        pool.maintain(linkedSetOf("005930"), listOf("005930"), subscribeAllowed = true)
+
+        await().atMost(Duration.ofSeconds(5)).until {
+            trKeysOf(server.receivedMessages, "H0UNASP0").count { it == "005930" } > before
+        }
+    }
+
+    @Test
+    fun `마지막 호가 등록 요청은 ACK 유효기간이 지나기 전에 취소되지 않는다`() {
+        val meters = SimpleMeterRegistry()
+        val pool = pool(
+            maxPerSession = 3,
+            trIds = listOf("H0UNCNT0"),
+            ackTimeoutMillis = 1_000,
+            meters = meters,
+        )
+        pool.maintain(linkedSetOf("005930", "000660"), listOf("005930", "000660"), subscribeAllowed = true)
+        server.awaitMessages(3)
+
+        repeat(2) {
+            now += 1_000
+            pool.maintain(linkedSetOf("005930", "000660"), listOf("005930", "000660"), subscribeAllowed = true)
+        }
+        server.awaitMessages(5)
+
+        now += 500
+        pool.maintain(linkedSetOf("005930", "000660"), listOf("005930", "000660"), subscribeAllowed = true)
+
+        assertEquals(0.0, meters.counter("depth.subscribe.cooldown").count())
+        assertTrue(unsubscribesOf(server.receivedMessages).isEmpty())
+
+        server.broadcastText(ackFrame("005930", success = true, trId = "H0UNASP0"))
+
+        await().atMost(Duration.ofSeconds(5)).until {
+            meters.find("depth.symbols").gauge()?.value() == 1.0
+        }
+        assertEquals(0.0, meters.counter("depth.subscribe.cooldown").count())
+    }
+
+    @Test
+    fun `구분 전환 중 도착한 옛 호가 TR 프레임은 버린다`() {
+        val divs = InMemoryMarketDivStore()
+        val meters = SimpleMeterRegistry()
+        val depthBuffer = DepthConflationBuffer()
+        val pool = pool(
+            maxPerSession = 4,
+            trIds = listOf("H0UNCNT0"),
+            marketDivs = divs,
+            meters = meters,
+            depthBuffer = depthBuffer,
+        )
+        pool.maintain(linkedSetOf("047040"), listOf("047040"), subscribeAllowed = true)
+        server.awaitMessages(2)
+        server.broadcastText(ackFrame("047040", success = true, trId = "H0UNASP0"))
+
+        divs.confirm("047040", "J")
+        pool.maintain(linkedSetOf("047040"), listOf("047040"), subscribeAllowed = true)
+        await().atMost(Duration.ofSeconds(5)).until {
+            trKeysOf(server.receivedMessages, "H0STASP0").contains("047040")
+        }
+
+        server.broadcastText(depthFrame("H0UNASP0", "047040"))
+        await().atMost(Duration.ofSeconds(5)).until { meters.counter("depth.stale.dropped").count() > 0 }
+        assertTrue(depthBuffer.drainDirty().isEmpty())
+
+        server.broadcastText(depthFrame("H0STASP0", "047040"))
+        await().atMost(Duration.ofSeconds(5)).until { depthBuffer.drainDirty().isNotEmpty() }
+    }
+
+    @Test
+    fun `KRX로 확정된 종목의 호가는 KRX 호가 TR로 등록한다`() {
+        val pool = pool(
+            maxPerSession = 4,
+            trIds = listOf("H0UNCNT0"),
+            marketDivs = InMemoryMarketDivStore(mapOf("047040" to "J")),
+        )
+
+        pool.maintain(linkedSetOf("047040"), listOf("047040"), subscribeAllowed = true)
+
+        server.awaitMessages(2)
+        assertEquals(listOf("047040"), trKeysOf(server.receivedMessages, "H0STASP0"))
+        assertTrue(trKeysOf(server.receivedMessages, "H0UNASP0").isEmpty())
+    }
+
+    @Test
+    fun `방 수요가 사라지면 유예 뒤 호가만 해지한다`() {
+        val pool = pool(maxPerSession = 4, trIds = listOf("H0UNCNT0"), graceMillis = 1_000)
+        pool.maintain(setOf("005930"), listOf("005930"), subscribeAllowed = true)
+        server.awaitMessages(2)
+
+        pool.maintain(setOf("005930"), emptyList(), subscribeAllowed = true)
+        Thread.sleep(200)
+        assertTrue(unsubscribesOf(server.receivedMessages).isEmpty())
+
+        now += 1_500
+        pool.maintain(setOf("005930"), emptyList(), subscribeAllowed = true)
+
+        server.awaitMessages(3)
+        val unsubscribed = unsubscribesOf(server.receivedMessages)
+        assertEquals(1, unsubscribed.size)
+        assertEquals("H0UNASP0", unsubscribed[0].path("body").path("input").path("tr_id").asText())
+        assertEquals("005930", unsubscribed[0].path("body").path("input").path("tr_key").asText())
+    }
+
+    @Test
+    fun `유예 중인 호가 등록은 신규 방 수요보다 슬롯을 먼저 지킨다`() {
+        val meters = SimpleMeterRegistry()
+        val pool = pool(maxPerSession = 3, trIds = listOf("H0UNCNT0"), graceMillis = 1_000, meters = meters)
+        pool.maintain(linkedSetOf("005930", "000660"), listOf("005930"), subscribeAllowed = true)
+        server.awaitMessages(3)
+
+        pool.maintain(linkedSetOf("005930", "000660"), listOf("000660"), subscribeAllowed = true)
+
+        Thread.sleep(200)
+        assertTrue(unsubscribesOf(server.receivedMessages).isEmpty())
+        assertEquals(listOf("005930"), trKeysOf(server.receivedMessages, "H0UNASP0"))
+        assertEquals(1.0, meters.find("depth.symbols.dropped").gauge()?.value())
+
+        now += 2_000
+        pool.maintain(linkedSetOf("005930", "000660"), listOf("000660"), subscribeAllowed = true)
+
+        server.awaitMessages(5)
+        assertEquals(listOf("005930", "000660"), trKeysOf(server.receivedMessages, "H0UNASP0"))
+        val unsubscribed = unsubscribesOf(server.receivedMessages)
+        assertEquals(1, unsubscribed.size)
+        assertEquals("H0UNASP0", unsubscribed[0].path("body").path("input").path("tr_id").asText())
+        assertEquals("005930", unsubscribed[0].path("body").path("input").path("tr_key").asText())
+    }
+
+    @Test
+    fun `가득 찬 세션에서 방 수요는 quote 전용 등록을 선점하고 밀린 종목은 강등된다`() {
+        val meters = SimpleMeterRegistry()
+        val pool = pool(maxPerSession = 2, trIds = listOf("H0UNCNT0"), meters = meters)
+        pool.maintain(linkedSetOf("005930", "000660"), emptyList(), subscribeAllowed = true)
+        server.awaitMessages(2)
+
+        pool.maintain(linkedSetOf("005930", "000660", "035420"), listOf("035420"), subscribeAllowed = true)
+
+        server.awaitMessages(4)
+        assertEquals(listOf("005930", "000660", "035420"), trKeysOf(server.receivedMessages, "H0UNCNT0"))
+        val unsubscribed = unsubscribesOf(server.receivedMessages)
+        assertEquals(1, unsubscribed.size)
+        assertEquals("005930", unsubscribed[0].path("body").path("input").path("tr_key").asText())
+        assertEquals(setOf("005930"), pool.degradedSymbols())
+        assertEquals(1.0, meters.counter("tick.room.preempted").count())
+    }
+
+    @Test
+    fun `용량이 줄면 유예 홀드오버가 아니라 유지 중인 방 수요가 슬롯을 지킨다`() {
+        val pool = pool(maxPerSession = 4, trIds = listOf("H0UNCNT0"), graceMillis = 1_000)
+        pool.maintain(linkedSetOf("005930", "000660"), listOf("005930", "000660"), subscribeAllowed = true)
+        server.awaitMessages(4)
+
+        pool.maintain(linkedSetOf("005930", "000660", "035420"), listOf("005930"), subscribeAllowed = true)
+
+        server.awaitMessages(6)
+        val unsubscribed = unsubscribesOf(server.receivedMessages)
+        assertEquals(1, unsubscribed.size)
+        assertEquals("H0UNASP0", unsubscribed[0].path("body").path("input").path("tr_id").asText())
+        assertEquals("000660", unsubscribed[0].path("body").path("input").path("tr_key").asText())
+        assertEquals(listOf("005930", "000660"), trKeysOf(server.receivedMessages, "H0UNASP0"))
+    }
+
+    @Test
+    fun `틱 수요가 슬롯을 되찾으면 같은 정비에서 호가 해지가 틱 등록보다 먼저 나간다`() {
+        val pool = pool(maxPerSession = 2, trIds = listOf("H0UNCNT0"), graceMillis = 1_000)
+        pool.maintain(linkedSetOf("005930"), listOf("005930"), subscribeAllowed = true)
+        server.awaitMessages(2)
+
+        pool.maintain(linkedSetOf("005930", "000660"), emptyList(), subscribeAllowed = true)
+
+        server.awaitMessages(4)
+        val messages = server.receivedMessages.map { mapper.readTree(it) }
+        val depthUnsubIndex = messages.indexOfFirst {
+            it.path("header").path("tr_type").asText() == "2" &&
+                it.path("body").path("input").path("tr_id").asText() == "H0UNASP0"
+        }
+        val newTickSubIndex = messages.indexOfFirst {
+            it.path("header").path("tr_type").asText() == "1" &&
+                it.path("body").path("input").path("tr_key").asText() == "000660"
+        }
+        assertTrue(depthUnsubIndex >= 0)
+        assertTrue(newTickSubIndex > depthUnsubIndex)
+    }
+
+    @Test
+    fun `유예 중 방 수요가 돌아오면 호가 해지가 취소된다`() {
+        val pool = pool(maxPerSession = 4, trIds = listOf("H0UNCNT0"), graceMillis = 1_000)
+        pool.maintain(setOf("005930"), listOf("005930"), subscribeAllowed = true)
+        server.awaitMessages(2)
+
+        pool.maintain(setOf("005930"), emptyList(), subscribeAllowed = true)
+        pool.maintain(setOf("005930"), listOf("005930"), subscribeAllowed = true)
+        now += 2_000
+        pool.maintain(setOf("005930"), listOf("005930"), subscribeAllowed = true)
+
+        Thread.sleep(200)
+        assertTrue(unsubscribesOf(server.receivedMessages).isEmpty())
+    }
+
+    @Test
+    fun `분봉이 KRX로 판정하면 호가 등록도 함께 갈아탄다`() {
+        val divs = InMemoryMarketDivStore()
+        val meters = SimpleMeterRegistry()
+        val pool = pool(
+            maxPerSession = 4,
+            trIds = listOf("H0UNCNT0"),
+            marketDivs = divs,
+            silenceMillis = 1_000,
+            meters = meters,
+        )
+        pool.maintain(linkedSetOf("047040"), listOf("047040"), subscribeAllowed = true)
+        server.awaitMessages(2)
+        server.broadcastText(ackFrame("047040", success = true, trId = "H0UNCNT0"))
+        awaitConfirmed(meters, 1)
+        now += 2_000
+        pool.maintain(linkedSetOf("047040"), listOf("047040"), subscribeAllowed = true)
+
+        divs.confirm("047040", "J")
+        pool.maintain(linkedSetOf("047040"), listOf("047040"), subscribeAllowed = true)
+
+        await().atMost(Duration.ofSeconds(5)).until {
+            trKeysOf(server.receivedMessages, "H0STASP0") == listOf("047040")
+        }
+        assertEquals(listOf("047040"), trKeysOf(server.receivedMessages, "H0STCNT0"))
+    }
+
+    @Test
+    fun `호가 프레임은 호가 버퍼로 들어가고 침묵 판정을 되돌리지 않는다`() {
+        val meters = SimpleMeterRegistry()
+        val depthBuffer = DepthConflationBuffer()
+        val pool = pool(
+            maxPerSession = 4,
+            trIds = listOf("H0UNCNT0"),
+            silenceMillis = 1_000,
+            meters = meters,
+            depthBuffer = depthBuffer,
+        )
+        pool.maintain(linkedSetOf("005930"), listOf("005930"), subscribeAllowed = true)
+        server.awaitMessages(2)
+        server.broadcastText(ackFrame("005930", success = true, trId = "H0UNCNT0"))
+        awaitConfirmed(meters, 1)
+
+        server.broadcastText(depthFrame("H0UNASP0", "005930"))
+        await().atMost(Duration.ofSeconds(5)).until { meters.counter("depth.in").count() > 0 }
+
+        val drained = depthBuffer.drainDirty()
+        assertEquals(setOf("005930"), drained.keys)
+        assertEquals(listOf(71300L, 100L), drained.getValue("005930").asks[0])
+
+        now += 2_000
+        pool.maintain(linkedSetOf("005930"), listOf("005930"), subscribeAllowed = true)
+
+        assertEquals(setOf("005930"), pool.degradedSymbols())
+        assertEquals(0.0, meters.counter("tick.in").count())
+    }
 
     @Test
     fun `시간외 틱은 통합 체결 증거가 아니라 구분을 확정하지 않는다`() {
@@ -299,7 +947,7 @@ class SessionPoolTest {
             meters = meters,
         )
 
-        pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
+        pool.maintain(linkedSetOf("047040"), emptyList(), subscribeAllowed = true)
         server.awaitMessages(2)
         server.broadcastText(ackFrame("047040", success = true, trId = "H0UNCNT0"))
         awaitConfirmed(meters, 1)
@@ -323,7 +971,7 @@ class SessionPoolTest {
             meters = meters,
         )
 
-        pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
+        pool.maintain(linkedSetOf("047040"), emptyList(), subscribeAllowed = true)
         server.awaitMessages(2)
         server.broadcastText(ackFrame("047040", success = true, trId = "H0UNCNT0"))
         awaitConfirmed(meters, 1)
@@ -331,7 +979,7 @@ class SessionPoolTest {
         await().atMost(Duration.ofSeconds(5)).until { meters.counter("tick.in").count() > 0 }
 
         now += 2_000
-        pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
+        pool.maintain(linkedSetOf("047040"), emptyList(), subscribeAllowed = true)
 
         assertEquals(1.0, meters.counter("tick.silence.degraded").count())
     }
@@ -342,17 +990,122 @@ class SessionPoolTest {
         val meters = SimpleMeterRegistry()
         val pool = pool(trIds = listOf("H0UNCNT0"), marketDivs = divs, silenceMillis = 1_000, meters = meters)
 
-        pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
+        pool.maintain(linkedSetOf("047040"), emptyList(), subscribeAllowed = true)
         server.awaitMessages(1)
         server.broadcastText(ackFrame("047040", success = true, trId = "H0STCNT0"))
         awaitConfirmed(meters, 1)
 
         now += 2_000
-        pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
+        pool.maintain(linkedSetOf("047040"), emptyList(), subscribeAllowed = true)
 
         assertEquals(setOf("047040"), pool.degradedSymbols())
     }
 
+
+    @Test
+    fun `절단은 흡수된 그 정비 주기 안에서 REST 강등으로 반영된다`() {
+        val pool = pool(trIds = listOf("H0UNCNT0"), silenceMillis = Long.MAX_VALUE)
+        pool.maintain(setOf("005930"), emptyList(), subscribeAllowed = true)
+        server.awaitMessages(1)
+        assertTrue(pool.degradedSymbols().isEmpty())
+
+        server.closeAllConnections()
+
+        await().atMost(Duration.ofSeconds(10)).until {
+            now += 200
+            pool.maintain(setOf("005930"), emptyList(), subscribeAllowed = true)
+            pool.degradedSymbols() == setOf("005930")
+        }
+    }
+
+    @Test
+    fun `접속이 진행되는 동안 도착한 틱은 강등을 막는다`() {
+        val meters = SimpleMeterRegistry()
+        var connects = 0
+        val pool = SessionPool(
+            accounts = (1..2).map { KisAccount("key$it", "app$it", "secret$it") },
+            wsUrl = server.url,
+            approvalKeys = {
+                now += 2_000
+                if (++connects == 2) {
+                    server.broadcastText(tickFrame("H0UNCNT0", "005930"))
+                    await().atMost(Duration.ofSeconds(5)).until { meters.counter("tick.in").count() > 0 }
+                }
+                "AK"
+            },
+            buffer = ConflationBuffer(),
+            meters = meters,
+            tickTrIds = listOf("H0UNCNT0"),
+            marketDivs = InMemoryMarketDivStore(),
+            silenceMillis = 1_000,
+            maxRegistrationsPerSession = 1,
+            backoff = BackoffPolicy(initialMillis = 50, jitterRatio = 0.0),
+            clock = { now },
+        )
+
+        pool.maintain(linkedSetOf("005930", "000660"), emptyList(), subscribeAllowed = true)
+
+        assertTrue(pool.degradedSymbols().isEmpty())
+    }
+
+    @Test
+    fun `침묵 판정은 접속에 걸린 시간까지 반영한 시각으로 한다`() {
+        val pool = SessionPool(
+            accounts = (1..2).map { KisAccount("key$it", "app$it", "secret$it") },
+            wsUrl = server.url,
+            approvalKeys = { now += 2_000; "AK" },
+            buffer = ConflationBuffer(),
+            meters = SimpleMeterRegistry(),
+            tickTrIds = listOf("H0UNCNT0"),
+            marketDivs = InMemoryMarketDivStore(),
+            silenceMillis = 1_000,
+            maxRegistrationsPerSession = 1,
+            backoff = BackoffPolicy(initialMillis = 50, jitterRatio = 0.0),
+            clock = { now },
+        )
+
+        pool.maintain(linkedSetOf("005930", "000660"), emptyList(), subscribeAllowed = true)
+
+        assertEquals(setOf("005930"), pool.degradedSymbols())
+    }
+
+    @Test
+    fun `최초 연결 시도가 실패하면 같은 주기에 REST로 강등한다`() {
+        val pool = SessionPool(
+            accounts = listOf(KisAccount("key1", "app", "secret")),
+            wsUrl = "ws://127.0.0.1:1",
+            approvalKeys = { "AK" },
+            buffer = ConflationBuffer(),
+            meters = SimpleMeterRegistry(),
+            tickTrIds = listOf("H0UNCNT0"),
+            marketDivs = InMemoryMarketDivStore(),
+            silenceMillis = Long.MAX_VALUE,
+            backoff = BackoffPolicy(initialMillis = 50, jitterRatio = 0.0),
+            connectTimeoutSeconds = 1,
+            clock = { now },
+        )
+
+        pool.maintain(setOf("005930"), emptyList(), subscribeAllowed = true)
+
+        assertEquals(setOf("005930"), pool.degradedSymbols())
+    }
+
+    @Test
+    fun `절단 상태에서 새로 배정된 종목도 REST 강등에 포함된다`() {
+        val pool = pool(maxPerSession = 4, trIds = listOf("H0UNCNT0"), silenceMillis = Long.MAX_VALUE)
+        pool.maintain(setOf("005930"), emptyList(), subscribeAllowed = true)
+        server.awaitMessages(1)
+
+        server.closeAllConnections()
+        await().atMost(Duration.ofSeconds(10)).until {
+            pool.maintain(setOf("005930"), emptyList(), subscribeAllowed = true)
+            pool.degradedSymbols() == setOf("005930")
+        }
+
+        pool.maintain(linkedSetOf("005930", "000660"), emptyList(), subscribeAllowed = true)
+
+        assertEquals(setOf("005930", "000660"), pool.degradedSymbols())
+    }
 
     @Test
     fun `강등된 종목은 재접속을 거쳐도 틱이 다시 흐를 때까지 REST 폴백을 유지한다`() {
@@ -360,18 +1113,18 @@ class SessionPoolTest {
         val meters = SimpleMeterRegistry()
         val pool = pool(trIds = listOf("H0UNCNT0"), marketDivs = divs, silenceMillis = 1_000, meters = meters)
 
-        pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
+        pool.maintain(linkedSetOf("047040"), emptyList(), subscribeAllowed = true)
         server.awaitMessages(1)
         server.broadcastText(ackFrame("047040", success = true, trId = "H0UNCNT0"))
         awaitConfirmed(meters, 1)
         now += 2_000
-        pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
+        pool.maintain(linkedSetOf("047040"), emptyList(), subscribeAllowed = true)
         assertEquals(setOf("047040"), pool.degradedSymbols())
 
         server.closeAllConnections()
         await().atMost(Duration.ofSeconds(10)).until {
             now += 200
-            pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
+            pool.maintain(linkedSetOf("047040"), emptyList(), subscribeAllowed = true)
             trKeysOf(server.receivedMessages, "H0UNCNT0").size >= 2
         }
 
@@ -379,7 +1132,7 @@ class SessionPoolTest {
 
         server.broadcastText(tickFrame("H0UNCNT0", "047040"))
         awaitTicksReceived(meters, 1)
-        pool.maintain(linkedSetOf("047040"), subscribeAllowed = true)
+        pool.maintain(linkedSetOf("047040"), emptyList(), subscribeAllowed = true)
 
         assertTrue(pool.degradedSymbols().isEmpty())
     }
@@ -388,7 +1141,7 @@ class SessionPoolTest {
     fun `용량을 넘는 종목은 강등 목록에 남는다`() {
         val pool = pool(accounts = 1, maxPerSession = 2)
 
-        pool.maintain(linkedSetOf("000001", "000002", "000003"), subscribeAllowed = true)
+        pool.maintain(linkedSetOf("000001", "000002", "000003"), emptyList(), subscribeAllowed = true)
 
         server.awaitMessages(2)
         assertEquals(2, subscribesOf(server.receivedMessages).size)
@@ -399,7 +1152,7 @@ class SessionPoolTest {
     fun `종목은 빈 슬롯이 많은 세션부터 배정된다`() {
         val pool = pool(accounts = 2, maxPerSession = 2)
 
-        pool.maintain(linkedSetOf("000001", "000002", "000003"), subscribeAllowed = true)
+        pool.maintain(linkedSetOf("000001", "000002", "000003"), emptyList(), subscribeAllowed = true)
 
         server.awaitConnections(2)
         server.awaitMessages(3)
@@ -411,7 +1164,7 @@ class SessionPoolTest {
     fun `구독 허용 전에는 연결만 하고 구독하지 않는다`() {
         val pool = pool()
 
-        pool.maintain(setOf("005930"), subscribeAllowed = false)
+        pool.maintain(setOf("005930"), emptyList(), subscribeAllowed = false)
 
         server.awaitConnections(1)
         Thread.sleep(200)
@@ -421,14 +1174,14 @@ class SessionPoolTest {
     @Test
     fun `절단되면 백오프 후 재접속해 배정분을 재구독한다`() {
         val pool = pool()
-        pool.maintain(setOf("005930"), subscribeAllowed = true)
+        pool.maintain(setOf("005930"), emptyList(), subscribeAllowed = true)
         server.awaitMessages(1)
 
         server.closeAllConnections()
 
         await().atMost(Duration.ofSeconds(10)).until {
             now += 200
-            pool.maintain(setOf("005930"), subscribeAllowed = true)
+            pool.maintain(setOf("005930"), emptyList(), subscribeAllowed = true)
             subscribesOf(server.receivedMessages).size >= 2
         }
     }
@@ -436,14 +1189,14 @@ class SessionPoolTest {
     @Test
     fun `전송 계층 오류로만 끊겨도 재접속해 재구독한다`() {
         val pool = pool()
-        pool.maintain(setOf("005930"), subscribeAllowed = true)
+        pool.maintain(setOf("005930"), emptyList(), subscribeAllowed = true)
         server.awaitMessages(1)
 
         server.abortAllConnections()
 
         await().atMost(Duration.ofSeconds(10)).until {
             now += 200
-            pool.maintain(setOf("005930"), subscribeAllowed = true)
+            pool.maintain(setOf("005930"), emptyList(), subscribeAllowed = true)
             subscribesOf(server.receivedMessages).size >= 2
         }
     }
@@ -451,14 +1204,14 @@ class SessionPoolTest {
     @Test
     fun `구독이 거절되면 다음 리컨실에서 재등록한다`() {
         val pool = pool()
-        pool.maintain(setOf("000001"), subscribeAllowed = true)
+        pool.maintain(setOf("000001"), emptyList(), subscribeAllowed = true)
         server.awaitMessages(1)
         assertEquals(1, subscribesOf(server.receivedMessages).size)
 
         server.broadcastText(ackFrame("000001", success = false))
 
         await().atMost(Duration.ofSeconds(10)).until {
-            pool.maintain(setOf("000001"), subscribeAllowed = true)
+            pool.maintain(setOf("000001"), emptyList(), subscribeAllowed = true)
             subscribesOf(server.receivedMessages).size >= 2
         }
     }
@@ -466,26 +1219,274 @@ class SessionPoolTest {
     @Test
     fun `구독이 확정되면 ACK 유효기간이 지나도 재등록하지 않는다`() {
         val pool = pool(ackTimeoutMillis = 100)
-        pool.maintain(setOf("000001"), subscribeAllowed = true)
+        pool.maintain(setOf("000001"), emptyList(), subscribeAllowed = true)
         server.awaitMessages(1)
 
         server.broadcastText(ackFrame("000001", success = true))
         Thread.sleep(300)
         now += 500
-        repeat(3) { pool.maintain(setOf("000001"), subscribeAllowed = true) }
+        repeat(3) { pool.maintain(setOf("000001"), emptyList(), subscribeAllowed = true) }
 
         Thread.sleep(200)
         assertEquals(1, subscribesOf(server.receivedMessages).size)
     }
 
+    private fun unsubscribeAckFrame(code: String, success: Boolean, trId: String = "H0STCNT0"): String {
+        val rtCd = if (success) "0" else "1"
+        val message = if (success) "UNSUBSCRIBE SUCCESS" else "UNSUBSCRIBE ERROR"
+        return """{"header":{"tr_id":"$trId","tr_key":"$code","encrypt":"N"},""" +
+            """"body":{"rt_cd":"$rtCd","msg_cd":"OPSP0002","msg1":"$message"}}"""
+    }
+
+    @Test
+    fun `해지가 거절되면 다음 정비에서 다시 보낸다`() {
+        val pool = pool(graceMillis = 1_000)
+        pool.maintain(setOf("000001"), emptyList(), subscribeAllowed = true)
+        server.awaitMessages(1)
+        server.broadcastText(ackFrame("000001", success = true))
+
+        pool.maintain(emptySet(), emptyList(), subscribeAllowed = true)
+        now += 1_500
+        pool.maintain(emptySet(), emptyList(), subscribeAllowed = true)
+        server.awaitMessages(2)
+        assertEquals(1, unsubscribesOf(server.receivedMessages).size)
+
+        server.broadcastText(unsubscribeAckFrame("000001", success = false))
+        await().atMost(Duration.ofSeconds(5)).until {
+            pool.maintain(emptySet(), emptyList(), subscribeAllowed = true)
+            unsubscribesOf(server.receivedMessages).size >= 2
+        }
+    }
+
+    @Test
+    fun `해지 성공 ACK를 받으면 재시도를 멈춘다`() {
+        val pool = pool(ackTimeoutMillis = 100, graceMillis = 1_000)
+        pool.maintain(setOf("000001"), emptyList(), subscribeAllowed = true)
+        server.awaitMessages(1)
+        server.broadcastText(ackFrame("000001", success = true))
+
+        pool.maintain(emptySet(), emptyList(), subscribeAllowed = true)
+        now += 1_500
+        pool.maintain(emptySet(), emptyList(), subscribeAllowed = true)
+        server.awaitMessages(2)
+        server.broadcastText(unsubscribeAckFrame("000001", success = true))
+        Thread.sleep(200)
+
+        now += 1_000
+        repeat(3) { pool.maintain(emptySet(), emptyList(), subscribeAllowed = true) }
+
+        Thread.sleep(200)
+        assertEquals(1, unsubscribesOf(server.receivedMessages).size)
+    }
+
+    @Test
+    fun `해지 대기 중인 등록은 성공 ACK 전까지 등록 게이지에 남는다`() {
+        val meters = SimpleMeterRegistry()
+        val pool = pool(maxPerSession = 3, trIds = listOf("H0UNCNT0"), graceMillis = 1_000, meters = meters)
+        pool.maintain(linkedSetOf("005930"), listOf("005930"), subscribeAllowed = true)
+        server.awaitMessages(2)
+        server.broadcastText(ackFrame("005930", success = true, trId = "H0UNASP0"))
+        await().atMost(Duration.ofSeconds(5)).until {
+            meters.find("depth.symbols").gauge()?.value() == 1.0
+        }
+
+        pool.maintain(linkedSetOf("005930"), emptyList(), subscribeAllowed = true)
+        now += 1_500
+        pool.maintain(linkedSetOf("005930"), emptyList(), subscribeAllowed = true)
+        server.awaitMessages(3)
+
+        assertEquals(1.0, meters.find("depth.symbols").gauge()?.value())
+
+        server.broadcastText(unsubscribeAckFrame("005930", success = true, trId = "H0UNASP0"))
+
+        await().atMost(Duration.ofSeconds(5)).until {
+            meters.find("depth.symbols").gauge()?.value() == 0.0
+        }
+    }
+
+    @Test
+    fun `해지 ACK가 없으면 유효기간 뒤 재시도하고 한도를 넘으면 포기한다`() {
+        val meters = SimpleMeterRegistry()
+        val pool = pool(ackTimeoutMillis = 100, graceMillis = 1_000, meters = meters)
+        pool.maintain(setOf("000001"), emptyList(), subscribeAllowed = true)
+        server.awaitMessages(1)
+        server.broadcastText(ackFrame("000001", success = true))
+
+        pool.maintain(emptySet(), emptyList(), subscribeAllowed = true)
+        now += 1_500
+        repeat(5) {
+            now += 500
+            pool.maintain(emptySet(), emptyList(), subscribeAllowed = true)
+        }
+
+        server.awaitMessages(4)
+        Thread.sleep(200)
+        assertEquals(3, unsubscribesOf(server.receivedMessages).size)
+        assertEquals(1.0, meters.counter("kis.unsubscribe.abandoned").count())
+    }
+
+    private fun awaitDepthCooldown(
+        pool: SessionPool,
+        code: String,
+        target: Set<String>,
+        rooms: List<String>,
+        meters: SimpleMeterRegistry,
+        count: Double = 1.0,
+    ) {
+        await().atMost(Duration.ofSeconds(10)).until {
+            server.broadcastText(ackFrame(code, success = false, trId = "H0UNASP0"))
+            now += 500
+            pool.maintain(target, rooms, subscribeAllowed = true)
+            meters.counter("depth.subscribe.cooldown").count() >= count
+        }
+    }
+
+    private fun abandonUnsubscribe(pool: SessionPool, code: String, remaining: Set<String>) {
+        pool.maintain(remaining, emptyList(), subscribeAllowed = true)
+        now += 1_500
+        repeat(5) {
+            now += 500
+            pool.maintain(remaining, emptyList(), subscribeAllowed = true)
+        }
+    }
+
+    @Test
+    fun `해지를 포기하면 세션을 재접속해 등록을 회수한다`() {
+        val meters = SimpleMeterRegistry()
+        val pool = pool(maxPerSession = 2, ackTimeoutMillis = 100, graceMillis = 1_000, meters = meters)
+        pool.maintain(linkedSetOf("000001", "000002"), emptyList(), subscribeAllowed = true)
+        server.awaitMessages(2)
+        server.broadcastText(ackFrame("000001", success = true))
+        server.broadcastText(ackFrame("000002", success = true))
+        awaitConfirmed(meters, 2)
+
+        abandonUnsubscribe(pool, "000001", setOf("000002"))
+
+        await().atMost(Duration.ofSeconds(5)).until {
+            meters.counter("kis.unsubscribe.abandoned").count() == 1.0
+        }
+        now += 500
+        pool.maintain(setOf("000002"), emptyList(), subscribeAllowed = true)
+
+        assertEquals(setOf("000002"), pool.degradedSymbols())
+
+        await().atMost(Duration.ofSeconds(10)).until {
+            now += 500
+            pool.maintain(setOf("000002"), emptyList(), subscribeAllowed = true)
+            trKeysOf(server.receivedMessages, "H0STCNT0").count { it == "000002" } >= 2
+        }
+    }
+
+    @Test
+    fun `UNSUB로 시작하지 않는 거절 응답도 해지 대기 상태로 알아본다`() {
+        val pool = pool(ackTimeoutMillis = 10_000, graceMillis = 1_000)
+        pool.maintain(setOf("000001"), emptyList(), subscribeAllowed = true)
+        server.awaitMessages(1)
+        server.broadcastText(ackFrame("000001", success = true))
+
+        pool.maintain(emptySet(), emptyList(), subscribeAllowed = true)
+        now += 1_500
+        pool.maintain(emptySet(), emptyList(), subscribeAllowed = true)
+        server.awaitMessages(2)
+
+        server.broadcastText(ackFrame("000001", success = false))
+
+        await().atMost(Duration.ofSeconds(5)).until {
+            pool.maintain(emptySet(), emptyList(), subscribeAllowed = true)
+            unsubscribesOf(server.receivedMessages).size >= 2
+        }
+    }
+
+    @Test
+    fun `해지 포기가 여러 등록에서 겹쳐도 재접속과 메트릭은 한 번이다`() {
+        val meters = SimpleMeterRegistry()
+        val pool = pool(
+            maxPerSession = 4,
+            trIds = listOf("H0UNCNT0", "H0STOUP0"),
+            ackTimeoutMillis = 100,
+            graceMillis = 1_000,
+            meters = meters,
+        )
+        pool.maintain(setOf("000001"), emptyList(), subscribeAllowed = true)
+        server.awaitMessages(2)
+
+        abandonUnsubscribe(pool, "000001", emptySet())
+
+        await().atMost(Duration.ofSeconds(5)).until {
+            meters.counter("kis.unsubscribe.abandoned").count() >= 1.0
+        }
+        assertEquals(1.0, meters.counter("kis.unsubscribe.abandoned").count())
+    }
+
+    @Test
+    fun `등록이 확정되지 않아도 침묵 감시가 시작되어 REST 폴백이 받는다`() {
+        val pool = pool(silenceMillis = 1_000)
+
+        pool.maintain(setOf("000001"), emptyList(), subscribeAllowed = true)
+        server.awaitMessages(1)
+        now += 2_000
+        pool.maintain(setOf("000001"), emptyList(), subscribeAllowed = true)
+
+        assertEquals(setOf("000001"), pool.degradedSymbols())
+    }
+
+    @Test
+    fun `해지 대기 중 수요가 돌아오면 재등록한다`() {
+        val pool = pool(graceMillis = 1_000)
+        pool.maintain(setOf("000001"), emptyList(), subscribeAllowed = true)
+        server.awaitMessages(1)
+        server.broadcastText(ackFrame("000001", success = true))
+
+        pool.maintain(emptySet(), emptyList(), subscribeAllowed = true)
+        now += 1_500
+        pool.maintain(emptySet(), emptyList(), subscribeAllowed = true)
+        server.awaitMessages(2)
+
+        pool.maintain(setOf("000001"), emptyList(), subscribeAllowed = true)
+
+        server.awaitMessages(3)
+        assertEquals(2, subscribesOf(server.receivedMessages).size)
+    }
+
+    @Test
+    fun `ACK 없이 수요가 사라져도 등록 추적이 남아 해지를 보낸다`() {
+        val pool = pool(ackTimeoutMillis = 100, graceMillis = 1_000)
+        pool.maintain(setOf("000001"), emptyList(), subscribeAllowed = true)
+        server.awaitMessages(1)
+
+        pool.maintain(emptySet(), emptyList(), subscribeAllowed = true)
+        now += 1_500
+        pool.maintain(emptySet(), emptyList(), subscribeAllowed = true)
+
+        server.awaitMessages(2)
+        val unsubscribed = unsubscribesOf(server.receivedMessages)
+        assertEquals(1, unsubscribed.size)
+        assertEquals("000001", unsubscribed[0].path("body").path("input").path("tr_key").asText())
+    }
+
+    @Test
+    fun `ACK 유효기간이 지나 재등록한 뒤 늦게 온 ACK도 확정으로 흡수한다`() {
+        val meters = SimpleMeterRegistry()
+        val pool = pool(ackTimeoutMillis = 100, meters = meters)
+        pool.maintain(setOf("000001"), emptyList(), subscribeAllowed = true)
+        server.awaitMessages(1)
+        now += 500
+        pool.maintain(setOf("000001"), emptyList(), subscribeAllowed = true)
+        server.awaitMessages(2)
+
+        server.broadcastText(ackFrame("000001", success = true))
+
+        awaitConfirmed(meters, 1)
+    }
+
     @Test
     fun `응답이 없으면 ACK 유효기간 뒤에 재등록한다`() {
         val pool = pool(ackTimeoutMillis = 100)
-        pool.maintain(setOf("000001"), subscribeAllowed = true)
+        pool.maintain(setOf("000001"), emptyList(), subscribeAllowed = true)
         server.awaitMessages(1)
 
         now += 500
-        pool.maintain(setOf("000001"), subscribeAllowed = true)
+        pool.maintain(setOf("000001"), emptyList(), subscribeAllowed = true)
 
         server.awaitMessages(2)
         assertEquals(2, subscribesOf(server.receivedMessages).size)
@@ -494,15 +1495,15 @@ class SessionPoolTest {
     @Test
     fun `해지는 유예가 지난 뒤에만 전송된다`() {
         val pool = pool(graceMillis = 1_000)
-        pool.maintain(linkedSetOf("000001", "000002"), subscribeAllowed = true)
+        pool.maintain(linkedSetOf("000001", "000002"), emptyList(), subscribeAllowed = true)
         server.awaitMessages(2)
 
-        pool.maintain(setOf("000001"), subscribeAllowed = true)
+        pool.maintain(setOf("000001"), emptyList(), subscribeAllowed = true)
         Thread.sleep(200)
         assertTrue(unsubscribesOf(server.receivedMessages).isEmpty())
 
         now += 1_500
-        pool.maintain(setOf("000001"), subscribeAllowed = true)
+        pool.maintain(setOf("000001"), emptyList(), subscribeAllowed = true)
 
         server.awaitMessages(3)
         val unsubscribed = unsubscribesOf(server.receivedMessages)
@@ -513,13 +1514,13 @@ class SessionPoolTest {
     @Test
     fun `유예 중 재수요가 오면 해지가 취소된다`() {
         val pool = pool(graceMillis = 1_000)
-        pool.maintain(linkedSetOf("000001", "000002"), subscribeAllowed = true)
+        pool.maintain(linkedSetOf("000001", "000002"), emptyList(), subscribeAllowed = true)
         server.awaitMessages(2)
 
-        pool.maintain(setOf("000001"), subscribeAllowed = true)
-        pool.maintain(linkedSetOf("000001", "000002"), subscribeAllowed = true)
+        pool.maintain(setOf("000001"), emptyList(), subscribeAllowed = true)
+        pool.maintain(linkedSetOf("000001", "000002"), emptyList(), subscribeAllowed = true)
         now += 2_000
-        pool.maintain(linkedSetOf("000001", "000002"), subscribeAllowed = true)
+        pool.maintain(linkedSetOf("000001", "000002"), emptyList(), subscribeAllowed = true)
 
         Thread.sleep(200)
         assertTrue(unsubscribesOf(server.receivedMessages).isEmpty())
@@ -528,7 +1529,7 @@ class SessionPoolTest {
     @Test
     fun `disconnectAll은 해지 후 연결을 닫는다`() {
         val pool = pool()
-        pool.maintain(setOf("005930"), subscribeAllowed = true)
+        pool.maintain(setOf("005930"), emptyList(), subscribeAllowed = true)
         server.awaitMessages(1)
 
         pool.disconnectAll()
@@ -542,7 +1543,7 @@ class SessionPoolTest {
     fun `TR이 여러 개면 심볼당 TR별로 모두 등록한다`() {
         val pool = pool(maxPerSession = 4, trIds = listOf("H0UNCNT0", "H0STOUP0"))
 
-        pool.maintain(setOf("005930"), subscribeAllowed = true)
+        pool.maintain(setOf("005930"), emptyList(), subscribeAllowed = true)
 
         server.awaitMessages(2)
         val subscribes = subscribesOf(server.receivedMessages)
@@ -559,7 +1560,7 @@ class SessionPoolTest {
     fun `심볼 용량은 등록 한도를 TR 수로 나눠 계산한다`() {
         val pool = pool(maxPerSession = 4, trIds = listOf("H0UNCNT0", "H0STOUP0"))
 
-        pool.maintain(linkedSetOf("000001", "000002", "000003"), subscribeAllowed = true)
+        pool.maintain(linkedSetOf("000001", "000002", "000003"), emptyList(), subscribeAllowed = true)
 
         server.awaitMessages(4)
         assertEquals(4, subscribesOf(server.receivedMessages).size)
@@ -569,12 +1570,12 @@ class SessionPoolTest {
     @Test
     fun `해지 시 심볼의 모든 TR을 해제한다`() {
         val pool = pool(maxPerSession = 4, graceMillis = 1_000, trIds = listOf("H0UNCNT0", "H0STOUP0"))
-        pool.maintain(linkedSetOf("000001", "000002"), subscribeAllowed = true)
+        pool.maintain(linkedSetOf("000001", "000002"), emptyList(), subscribeAllowed = true)
         server.awaitMessages(4)
 
-        pool.maintain(setOf("000001"), subscribeAllowed = true)
+        pool.maintain(setOf("000001"), emptyList(), subscribeAllowed = true)
         now += 1_500
-        pool.maintain(setOf("000001"), subscribeAllowed = true)
+        pool.maintain(setOf("000001"), emptyList(), subscribeAllowed = true)
 
         server.awaitMessages(6)
         val unsubscribed = unsubscribesOf(server.receivedMessages)
@@ -590,13 +1591,13 @@ class SessionPoolTest {
     @Test
     fun `ACK는 TR 단위로 확정되고 응답 없는 TR만 재등록한다`() {
         val pool = pool(maxPerSession = 4, ackTimeoutMillis = 100, trIds = listOf("H0UNCNT0", "H0STOUP0"))
-        pool.maintain(setOf("000001"), subscribeAllowed = true)
+        pool.maintain(setOf("000001"), emptyList(), subscribeAllowed = true)
         server.awaitMessages(2)
 
         server.broadcastText(ackFrame("000001", success = true, trId = "H0UNCNT0"))
         Thread.sleep(300)
         now += 500
-        pool.maintain(setOf("000001"), subscribeAllowed = true)
+        pool.maintain(setOf("000001"), emptyList(), subscribeAllowed = true)
 
         server.awaitMessages(3)
         Thread.sleep(200)

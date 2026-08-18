@@ -103,7 +103,13 @@ class KisWebSocketSession(
                     listener.onPingPong()
                 }
                 is KisFrame.Ticks -> listener.onTicks(frame.trId, frame.ticks)
-                is KisFrame.Control -> listener.onSubscribeAck(frame.trId, frame.trKey, frame.success)
+                is KisFrame.Depths -> listener.onDepths(frame.trId, frame.depths)
+                is KisFrame.Control ->
+                    if (frame.unsubscribe) {
+                        listener.onUnsubscribeAck(frame.trId, frame.trKey, frame.success)
+                    } else {
+                        listener.onSubscribeAck(frame.trId, frame.trKey, frame.success)
+                    }
                 is KisFrame.EncryptedDropped -> listener.onEncryptedDropped(frame.trId)
                 is KisFrame.Unknown -> Unit
             }
