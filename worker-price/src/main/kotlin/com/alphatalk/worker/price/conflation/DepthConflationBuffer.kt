@@ -3,8 +3,12 @@ package com.alphatalk.worker.price.conflation
 import com.alphatalk.contracts.envelope.DepthData
 import com.alphatalk.kis.ws.KisDepth
 import com.alphatalk.kis.ws.KisDepthLevel
+import com.alphatalk.worker.price.config.ConditionalOnKisAccounts
+import org.springframework.stereotype.Component
 import java.util.concurrent.ConcurrentHashMap
 
+@Component
+@ConditionalOnKisAccounts
 class DepthConflationBuffer {
     private val latest = ConcurrentHashMap<String, KisDepth>()
     private val dirty = ConcurrentHashMap.newKeySet<String>()

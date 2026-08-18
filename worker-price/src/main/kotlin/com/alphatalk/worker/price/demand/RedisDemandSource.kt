@@ -2,7 +2,10 @@ package com.alphatalk.worker.price.demand
 
 import com.alphatalk.contracts.Channels
 import com.alphatalk.contracts.Keys
+import com.alphatalk.worker.price.config.ConditionalOnKisAccounts
+import com.alphatalk.worker.price.config.PriceProperties
 import org.slf4j.LoggerFactory
+import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.context.SmartLifecycle
 import org.springframework.data.redis.connection.RedisConnectionFactory
 import org.springframework.data.redis.core.StringRedisTemplate
@@ -10,16 +13,23 @@ import org.springframework.data.redis.core.script.DefaultRedisScript
 import org.springframework.data.redis.listener.ChannelTopic
 import org.springframework.data.redis.listener.RedisMessageListenerContainer
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor
+import org.springframework.stereotype.Component
 import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
 
+@Component
+@ConditionalOnKisAccounts
 class RedisDemandSource(
     private val redis: StringRedisTemplate,
     private val connectionFactory: RedisConnectionFactory,
     private val reconcileIntervalMs: Long = 10_000,
 ) : DemandSource, SmartLifecycle {
+    @Autowired
+    constructor(redis: StringRedisTemplate, connectionFactory: RedisConnectionFactory, props: PriceProperties) :
+        this(redis, connectionFactory, props.demandReconcileMs)
+
     private val log = LoggerFactory.getLogger(javaClass)
     private val running = AtomicBoolean(false)
     private val refreshSignal = Semaphore(0)

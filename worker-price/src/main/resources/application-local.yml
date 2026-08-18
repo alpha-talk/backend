@@ -7,9 +7,7 @@ spring:
 alphatalk:
   price:
     market-hours-enforced: true    # 장 운영 창(07:50~20:00, §2.7) 준수 — 창 밖 심야 스모크만 false로 완화
-    candle-enabled: true           # 일봉 수집 활성 — 기본 프로파일은 fail-closed(off)
-    candle-sync-on-startup: true   # 로컬 기동 시 일봉 백필 1회 — stock_master 활성 종목 전체 대상, 종목당 1콜
-    minute-candle-enabled: true    # 분봉 신선화 내부 API 활성 — core-api 분봉 조회가 트리거
+    candle-sync-on-startup: true   # 로컬 기동 시 일봉 백필 1회 — stock_master 활성 종목 전체 대상, 종목당 1콜. 실시간·일봉·분봉 수집 자체는 secrets.yml의 KIS_ACCOUNTS 설정 여부가 스위치
 
 management:
   endpoints:
