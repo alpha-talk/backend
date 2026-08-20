@@ -4,8 +4,8 @@ import com.alphatalk.contracts.queue.IngestQueueEntry
 import com.alphatalk.contracts.queue.IngestType
 import com.alphatalk.worker.ingest.config.IngestConfig
 import com.alphatalk.worker.ingest.config.IngestProperties
-import com.alphatalk.worker.ingest.dedup.SeenMarker
 import com.alphatalk.worker.ingest.normalize.ArticleNormalizer
+import com.alphatalk.worker.ingest.queue.EnqueueResult
 import com.alphatalk.worker.ingest.queue.IngestQueue
 import com.alphatalk.worker.ingest.source.FetchedArticle
 import com.alphatalk.worker.ingest.source.NewsSource
@@ -18,7 +18,6 @@ import java.util.concurrent.Executor
 @Service
 class IngestPoller(
     private val sources: List<NewsSource>,
-    private val seen: SeenMarker,
     private val queue: IngestQueue,
     private val props: IngestProperties,
     @Qualifier(IngestConfig.FETCH_EXECUTOR_BEAN)
@@ -51,10 +50,6 @@ class IngestPoller(
         val codes = article.codes.distinct().sorted()
         val url = ArticleNormalizer.normalizeUrl(article.url)
         val sourceId = ArticleNormalizer.sourceId(sourceName, article.sourceId, url)
-        if (!seen.markIfNew(sourceId)) {
-            stats.duplicateSkipped++
-            return
-        }
         val entry = IngestQueueEntry(
             source = sourceName,
             sourceId = sourceId,
@@ -65,11 +60,15 @@ class IngestPoller(
             body = article.excerpt?.take(props.excerptMaxLength),
             fetchedAt = article.publishedAt ?: clock(),
         )
-        runCatching { queue.enqueue(entry) }
-            .onSuccess { stats.enqueued++ }
+        runCatching { queue.enqueueIfNew(entry) }
+            .onSuccess { result ->
+                when (result) {
+                    EnqueueResult.ENQUEUED -> stats.enqueued++
+                    EnqueueResult.ALREADY_ENQUEUED -> stats.duplicateSkipped++
+                }
+            }
             .onFailure {
                 log.warn("enqueue failed: sourceId={}", sourceId, it)
-                seen.clear(sourceId)
                 stats.enqueueErrors++
             }
     }
