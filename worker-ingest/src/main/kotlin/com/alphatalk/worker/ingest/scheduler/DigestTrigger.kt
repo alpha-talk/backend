@@ -16,16 +16,20 @@ import org.springframework.scheduling.annotation.Scheduled
 import org.springframework.stereotype.Component
 import java.time.Clock
 import java.time.LocalDate
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executor
 
 @Component
 @ConditionalOnProperty("alphatalk.ingest.digest.enabled", havingValue = "true", matchIfMissing = true)
 class DigestTrigger(
     private val queue: IngestQueue,
+    private val universe: DigestUniverse,
     private val props: IngestProperties,
     private val meters: MeterRegistry,
     @param:Qualifier(IngestConfig.CATCH_UP_EXECUTOR_BEAN)
     catchUpExecutor: Executor,
+    @param:Qualifier(IngestConfig.DIGEST_ENQUEUE_EXECUTOR_BEAN)
+    private val enqueueExecutor: Executor,
     private val clock: Clock = Clock.systemUTC(),
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
@@ -68,29 +72,41 @@ class DigestTrigger(
     fun triggerFor(date: LocalDate): Int = triggerForResult(date).enqueued
 
     private fun triggerForResult(date: LocalDate): DigestTriggerResult {
-        var enqueued = 0
-        var skipped = 0
-        var errors = 0
-        props.stocks.forEach { stock ->
-            val sourceId = IngestQueueEntry.digestSourceId(stock.code, date.toString())
-            runCatching { queue.enqueueIfNew(entryOf(stock.code, sourceId)) }
-                .onSuccess { result ->
-                    when (result) {
-                        EnqueueResult.ENQUEUED -> enqueued++
-                        EnqueueResult.ALREADY_ENQUEUED -> skipped++
-                    }
-                }
-                .onFailure {
-                    errors++
-                    log.warn("digest job enqueue failed: code={}", stock.code, it)
-                }
+        val codes = runCatching { universe.codes() }.getOrElse {
+            log.warn("digest universe lookup failed - retried on next reconcile: date={}", date, it)
+            return DigestTriggerResult(enqueued = 0, skipped = 0, errors = 1)
         }
+        val outcomes = codes
+            .map { code -> CompletableFuture.supplyAsync({ enqueueOne(code, date) }, enqueueExecutor) }
+            .map { it.join() }
+        val result = DigestTriggerResult(
+            enqueued = outcomes.count { it == EnqueueOutcome.ENQUEUED },
+            skipped = outcomes.count { it == EnqueueOutcome.SKIPPED },
+            errors = outcomes.count { it == EnqueueOutcome.FAILED },
+        )
         log.info(
             "digest jobs enqueued: {}/{} skipped={} errors={} date={}",
-            enqueued, props.stocks.size, skipped, errors, date,
+            result.enqueued, codes.size, result.skipped, result.errors, date,
         )
-        return DigestTriggerResult(enqueued, skipped, errors)
+        return result
     }
+
+    private fun enqueueOne(code: String, date: LocalDate): EnqueueOutcome {
+        val sourceId = IngestQueueEntry.digestSourceId(code, date.toString())
+        return runCatching { queue.enqueueIfNew(entryOf(code, sourceId)) }
+            .map { result ->
+                when (result) {
+                    EnqueueResult.ENQUEUED -> EnqueueOutcome.ENQUEUED
+                    EnqueueResult.ALREADY_ENQUEUED -> EnqueueOutcome.SKIPPED
+                }
+            }
+            .getOrElse {
+                log.warn("digest job enqueue failed: code={}", code, it)
+                EnqueueOutcome.FAILED
+            }
+    }
+
+    private enum class EnqueueOutcome { ENQUEUED, SKIPPED, FAILED }
 
     private fun record(result: DigestTriggerResult) {
         meters.counter("ingest.digest.enqueued").increment(result.enqueued.toDouble())
