@@ -86,9 +86,9 @@ worker-ingest는 외부 소스를 큐 엔트리로 바꾸는 일만 한다. 관�
 - **크롤링 준법**: robots.txt 준수, 식별 가능한 User-Agent, 사이트별 요청 간격 제한. robots.txt와 본문 요청은 `rate:article-fetch:{host}` TTL 게이트로 모든 llm-worker 인스턴스가 기본 1초 간격을 공유한다. 본문 페이지 fetch는 worker-llm이 신규 클러스터를 요약하기 직전에만 한다(수집 단계 대량 fetch 금지).
 - **폴링 병렬화**: 소스별 fetch·처리는 고정 크기 스레드 풀(`fetch-concurrency`, 기본 4)에서 소스 단위 태스크로 병렬 실행한다. 느리거나 죽은 소스(타임아웃 최대 ~15s) 하나가 전체 폴링 주기를 끌지 않게 하려는 것이다. 같은 소스 안의 기사 처리는 순차라 사이트별 요청 예절은 그대로 지켜지고, 통계는 소스별로 모은 뒤 합산한다(공유 가변 상태 없음).
 
-### 2.2 시드 종목 목록
+### 2.2 다이제스트 대상 종목
 
-MVP 시드 종목 목록은 **설정 파일**이 소유한다(worker-price의 41종목과 같은 세트). 이 목록은 일일 다이제스트 잡 적재 대상(§4.1)에만 쓴다 — RSS는 종목과 무관하게 전체를 수집하므로 목록의 영향을 받지 않는다. 확장 후보는 `watchlist` distinct 코드 합집합 ∪ 거래대금 상위 N(`daily_candle`)이며, 워커가 core-api 테이블을 읽는 것은 core-api가 워커 테이블을 읽는 것과 대칭이라 허용한다.
+일일 다이제스트 잡 적재 대상(§4.1)은 **`watchlist` 테이블의 distinct 종목 코드 합집합**이다 — 한 명 이상의 사용자가 구독 중인 종목만 브리핑을 만든다. RSS는 종목과 무관하게 전체를 수집하므로 이 목록의 영향을 받지 않는다. 워커가 core-api 테이블을 읽는 것은 core-api가 워커 테이블을 읽는 것과 대칭이라 허용하며, ingest는 `@Immutable` 읽기 전용 매핑으로만 접근한다(쓰기 소유는 core-api). 설정 파일 시드 목록은 이 방식으로 대체되어 제거했다 — 폴백을 두지 않는 이유는, 조회 실패 시 낡은 목록으로 적재하면 멱등 마커(`digest:{code}:{date}`) 때문에 그날 해당 종목 구성이 고정되어 버리기 때문이다. 조회 실패는 트리거 미완료로 남겨 재조정(§4.1 catch-up)이 1분 주기로 다시 시도한다. 거래대금 상위 N(`daily_candle`) 합류는 후속 확장으로 남긴다(§10-4).
 
 ### 2.3 정규화 · exact 중복 제거
 
@@ -189,7 +189,7 @@ worker-llm은 큐 엔트리를 방에 뜨는 이벤트로 바꾼다. 인스턴�
 - confidence < 0.6이면 sentiment를 NEUTRAL로 강등한다 — 애매한 건을 호재/악재로 단정하지 않는다.
 - 운영 `anthropic` provider의 기본 모델은 클러스터 요약 **claude-haiku-4-5**(건수 많음·단순), 일일 다이제스트 **claude-sonnet-5**(하루 종목당 1회·종합 판단)다. `LlmClient` 포트 뒤라 교체는 자유롭다.
 - 로컬은 `claude-cli`(기본) 또는 `codex-cli` provider로 로그인된 개인 구독을 쓰며 **단일 worker-llm 인스턴스 운용만 지원**한다. 대량 기사 처리 비용을 억제하기 위해 `claude-cli`는 기본적으로 `haiku` 별칭을 명시하며 `CLAUDE_CLI_MODEL`로 바꿀 수 있다. 두 CLI 모두 단발성 비대화형 실행·JSON Schema 강제·세션 비영속·2분 타임아웃이고, 자식 프로세스에서 API 키 환경변수를 제거해 구독 인증과 API 과금이 섞이지 않게 한다. Claude는 도구를 전부 끄고 safe mode로, Codex는 빈 임시 작업공간과 read-only sandbox에서 실행한다. local 프로파일은 `consumer-batch=1`로 한 번에 PEL에 한 건만 선점하고, 기동 시 CLI timeout이 `claim-idle`보다 짧은지 검증한다. worker-llm ×N 운용은 운영 `anthropic` provider에만 적용한다.
-- 비용 추정: 시드 41종목 기준 일 ~500기사 → ~150클러스터 × ~2K tokens(Haiku) + 41다이제스트 × ~3K tokens(Sonnet) — 월 수 달러 수준.
+- 비용 추정: watchlist 41종목 규모 기준 일 ~500기사 → ~150클러스터 × ~2K tokens(Haiku) + 41다이제스트 × ~3K tokens(Sonnet) — 월 수 달러 수준. 다이제스트 수는 watchlist distinct 종목 수(§2.2)에 선형 비례하므로 구독 종목이 늘면 함께 재추정한다.
 - 워커 내 재시도는 백오프 1회까지다. 그 이상은 PEL 재처리에 맡긴다(이중 재시도 루프 금지).
 
 ### 3.5 발행 정책
@@ -273,7 +273,7 @@ stream payload (ws_api_spec §4.3 확장 — ⚠️ §6 증보):
 
 다이제스트도 뉴스와 같은 큐를 탄다. 그래야 PEL·ACK·멱등 같은 신뢰성 장치를 새로 만들지 않고 그대로 쓴다(§0 결정 4).
 
-- **ingest 스케줄러**가 매일 **18:00 KST**(장 마감 후)에 **시드 종목 전체**를 대상으로 `XADD queue:ingest type=digest codes={code} sourceId=digest:{code}:{yyyy-MM-dd}`를 실행한다. ingest는 DB를 보지 않아 어떤 종목에 클러스터가 쌓였는지 모르므로 잡을 전 종목에 적재하고, 윈도 `[전일 18:00, 당일 18:00)`에 소식(STOCK·SECTOR)이 없는 종목 잡은 llm-worker가 브리핑 없이 ACK한다(시장 이슈만으로는 브리핑을 만들지 않는다).
+- **ingest 스케줄러**가 매일 **18:00 KST**(장 마감 후)에 **watchlist distinct 종목 전체(§2.2)**를 대상으로 `XADD queue:ingest type=digest codes={code} sourceId=digest:{code}:{yyyy-MM-dd}`를 실행한다. 종목 조회가 실패하면 그 트리거는 미완료로 남아 아래 catch-up 재조정이 다시 시도한다. ingest는 클러스터 적재 상태를 보지 않아 어떤 종목에 클러스터가 쌓였는지 모르므로 잡을 대상 종목 전체에 적재하고, 윈도 `[전일 18:00, 당일 18:00)`에 소식(STOCK·SECTOR)이 없는 종목 잡은 llm-worker가 브리핑 없이 ACK한다(시장 이슈만으로는 브리핑을 만들지 않는다).
 - llm-worker가 같은 그룹(`g:llm`)으로 경쟁 소비한다 — 스케줄은 싱글턴(ingest), 실행은 ×N(llm)으로 갈라져 리더 선출이 필요 없다.
 - **기동 시 보충(catch-up)**: 크론은 예정 시각에 프로세스가 떠 있어야만 돈다. 배포·장애·개발 머신 종료로 18:00에 워커가 죽어 있으면 그날 브리핑이 통째로 빠지므로, ingest는 기동 직후(`ApplicationReadyEvent`) **이미 지나간 가장 최근 예정 실행**을 찾아 그 날짜 잡이 아직 적재되지 않았으면 그 자리에서 적재한다. 오전에 떠도 전일 18:00 실행이 보충 대상이 된다. 보충은 **한 건(가장 최근에 놓친 실행)**뿐이다 — 며칠 죽어 있었어도 밀린 날짜를 줄줄이 소급하지 않는다(지난 브리핑을 한꺼번에 스트림에 밀어 넣지 않기 위해서다). 늦게 실행돼도 내용은 맞는다: llm-worker가 윈도를 `now`가 아니라 **잡의 날짜**에서 계산하기 때문이다(§4.2). 보충은 기동 스레드가 아니라 전용 실행기에서 비동기로 돈다 — Redis가 죽은 채로 뜰 때 종목 수만큼의 타임아웃이 readiness 전환을 막지 않게 하기 위해서다. 첫 시도가 일부라도 실패하면 `catch-up-reconcile-delay`(기본 1분)마다 최신 예정 실행을 다시 대조하고, 전 종목이 적재됐거나 이미 적재된 것으로 확인될 때까지 단일 작업으로 재조정한다. 그래서 기동 순간 Redis가 내려가 있어도 복구 뒤 자가 치유되며 작업이 겹치거나 무한히 쌓이지 않는다. `alphatalk.ingest.digest.catch-up-on-startup=false`로 기동 보충과 후속 재조정을 함께 끈다.
 - 적재 멱등은 뉴스와 같은 `seen:ingest:{sourceId}` 마커가 담당한다 — sourceId가 `digest:{code}:{date}`라 하루 1회로 고정되고, 크론이 이미 돈 날 재기동·롤링 배포로 catch-up이 여러 번 돌아도 잡은 다시 쌓이지 않는다. 적재 연산은 기사 적재와 공유하는 Redis 단일 실행([redis_contract](redis_contract.md) §2.1 v0.23)로, 같은 실행 단위에서 마커를 먼저 확인하고 **XADD 성공 뒤 마커를 기록**한다. 인스턴스 ×N 동시 실행은 Redis가 직렬화하고, XADD가 실패하면 마커가 생기지 않아 다음 재조정이 다시 시도한다. 마커 기록 단계에서 실패해 중복 XADD가 생길 수는 있지만 llm-worker의 `sourceId` 멱등과 DB 유니크 인덱스가 최종 결과를 한 건으로 고정한다. 프로세스 종료 시 마커만 남고 잡이 유실되는 순서는 허용하지 않는다.
@@ -505,7 +505,7 @@ provider는 명시 설정이고 자동 fallback이 없다. 엉뚱한 경로로 �
 - `anthropic`은 `ANTHROPIC_API_KEY`가 없으면 기동에 실패한다. LLM·임베딩(rest)의 HTTP connect/read 타임아웃은 양수 필수(0=무한 대기 거부)이고, **배치 최악 지연 `consumer-batch × (LLM + 임베딩 + 원문 fetch 상한)`이 `claim-idle`보다 짧아야 기동한다** — 배치는 PEL에 먼저 들어가 순차 처리되므로 마지막 레코드의 선점 임계 초과가 중복 처리·조기 DLQ를 만든다. 원문 fetch는 요청 단위 타임아웃(8s)만으로는 리다이렉트×robots×게이트 대기가 합산돼 무계가 되므로, **fetcher가 종단 데드라인(20s)을, 호스트 게이트가 벽시계 기준 총 대기 상한(10s — 다중 레플리카 경합에서 획득 경쟁을 계속 지면 무한 대기이며, 잔여 예산을 넘는 sleep은 예산까지로 자른다)을 런타임에 강제**하고, 검증은 `데드라인 + 최장 블로킹 구간`을 상한으로 쓴다 — 최장 블로킹 구간은 robots 콜드 미스(게이트 10s + robots HTTP 8s, 중간에 데드라인 확인 없이 직렬 실행)다. 상한 초과 fetch는 본문 없이 진행한다(발췌 폴백 — best-effort). 원문 fetch 비활성 구성(`allowed-host-suffixes` 공란)은 이 항을 0으로 친다. 같은 검증을 CLI provider에도 적용한다(batch=1이라 레코드 1건 상한 검사). 레코드 상한에는 클러스터 락 대기(2×lock-ttl — `RedisClusterLock`의 유계 대기)도 포함한다. 기본값: batch 2 × (LLM 30s + 임베딩 25s + fetch 38s + 락 6s) = 198s < 5m. **수용 한계**: HTTP read timeout은 블로킹 read 단위 상한이라 응답을 계속 흘려보내는(드립피드) 서버는 이론상 회피할 수 있다 — 호출 대상이 신뢰된 엔드포인트(Anthropic·설정된 임베딩 제공자)이고, 스레드 격리로 완전한 종단 데드라인을 강제하는 비용 대비 이득이 없어 수용한다. claim-idle 초과의 결말은 중복 처리이고 파이프라인 전체가 sourceId 멱등·DB 유니크로 이를 흡수하도록 설계되어 있다(§2.2·§4.1) — 이 검증은 실시간 보장이 아니라 구성 오류를 기동에서 잡는 안전장치다. `claude-cli`·`codex-cli`는 각각 로그인된 로컬 CLI가 필요하고, 실행 실패·타임아웃은 PEL 재처리 경로로 전파한다. `fake`는 `alphatalk.llm.allow-fake=true`일 때만 허용한다.
 - CLI provider는 개인 구독 로컬 단일 인스턴스 전용이다. `consumer-batch=1`이 아니거나 CLI timeout이 `claim-idle` 이상이면 기동에 실패해, 긴 CLI 호출 중 다른 consumer가 아직 처리하지 않은 배치 레코드를 회수하는 구성을 막는다.
 - 시크릿(환경변수): `ANTHROPIC_API_KEY` · 임베딩 API 키. 로그 출력 금지. 임베딩 키는 `provider=rest`에서 fail-closed한다.
-- 설정: 시드 종목 목록, 소스별 폴링 주기, 유사도 임계값(0.85), 클러스터 창(72h), 원문 허용 호스트·호스트별 요청 간격(기본 1초), digest 시각(18:00) — 임계값 튜닝에 대비해 전부 프로퍼티로 외부화한다.
+- 설정: 소스별 폴링 주기, 유사도 임계값(0.85), 클러스터 창(72h), 원문 허용 호스트·호스트별 요청 간격(기본 1초), digest 시각(18:00)·적재 동시성(기본 1) — 임계값 튜닝에 대비해 전부 프로퍼티로 외부화한다. 다이제스트 대상 종목은 설정이 아니라 watchlist가 소유한다(§2.2).
 - 시장 다이제스트(§4.3) 설정: market digest 시각(17:40) · 리서치 사용 여부(끄면 항상 ①·②층만) · 리서치 턴 상한·타임아웃 · 팩트시트 커버리지 임계(기본 90%) — 검색을 여는 호출이므로 상한 없는 기본값을 두지 않는다. **시장 다이제스트의 전체 처리 데드라인(리서치 타임아웃 포함)은 배치 선행 대기까지 합쳐 `claim-idle`보다 작아야 하며 기동 시 검증한다** — 소비는 배치로 PEL에 들어와 순차 처리되므로 MARKET 레코드는 자기 데드라인이 시작되기 전에 앞 레코드들(`consumer-batch − 1`건)의 처리 시간만큼 PEL에서 대기할 수 있다. 검증식은 `(consumer-batch − 1) × 레코드 처리 상한 + 리서치 타임아웃 + 무리서치 재호출 상한 < claim-idle`(재호출은 §4.3 리서치 실패 폴백)이고, 만족하지 못하면 기동에 실패한다(기존 CLI timeout 검증과 같은 이유 — 넘으면 진행 중인 리서치를 다른 consumer가 XCLAIM해 동시 검색·delivery count 인플레·조기 DLQ가 생긴다).
 - 메트릭: `ingest_fetched_total{source}` · `ingest_dup_skipped_total` · `queue_ingest_pending`(PEL, 기획안 §10 알람 항목) · `llm_processed_total{type}` · `llm_failed_total` · `cluster_merged_total` · `dlq_total` · `llm_tokens_total{model}`(비용 감시, NFR-09) · `market_digest_generated_total{degraded}` · `market_digest_layer_failed_total{layer}`(§4.3 층별 실패).
 - 알람: PEL 적체 > N(기존 합의), DLQ 유입 > 0, 일 LLM 토큰 예산 초과, `market_digest` 연속 2일 degraded — 단 **리서치가 기대되는 구성에서만**(리서치 on + 검색 지원 provider). 리서치를 껐거나 fake처럼 검색 미지원 provider면 degraded가 정상 산출물이라, 무조건 알람은 영구 오탐이 되고 정작 예기치 못한 리서치 장애를 못 가린다.
@@ -518,7 +518,7 @@ SPRING_PROFILES_ACTIVE=local LLM_PROVIDER=fake ./gradlew :worker-llm:bootRun
 
 ## 9. 구현 단계 & DoD
 
-> **상태(2026-08-07): N0~N7 전 단계 구현 완료.** LLM·임베딩은 포트 뒤에 있고 기본 프로파일은 API 키 미설정 시 fail-closed한다. local은 Claude/Codex CLI 구독을 고르고 test는 명시적 fake를 쓴다. N7 시장 잡 트리거는 게이트 기본 on(`alphatalk.ingest.digest.market-enabled`)이며, 첫 배포에서만 llm-worker를 먼저 올린다(§4.3). 실서비스 투입 전 남은 것: 키 주입, RSS 소스 목록·시드 종목 설정(§10-5·§2.2), 임베딩 제공자 확정(§10-1), CLI 검색 권한 확정(§10-11).
+> **상태(2026-08-07): N0~N7 전 단계 구현 완료.** LLM·임베딩은 포트 뒤에 있고 기본 프로파일은 API 키 미설정 시 fail-closed한다. local은 Claude/Codex CLI 구독을 고르고 test는 명시적 fake를 쓴다. N7 시장 잡 트리거는 게이트 기본 on(`alphatalk.ingest.digest.market-enabled`)이며, 첫 배포에서만 llm-worker를 먼저 올린다(§4.3). 실서비스 투입 전 남은 것: 키 주입, RSS 소스 목록 설정(§10-5), 임베딩 제공자 확정(§10-1), CLI 검색 권한 확정(§10-11). 다이제스트 대상 종목은 watchlist 기반으로 전환 완료(§2.2).
 
 | 단계 | 범위 | DoD |
 |---|---|---|
@@ -542,7 +542,7 @@ SPRING_PROFILES_ACTIVE=local LLM_PROVIDER=fake ./gradlew :worker-llm:bootRun
 | 1 | 임베딩 제공자 | Voyage `voyage-3.5-lite`(기본 제안) vs OpenAI `text-embedding-3-small` vs 로컬(KoSimCSE). 차원·비용·한국어 성능 비교 후 확정 — `vector(N)` 차원 연동 |
 | 2 | 유사도 임계값·창 | 0.85 · 72h로 시작, 실데이터 오합류/미합류 사례로 튜닝 |
 | 3 | digest 시각 | 18:00 장후(기본) vs 07:50 장전 브리핑 추가 — 둘 다 하려면 sourceId에 슬롯 포함(`digest:{code}:{date}:{am|pm}`) |
-| 4 | 시드 종목 확장 | 시드 41 → watchlist 합집합 ∪ 거래대금 상위 N — 일일 다이제스트 대상(§2.2·§4.1) |
+| 4 | 다이제스트 대상 확장 | watchlist 합집합 전환 완료(§2.2 — 설정 시드 제거). 거래대금 상위 N(`daily_candle`) 합류는 후속 |
 | 5 | RSS 이용조건 확정 | 현재 9개 언론사의 공식 RSS를 사용한다. 상업 출시 전 언론사별 이용조건·제휴 필요 여부를 최종 확인 |
 | 6 | 편입 시 클라 갱신 | 현재 재발행 없음(접속 중 클라는 `sources` 갱신을 못 봄). 필요해지면 갱신 전용 경량 이벤트 검토 — MVP 아님 |
 | 7 | 섹터 분류 체계 | 기본: KIS 마스터 파일 업종 필드(`stock_master_sync`가 이미 파싱하는 소스). 세분화가 부족하면 KRX 업종분류/GICS 검토 — 판단 기준은 LLM 섹터 후보 목록의 품질 |

@@ -22,6 +22,13 @@ class IngestConfig {
     fun digestCatchUpExecutor(): ExecutorService =
         Executors.newThreadPerTaskExecutor(Thread.ofVirtual().name("digest-catchup-", 0).factory())
 
+    @Bean(DIGEST_ENQUEUE_EXECUTOR_BEAN, destroyMethod = "shutdown")
+    fun digestEnqueueExecutor(props: IngestProperties): ExecutorService =
+        Executors.newFixedThreadPool(
+            props.digest.enqueueConcurrency,
+            Thread.ofPlatform().name("digest-enqueue-", 0).factory(),
+        )
+
     @Bean
     fun newsSources(props: IngestProperties, rssFeedClient: RssFeedClient): List<NewsSource> =
         props.feeds.map { RssNewsSource(it.id, it.source, it.url, rssFeedClient) }
@@ -29,5 +36,6 @@ class IngestConfig {
     companion object {
         const val FETCH_EXECUTOR_BEAN = "ingestFetchExecutor"
         const val CATCH_UP_EXECUTOR_BEAN = "digestCatchUpExecutor"
+        const val DIGEST_ENQUEUE_EXECUTOR_BEAN = "digestEnqueueExecutor"
     }
 }

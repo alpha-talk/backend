@@ -10,7 +10,6 @@ data class IngestProperties(
     val excerptMaxLength: Int = 200,
     val fetchConcurrency: Int = 4,
     val feeds: List<Feed> = emptyList(),
-    val stocks: List<Stock> = emptyList(),
     val digest: Digest = Digest(),
 ) {
     data class Feed(
@@ -18,8 +17,6 @@ data class IngestProperties(
         val source: String,
         val url: String,
     )
-
-    data class Stock(val code: String, val name: String)
 
     data class Digest(
         val enabled: Boolean = true,
@@ -29,5 +26,12 @@ data class IngestProperties(
         val catchUpReconcileDelay: Duration = Duration.ofMinutes(1),
         val marketEnabled: Boolean = true,
         val marketCron: String = "0 40 17 * * *",
-    )
+        val enqueueConcurrency: Int = 1,
+    ) {
+        init {
+            require(enqueueConcurrency >= 1) {
+                "alphatalk.ingest.digest.enqueue-concurrency는 1 이상이어야 한다: $enqueueConcurrency"
+            }
+        }
+    }
 }
