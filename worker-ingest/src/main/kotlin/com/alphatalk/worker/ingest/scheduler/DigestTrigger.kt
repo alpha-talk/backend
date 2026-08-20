@@ -4,8 +4,8 @@ import com.alphatalk.contracts.queue.IngestQueueEntry
 import com.alphatalk.contracts.queue.IngestType
 import com.alphatalk.worker.ingest.config.IngestConfig
 import com.alphatalk.worker.ingest.config.IngestProperties
-import com.alphatalk.worker.ingest.queue.DigestEnqueueResult
-import com.alphatalk.worker.ingest.queue.DigestJobQueue
+import com.alphatalk.worker.ingest.queue.EnqueueResult
+import com.alphatalk.worker.ingest.queue.IngestQueue
 import io.micrometer.core.instrument.MeterRegistry
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Qualifier
@@ -21,7 +21,7 @@ import java.util.concurrent.Executor
 @Component
 @ConditionalOnProperty("alphatalk.ingest.digest.enabled", havingValue = "true", matchIfMissing = true)
 class DigestTrigger(
-    private val queue: DigestJobQueue,
+    private val queue: IngestQueue,
     private val props: IngestProperties,
     private val meters: MeterRegistry,
     @param:Qualifier(IngestConfig.CATCH_UP_EXECUTOR_BEAN)
@@ -76,8 +76,8 @@ class DigestTrigger(
             runCatching { queue.enqueueIfNew(entryOf(stock.code, sourceId)) }
                 .onSuccess { result ->
                     when (result) {
-                        DigestEnqueueResult.ENQUEUED -> enqueued++
-                        DigestEnqueueResult.ALREADY_ENQUEUED -> skipped++
+                        EnqueueResult.ENQUEUED -> enqueued++
+                        EnqueueResult.ALREADY_ENQUEUED -> skipped++
                     }
                 }
                 .onFailure {

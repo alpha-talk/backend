@@ -4,8 +4,8 @@ import com.alphatalk.contracts.queue.IngestQueueEntry
 import com.alphatalk.contracts.queue.IngestType
 import com.alphatalk.worker.ingest.config.IngestConfig
 import com.alphatalk.worker.ingest.config.IngestProperties
-import com.alphatalk.worker.ingest.queue.DigestEnqueueResult
-import com.alphatalk.worker.ingest.queue.DigestJobQueue
+import com.alphatalk.worker.ingest.queue.EnqueueResult
+import com.alphatalk.worker.ingest.queue.IngestQueue
 import io.micrometer.core.instrument.MeterRegistry
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Qualifier
@@ -21,7 +21,7 @@ import java.util.concurrent.Executor
 @Component
 @ConditionalOnProperty("alphatalk.ingest.digest.market-enabled", havingValue = "true")
 class MarketDigestTrigger(
-    private val queue: DigestJobQueue,
+    private val queue: IngestQueue,
     private val props: IngestProperties,
     private val meters: MeterRegistry,
     @param:Qualifier(IngestConfig.CATCH_UP_EXECUTOR_BEAN)
@@ -62,8 +62,8 @@ class MarketDigestTrigger(
 
     fun triggerFor(date: LocalDate): Boolean = runCatching {
         when (queue.enqueueIfNew(entryOf(date))) {
-            DigestEnqueueResult.ENQUEUED -> meters.counter("ingest.digest.market.enqueued").increment()
-            DigestEnqueueResult.ALREADY_ENQUEUED -> meters.counter("ingest.digest.market.duplicate.skipped").increment()
+            EnqueueResult.ENQUEUED -> meters.counter("ingest.digest.market.enqueued").increment()
+            EnqueueResult.ALREADY_ENQUEUED -> meters.counter("ingest.digest.market.duplicate.skipped").increment()
         }
         log.info("market digest job enqueued: date={}", date)
         true
