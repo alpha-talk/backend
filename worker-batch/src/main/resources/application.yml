@@ -64,7 +64,7 @@ alphatalk:
       request-interval: 250ms
       scan-limit: 500                           # 회차당 미통보 스캔 상한
     valuation:                                  # PER·PBR·EPS·BPS + 시총 일일 적재 (명세 §3.1)
-      enabled: false                            # KIS 계정이 있는 환경에서만 켠다 — 켜면 계정 필수(fail-closed)
+      enabled: true                             # 기본 활성 — KIS 계정이 없으면 기동 실패한다(fail-closed). 계정 없는 배포는 이 값을 false로 덮어쓴다
       cron: "0 50 16 * * MON-FRI"               # 영업일 16:50 — 종가 확정 후, 휴장일은 잡 내부 캘린더가 스킵
       retry-cron: "0 20 17,18 * * MON-FRI"      # 부분 실패(FAILED) 회차 재실행 — 날짜 키 스냅샷이라 당일 안에만 채울 수 있다. SUCCESS면 no-op
       calls-per-second: 8.0                     # 전 종목 ~2,600콜 ≈ 5.5분 — 공용 gate가 계정 합산 상한을 지킨다
