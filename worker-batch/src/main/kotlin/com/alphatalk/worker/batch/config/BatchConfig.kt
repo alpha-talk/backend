@@ -156,7 +156,7 @@ class BatchConfig {
     }
 
     @Bean
-    @ConditionalOnProperty("alphatalk.batch.valuation.enabled", havingValue = "true")
+    @ConditionalOnExpression(VALUATION_JOB_ENABLED)
     fun valuationSyncJob(
         props: BatchProperties,
         tokens: KisTokenManager,
@@ -187,7 +187,7 @@ class BatchConfig {
     }
 
     @Bean
-    @ConditionalOnProperty("alphatalk.batch.investor.enabled", havingValue = "true")
+    @ConditionalOnExpression(INVESTOR_JOB_ENABLED)
     fun investorFlowSyncJob(
         props: BatchProperties,
         tokens: KisTokenManager,
@@ -302,8 +302,15 @@ class BatchConfig {
         private const val OPINION_JOB_ENABLED =
             "\${alphatalk.batch.enabled:true} and \${alphatalk.batch.opinion.enabled:false}"
 
+        private const val VALUATION_JOB_ENABLED =
+            "\${alphatalk.batch.enabled:true} and \${alphatalk.batch.valuation.enabled:false}"
+
+        private const val INVESTOR_JOB_ENABLED =
+            "\${alphatalk.batch.enabled:true} and \${alphatalk.batch.investor.enabled:false}"
+
         private const val KIS_JOB_ENABLED =
-            "\${alphatalk.batch.opinion.enabled:false} or \${alphatalk.batch.valuation.enabled:false}" +
-                " or \${alphatalk.batch.investor.enabled:false}"
+            "\${alphatalk.batch.enabled:true} and (\${alphatalk.batch.opinion.enabled:false}" +
+                " or \${alphatalk.batch.valuation.enabled:false}" +
+                " or \${alphatalk.batch.investor.enabled:false})"
     }
 }

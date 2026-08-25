@@ -1,31 +1,29 @@
 package com.alphatalk.worker.batch
 
-import com.alphatalk.worker.batch.job.StartupCatchUp
-import com.alphatalk.worker.batch.master.StockMasterSyncJob
+import com.alphatalk.worker.batch.stockinfo.InvestorFlowSyncJob
 import com.alphatalk.worker.batch.stockinfo.ValuationSyncJob
 import org.junit.jupiter.api.Test
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection
+import org.springframework.context.ApplicationContext
 import org.testcontainers.containers.GenericContainer
 import org.testcontainers.containers.PostgreSQLContainer
 import org.testcontainers.junit.jupiter.Container
 import org.testcontainers.junit.jupiter.Testcontainers
 import org.testcontainers.utility.DockerImageName
-import kotlin.test.assertEquals
-import kotlin.test.assertNotNull
+import kotlin.test.assertTrue
 
 @SpringBootTest(
     properties = [
-        "alphatalk.batch.stock-master.cron=-",
-        "alphatalk.batch.stock-master.retry-cron=-",
-        "alphatalk.batch.valuation.cron=-",
-        "alphatalk.batch.valuation.retry-cron=-",
-        "alphatalk.batch.kis.accounts-json=[{\"keyId\":\"test\",\"appkey\":\"key\",\"appsecret\":\"secret\"}]",
+        "alphatalk.batch.enabled=false",
+        "alphatalk.batch.opinion.enabled=true",
+        "alphatalk.batch.investor.enabled=true",
+        "alphatalk.batch.kis.accounts-json=[]",
     ],
 )
 @Testcontainers(disabledWithoutDocker = true)
-class BatchWorkerApplicationTest {
+class BatchDisabledApplicationTest {
     companion object {
         @Container
         @ServiceConnection
@@ -41,22 +39,11 @@ class BatchWorkerApplicationTest {
     }
 
     @Autowired
-    private lateinit var job: StockMasterSyncJob
-
-    @Autowired
-    private lateinit var catchUp: StartupCatchUp
+    private lateinit var context: ApplicationContext
 
     @Test
-    fun `컨텍스트가 뜨고 마스터 동기화 잡이 조립된다`() {
-        assertNotNull(job)
-    }
-
-    @Test
-    fun `기본 활성인 valuation 잡이 따라잡기에 등록되고 꺼진 investor·DART 잡은 빠진다`() {
-        assertNotNull(catchUp)
-        assertEquals(
-            listOf(StockMasterSyncJob.JOB_NAME, ValuationSyncJob.JOB_NAME),
-            catchUp.registeredJobs(),
-        )
+    fun `배치를 끈 환경은 KIS 계정 없이도 기동하고 켜진 KIS 잡도 조립되지 않는다`() {
+        assertTrue(context.getBeansOfType(ValuationSyncJob::class.java).isEmpty())
+        assertTrue(context.getBeansOfType(InvestorFlowSyncJob::class.java).isEmpty())
     }
 }
