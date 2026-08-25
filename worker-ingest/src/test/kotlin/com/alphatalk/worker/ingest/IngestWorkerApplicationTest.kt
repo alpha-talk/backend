@@ -76,9 +76,9 @@ class IngestWorkerApplicationTest {
 
     @Test
     fun `기본 프로필에 주식 관련 RSS 피드만 등록된다`() {
-        assertEquals(11, properties.feeds.size)
+        assertEquals(6, properties.feeds.size)
         assertEquals(
-            setOf("yna", "hankyung", "mk", "donga", "chosun", "newsis"),
+            setOf("yna", "hankyung", "donga", "chosun"),
             properties.feeds.map { it.source }.toSet(),
         )
         assertEquals(properties.feeds.size, properties.feeds.map { it.id }.distinct().size)
