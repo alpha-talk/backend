@@ -51,19 +51,11 @@ class PostEntity(
 )
 
 interface PostJpaRepository : JpaRepository<PostEntity, String> {
-    @Query(
-        """
-        select p from PostEntity p
-        where p.code = :code and p.deletedAt is null
-          and (:cursor is null or (:ascending = true and p.id > :cursor) or (:ascending = false and p.id < :cursor))
-        """,
-    )
-    fun listRoom(
-        @Param("code") code: String,
-        @Param("cursor") cursor: String?,
-        @Param("ascending") ascending: Boolean,
-        pageable: PageRequest,
-    ): List<PostEntity>
+    fun findByCodeAndDeletedAtIsNull(code: String, pageable: PageRequest): List<PostEntity>
+
+    fun findByCodeAndDeletedAtIsNullAndIdGreaterThan(code: String, id: String, pageable: PageRequest): List<PostEntity>
+
+    fun findByCodeAndDeletedAtIsNullAndIdLessThan(code: String, id: String, pageable: PageRequest): List<PostEntity>
 
     fun existsByCodeAndDeletedAtIsNullAndIdLessThan(code: String, id: String): Boolean
 
@@ -151,7 +143,12 @@ class JpaPostStore(
         val ascending = query.direction == CursorDirection.AFTER
         val order = if (ascending) Sort.Direction.ASC else Sort.Direction.DESC
         val page = PageRequest.of(0, query.limit, Sort.by(order, "id"))
-        val rows = posts.listRoom(query.code, query.cursor, ascending, page).map { it.toRecord() }
+        val entities = when {
+            query.cursor == null -> posts.findByCodeAndDeletedAtIsNull(query.code, page)
+            ascending -> posts.findByCodeAndDeletedAtIsNullAndIdGreaterThan(query.code, query.cursor, page)
+            else -> posts.findByCodeAndDeletedAtIsNullAndIdLessThan(query.code, query.cursor, page)
+        }
+        val rows = entities.map { it.toRecord() }
         val nicknames = users.nicknames(rows.map(PostRecord::authorId).distinct())
         return rows.map { PostRowWithAuthor(it, nicknames.getValue(it.authorId)) }
     }

@@ -39,19 +39,11 @@ class CommentEntity(
 )
 
 interface CommentJpaRepository : JpaRepository<CommentEntity, String> {
-    @Query(
-        """
-        select c from CommentEntity c
-        where c.postId = :postId and c.deletedAt is null
-          and (:cursor is null or (:ascending = true and c.id > :cursor) or (:ascending = false and c.id < :cursor))
-        """,
-    )
-    fun list(
-        @Param("postId") postId: String,
-        @Param("cursor") cursor: String?,
-        @Param("ascending") ascending: Boolean,
-        pageable: PageRequest,
-    ): List<CommentEntity>
+    fun findByPostIdAndDeletedAtIsNull(postId: String, pageable: PageRequest): List<CommentEntity>
+
+    fun findByPostIdAndDeletedAtIsNullAndIdGreaterThan(postId: String, id: String, pageable: PageRequest): List<CommentEntity>
+
+    fun findByPostIdAndDeletedAtIsNullAndIdLessThan(postId: String, id: String, pageable: PageRequest): List<CommentEntity>
 
     fun existsByPostIdAndDeletedAtIsNullAndIdLessThan(postId: String, id: String): Boolean
 
@@ -87,7 +79,12 @@ class JpaCommentStore(
     override fun list(query: CommentListQuery): List<CommentRowWithAuthor> {
         val order = if (query.ascending) Sort.Direction.ASC else Sort.Direction.DESC
         val page = PageRequest.of(0, query.limit, Sort.by(order, "id"))
-        val rows = comments.list(query.postId, query.cursor, query.ascending, page).map { it.toRecord() }
+        val entities = when {
+            query.cursor == null -> comments.findByPostIdAndDeletedAtIsNull(query.postId, page)
+            query.ascending -> comments.findByPostIdAndDeletedAtIsNullAndIdGreaterThan(query.postId, query.cursor, page)
+            else -> comments.findByPostIdAndDeletedAtIsNullAndIdLessThan(query.postId, query.cursor, page)
+        }
+        val rows = entities.map { it.toRecord() }
         val nicknames = users.nicknames(rows.map(CommentRecord::authorId).distinct())
         return rows.map { CommentRowWithAuthor(it, nicknames.getValue(it.authorId)) }
     }
