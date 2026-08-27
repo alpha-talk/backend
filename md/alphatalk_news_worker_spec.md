@@ -110,7 +110,7 @@ worker-ingest는 외부 소스를 큐 엔트리로 바꾸는 일만 한다. 관�
 | 1차 | 소스가 종목을 알면 그대로(DART 공시 등 — 현재 소스는 RSS뿐이라 붙는 후보 없음) — **텍스트 매칭 없음** | ingest |
 | 2차 | LLM 요약 시 관련 종목 확정 — 후보 오탐 제거 및 후보 외 직접 관련 종목 발견(발견 종목은 `stock_master` 존재 + 기사 근거 검증 후 채택) | llm |
 
-- **v0.6 결정: 수집 측 텍스트 매칭(종목명 사전·매크로 키워드)을 코드 레벨에서 제거했다.** 수집 단계는 기사를 탈락시키거나 종목을 확정하지 않고, 매크로 `macroHint`도 적재하지 않는다. `stock_alias`는 수집 사전 매핑이 아니라 llm-worker의 후보 밖 `DIRECT` 판정 근거 검증에만 쓴다(§3.4·§5).
+- **v0.6 결정: 수집 측 텍스트 매칭(종목명 사전·매크로 키워드)을 코드 레벨에서 제거했다.** 수집 단계는 기사를 탈락시키거나 종목을 확정하지 않고, 매크로 `macroHint`도 적재하지 않는다. `stock_alias`는 수집 사전 매핑이 아니라 llm-worker의 후보 밖 `DIRECT` 판정 근거 검증에만 쓴다(§3.4·§5 — v0.9 변경, 적재 경로는 §10 12번).
 - 1차는 **후보 힌트일 뿐 게이트가 아니다** — 후보 0건이어도 **전량 적재**한다(`codes` 공란 허용, Redis 계약 v0.7 §2.1). 종목명이 한 번도 안 나오는 정책·산업 기사도 SECTOR/MARKET 이슈가 될 수 있으므로 수집 단계에서 버리지 않는다. 후보 밖 종목은 `stock_master` 존재만으로 채택하지 않고, LLM이 `DIRECT`로 판정하면서 반환한 `evidence`가 실제 제목·본문에 존재하고 그 안에 종목 정식명 또는 `stock_alias`가 포함될 때만 개별 종목에 연결한다. `INDIRECT`는 개별 종목 이벤트를 만들지 않고 SECTOR 판정으로만 반영한다. LLM이 기사 전체를 `marketRelevant=false`로 판정하면 후보·scope와 무관하게 IRRELEVANT로 버린다(§3.4). 전량 적재의 비용 방어선은 클러스터링이다 — 같은 사건이면 LLM 호출 1회로 끝난다(§3.3).
 - 후보가 빈 기사의 클러스터 판정 직렬화는 단일 `lock:cluster:macro` 락으로 수렴한다. 단일 인스턴스 운용(로컬)에선 무해하나, 운영 ×N 확장으로 병렬성이 필요해지면 이 결정을 재평가한다(§7).
 - `codes` 필드는 큐 스키마(Redis 계약 §2.1) 그대로 콤마 구분 다중이다.
@@ -185,7 +185,7 @@ worker-llm은 큐 엔트리를 방에 뜨는 이벤트로 바꾼다. 인스턴�
 
 - `marketRelevant=false`이면 `scope`·종목·섹터 결과를 보지 않고 클러스터를 `IRRELEVANT`로 마킹해 발행 없이 XACK한다. `MARKET`은 증시 전체에 관련된 기사만 뜻한다.
 - `marketRelevant=true`에서 `scope=STOCK`이면 `sectors`는 무시하고, `SECTOR`/`MARKET` 처리는 §3.6을 따른다. 프롬프트에는 §5 `sector` 목록을 섹터 후보로 제시한다(자유 서술이 아니라 코드 선택).
-- `relevant=false`와 `relation=INDIRECT`인 종목은 개별 종목 연결에서 제외한다. 소스가 부여한 후보는 `DIRECT` 판정이면 채택하고, 후보 밖 발견 종목은 `evidence`가 실제 입력 문자열이며 정식명 또는 `stock_alias`를 포함하는지 결정론적으로 재검증한다. confidence만으로 직접 관련성을 승인하지 않는다.
+- **(v0.9 변경)** `relevant=false`와 `relation=INDIRECT`인 종목은 개별 종목 연결에서 제외한다. 소스가 부여한 후보는 `DIRECT` 판정이면 채택하고, 후보 밖 발견 종목은 `evidence`가 실제 입력 문자열이며 정식명 또는 `stock_alias`를 포함하는지 결정론적으로 재검증한다. confidence만으로 직접 관련성을 승인하지 않는다.
 - LLM이 `scope=STOCK`을 반환해도 검증을 통과한 `DIRECT` 종목이 없고 유효 섹터만 있으면 `SECTOR`로 강등한다. 종목·섹터가 모두 없으면 방어적으로 `IRRELEVANT` 처리한다.
 - confidence < 0.6이면 sentiment를 NEUTRAL로 강등한다 — 애매한 건을 호재/악재로 단정하지 않는다.
 - 운영 `anthropic` provider의 기본 모델은 클러스터 요약 **claude-haiku-4-5**(건수 많음·단순), 일일 다이제스트 **claude-sonnet-5**(하루 종목당 1회·종합 판단)다. `LlmClient` 포트 뒤라 교체는 자유롭다.
@@ -309,7 +309,7 @@ stream payload (ws_api_spec §4.3 확장 — ⚠️ §6 증보):
 ```
 
 - **입력은 세 층에서 유계로 선별한다**: 종목 직접 클러스터는 호재 5·악재 5·중립 3, 해당 종목 섹터의 SECTOR 클러스터는 5, MARKET 클러스터는 3을 상한으로 한다. 종목은 confidence→최신순, 섹터는 impact(HIGH→MEDIUM→LOW)→confidence→최신순, 시장은 최신순으로 고른다. LLM에는 제목만 나열하지 않고 선택된 각 클러스터의 기존 3줄 요약을 함께 전달한다. 상한 밖 행은 프롬프트와 배열에서 제외하되 `inputCounts`·`newsCount`는 윈도 전체 규모를 보존한다.
-- `positives/negatives`에는 선별된 종목 직접 뉴스만 담고, 섹터·시장 요인은 `sectorIssues`/`marketIssues` 버킷으로 분리한다. `includedCounts`는 실제 LLM 입력·payload에 포함된 클러스터 수이며 `pipelineVersion=2`로 이 유계 선별 규칙을 식별한다.
+- `positives/negatives`에는 선별된 종목 직접 뉴스만 담고, 섹터·시장 요인은 `sectorIssues`/`marketIssues` 버킷으로 분리한다. `includedCounts`는 실제 LLM 입력에 포함된 클러스터 수이며 `pipelineVersion=2`로 이 유계 선별 규칙을 식별한다. `includedCounts.stock`은 중립 입력(상한 3)을 포함하므로 payload의 `positives+negatives` 합보다 클 수 있다 — 중립 클러스터는 프롬프트에만 들어가고 배열로는 노출하지 않는다.
 - `eventId` 참조 덕분에 클라가 브리핑에서 원 뉴스 이벤트로 점프한다(MARKET 클러스터는 방 이벤트가 없으므로 eventId 없이 제목·한 줄만).
 - **`marketAnalysis` 삽입은 best-effort다**: 생성 시점에 `market_digest`에서 그 날짜 행을 읽어 payload를 그대로 싣고, 없으면 필드를 생략한다(§4.3). 시장 잡이 먼저 적재되지만 큐는 순서를 보장하지 않는다 — 삽입 실패를 이유로 종목 브리핑을 지연·실패시키지 않으며, `marketIssues`는 `marketAnalysis` 유무와 무관하게 항상 채운다(뉴스 나열과 종합 분석은 역할이 다르다).
 - 프롬프트에 면책을 고정한다: 투자 판단의 근거가 아니라 정보 요약임을 명시(기획안 FR-17 면책 방침과 같은 기조). 클라 노출 문구는 클라 몫이다.
@@ -462,6 +462,7 @@ Liquibase 마이그레이션(`db-migrations` 모듈, `news/` changelog — Flywa
 | redis_contract **v0.18** §2.3 | digest 엔트리 `codes`에 의사코드 `MARKET` 허용 — 시장 다이제스트 잡(`sourceId=digest:MARKET:{date}`, §4.3) | ✅ 반영 |
 | ws_api_spec **v0.8** §4.3 | `digest.marketAnalysis{}` optional 필드 — 시장 다이제스트 삽입(§4.2·§4.3), 비파괴 | ✅ 반영 |
 | KIS 워커 명세 §4 | worker-llm의 `daily_candle`·`investor_flow_daily`·`stock_master` **읽기 전용** 소비자 표기(§4.3 팩트시트) | ✅ 반영 |
+| ws_api_spec **v0.10** §4.3 | `digest.inputCounts{}`·`includedCounts{}`·`pipelineVersion` optional 필드 — 유계 선별 규모 노출(§4.2), 비파괴 | ✅ 반영 |
 
 ---
 
@@ -512,7 +513,7 @@ provider는 명시 설정이고 자동 fallback이 없다. 엉뚱한 경로로 �
 - 시크릿(환경변수): `ANTHROPIC_API_KEY` · 임베딩 API 키. 로그 출력 금지. 임베딩 키는 `provider=rest`에서 fail-closed한다.
 - 설정: 소스별 폴링 주기, 유사도 임계값(0.85), 클러스터 창(72h), 원문 허용 호스트·호스트별 요청 간격(기본 1초), digest 시각(18:00)·적재 동시성(기본 1), 다이제스트 입력 상한(호재 5·악재 5·중립 3·섹터 5·시장 3) — 임계값 튜닝에 대비해 전부 프로퍼티로 외부화한다. 다이제스트 대상 종목은 설정이 아니라 watchlist가 소유한다(§2.2).
 - 시장 다이제스트(§4.3) 설정: market digest 시각(17:40) · 리서치 사용 여부(끄면 항상 ①·②층만) · 리서치 턴 상한·타임아웃 · 팩트시트 커버리지 임계(기본 90%) — 검색을 여는 호출이므로 상한 없는 기본값을 두지 않는다. **시장 다이제스트의 전체 처리 데드라인(리서치 타임아웃 포함)은 배치 선행 대기까지 합쳐 `claim-idle`보다 작아야 하며 기동 시 검증한다** — 소비는 배치로 PEL에 들어와 순차 처리되므로 MARKET 레코드는 자기 데드라인이 시작되기 전에 앞 레코드들(`consumer-batch − 1`건)의 처리 시간만큼 PEL에서 대기할 수 있다. 검증식은 `(consumer-batch − 1) × 레코드 처리 상한 + 리서치 타임아웃 + 무리서치 재호출 상한 < claim-idle`(재호출은 §4.3 리서치 실패 폴백)이고, 만족하지 못하면 기동에 실패한다(기존 CLI timeout 검증과 같은 이유 — 넘으면 진행 중인 리서치를 다른 consumer가 XCLAIM해 동시 검색·delivery count 인플레·조기 DLQ가 생긴다).
-- 메트릭: `ingest_fetched_total{source}` · `ingest_dup_skipped_total` · `queue_ingest_pending`(PEL, 기획안 §10 알람 항목) · `llm_processed_total{type}` · `llm_failed_total` · `cluster_merged_total` · `dlq_total` · `llm_tokens_total{model}`(비용 감시, NFR-09) · `market_digest_generated_total{degraded}` · `market_digest_layer_failed_total{layer}`(§4.3 층별 실패).
+- 메트릭: `ingest_fetched_total{source}` · `ingest_dup_skipped_total` · `queue_ingest_pending`(PEL, 기획안 §10 알람 항목) · `llm_processed_total{type}` · `llm_failed_total` · `cluster_merged_total` · `stock_evidence_rejected_total`·`stock_scope_downgraded_total`(§3.4 — 전자는 `DIRECT` 판정이 근거 검증에 실패한 건만 계수하고 `INDIRECT` 제외는 설계된 정상 동작이라 세지 않는다. 후자는 STOCK 판정 강등 — 유효 섹터가 있으면 SECTOR, 없으면 IRRELEVANT. 둘 다 트랜잭션 커밋 후 계수해 재시도 중복 계수를 막는다. 프롬프트·스키마 회귀로 종목 직접 배달이 조용히 멎는 것을 감시) · `dlq_total` · `llm_tokens_total{model}`(비용 감시, NFR-09) · `market_digest_generated_total{degraded}` · `market_digest_layer_failed_total{layer}`(§4.3 층별 실패).
 - 알람: PEL 적체 > N(기존 합의), DLQ 유입 > 0, 일 LLM 토큰 예산 초과, `market_digest` 연속 2일 degraded — 단 **리서치가 기대되는 구성에서만**(리서치 on + 검색 지원 provider). 리서치를 껐거나 fake처럼 검색 미지원 provider면 degraded가 정상 산출물이라, 무조건 알람은 영구 오탐이 되고 정작 예기치 못한 리서치 장애를 못 가린다.
 
 ```bash
@@ -555,3 +556,5 @@ SPRING_PROFILES_ACTIVE=local LLM_PROVIDER=fake ./gradlew :worker-llm:bootRun
 | 9 | MARKET 뉴스 실시간 노출면 | MVP는 다이제스트만. 홈 피드/시장 브리핑 방(종목 방 밖 노출면)은 별도 기획 필요 — P3. 노출면이 생기면 `market_digest`(§4.3)를 core-api 조회 API로 여는 것부터 |
 | 10 | 시장 리서치의 매크로 지표 수집 전환 | §4.3 ③층은 웹 검색으로 시작한다(열린 주제 대응·수집기 구축 비용 회피). 운영해 보고 매일 반복되는 핵심 지표(환율·미 국채 금리)는 한은 ECOS 등 자체 수집으로 옮기는 하이브리드 검토 — 판단 기준은 검색 실패율과 수치 정확도 |
 | 11 | 시장 리서치 provider 커버리지 | 현재 리서치 지원은 claude-cli(WebSearch)뿐이다. codex-cli는 검색 시 파일 읽기 도구 봉인이 불가능해 보류(§4.3), anthropic API는 web search tool 연동 미구현, fake는 미지원 — 셋 다 ③층 생략·degraded로 동작. API 경로 도구 파라미터와 CLI 검색 권한 부여 방식(--tools가 --safe-mode와 공존하는지)은 실호출로 확정 |
+| 12 | `stock_alias` 적재 경로 | 시드·적재 잡이 아직 없어 사실상 빈 테이블 — 근거 검증(§3.4)은 `stock_master` 정식명만으로 동작하고, 약칭만 쓰는 기사("삼전" 등)의 후보 밖 발견은 기각된다(의도된 정밀도 우선). `stock_evidence_rejected_total` 추이로 필요성을 확인한 뒤 수동 시드 vs 배치 잡을 결정 |
+| 13 | 소스 부여 후보의 DIRECT 요건 | 소스가 준 후보도 LLM `DIRECT` 판정이 있어야 채택한다(§3.4). RSS뿐인 현재는 후보 0건이라 무해하나, 소스가 종목을 확정하는 DART 공시 소스가 붙으면 LLM 오판 한 번으로 공시 이벤트가 기각될 수 있다 — DART 착수 시 소스 신뢰 기반 우회를 재검토 |
