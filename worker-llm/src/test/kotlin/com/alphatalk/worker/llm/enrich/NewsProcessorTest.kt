@@ -76,6 +76,7 @@ class NewsProcessorTest {
         ),
         fetcher = ArticleFetcher { null },
         summarizer = ClusterSummarizer(llm),
+        stockEvidence = StockEvidenceValidator(directory),
         sectors = directory,
         events = events,
         publisher = publisher,
@@ -160,24 +161,99 @@ class NewsProcessorTest {
     }
 
     @Test
-    fun `후보 없는 기사 - LLM이 발견한 종목으로 발행`() {
-        processor().process(entry("g1", "반도체 지원법 국회 통과", codes = emptyList()))
+    fun `후보 없는 기사 - 기사 근거가 있는 DIRECT 종목으로 발행`() {
+        verdict = stockVerdict().copy(
+            stocks = listOf(
+                StockVerdict(
+                    "005930",
+                    true,
+                    Sentiment.POSITIVE,
+                    0.9,
+                    "직접 관련",
+                    StockRelation.DIRECT,
+                    "삼성전자 지원법 대응",
+                ),
+            ),
+        )
+        processor().process(entry("g1", "삼성전자 지원법 대응", codes = emptyList()))
         assertEquals(listOf("005930"), events.inserted.map { it.code })
         assertEquals(listOf("005930"), publisher.published.map { it.first })
     }
 
     @Test
     fun `후보 없이 STOCK이 된 클러스터에 후속 빈 후보 기사가 재합류`() {
+        verdict = stockVerdict().copy(
+            stocks = listOf(
+                StockVerdict(
+                    "005930",
+                    true,
+                    Sentiment.POSITIVE,
+                    0.9,
+                    "직접 관련",
+                    StockRelation.DIRECT,
+                    "삼성전자 지원법 대응",
+                ),
+            ),
+        )
         val p = processor()
 
-        p.process(entry("g1", "반도체 지원법 국회 통과", codes = emptyList()))
-        p.process(entry("g2", "[속보] 반도체 지원법 국회 통과", codes = emptyList()))
+        p.process(entry("g1", "삼성전자 지원법 대응", codes = emptyList()))
+        p.process(entry("g2", "[속보] 삼성전자 지원법 대응", codes = emptyList()))
 
         assertEquals(1, store.clusters.size)
         assertEquals(2, store.articles.size)
         assertEquals(1, events.inserted.size)
         assertEquals(1, publisher.published.size)
         assertTrue(events.refreshed.isNotEmpty())
+    }
+
+    @Test
+    fun `후보 밖 INDIRECT 종목은 고확신이어도 개별 종목으로 배달하지 않는다`() {
+        verdict = stockVerdict().copy(
+            stocks = listOf(
+                StockVerdict(
+                    "005930",
+                    true,
+                    Sentiment.POSITIVE,
+                    0.99,
+                    "경쟁사 신제품의 간접 영향",
+                    StockRelation.INDIRECT,
+                    "LG전자 게이밍 모니터",
+                ),
+            ),
+        )
+
+        processor().process(entry("lg1", "LG전자 게이밍 모니터 출시", codes = emptyList()))
+
+        assertTrue(events.inserted.isEmpty())
+        assertEquals(ClusterStatus.IRRELEVANT, store.clusters.values.single().status)
+    }
+
+    @Test
+    fun `STOCK 판정에 검증된 DIRECT가 없고 섹터가 있으면 SECTOR로 강등한다`() {
+        verdict = ClusterSummaryOutput(
+            summary = "디스플레이 업계 경쟁 심화",
+            marketRelevant = true,
+            scope = NewsScope.STOCK,
+            stocks = listOf(
+                StockVerdict(
+                    "005930",
+                    true,
+                    Sentiment.NEGATIVE,
+                    0.99,
+                    "간접 영향",
+                    StockRelation.INDIRECT,
+                    "LG전자 신제품",
+                ),
+            ),
+            sectors = listOf(SectorVerdict("33", Sentiment.NEUTRAL, Impact.MEDIUM, 0.8, "업계 경쟁")),
+        )
+
+        processor().process(entry("lg2", "LG전자 신제품 출시", codes = emptyList()))
+
+        assertEquals("SECTOR", store.clusters.values.single().scope)
+        assertEquals(listOf("005930", "000660"), events.inserted.map { it.code })
+        assertTrue(events.inserted.all { it.data.scope == "SECTOR" })
     }
 
     @Test
@@ -349,12 +425,22 @@ class NewsProcessorTest {
             summary = "반도체 이슈",
             marketRelevant = true,
             scope = NewsScope.SECTOR,
-            stocks = listOf(StockVerdict("005930", true, Sentiment.POSITIVE, 0.9, "LLM 기억으로 추가")),
+            stocks = listOf(
+                StockVerdict(
+                    "005930",
+                    true,
+                    Sentiment.POSITIVE,
+                    0.9,
+                    "기사 근거로 발견",
+                    StockRelation.DIRECT,
+                    "삼성전자 반도체 이슈",
+                ),
+            ),
             sectors = listOf(SectorVerdict("27", Sentiment.NEGATIVE, Impact.HIGH, 0.9, "")),
         )
         val meters = SimpleMeterRegistry()
         processor(fanoutCap = 2, fanoutHardCap = 2, meters = meters)
-            .process(entry("a1", "반도체 이슈", codes = emptyList()))
+            .process(entry("a1", "삼성전자 반도체 이슈", codes = emptyList()))
 
         assertTrue(events.inserted.isEmpty())
         assertEquals(1.0, meters.counter("sector.fanout.suppressed").count())
@@ -367,11 +453,22 @@ class NewsProcessorTest {
             summary = "반도체 이슈",
             marketRelevant = true,
             scope = NewsScope.SECTOR,
-            stocks = listOf(StockVerdict("105560", true, Sentiment.POSITIVE, 0.9, "섹터 밖 발견")),
+            stocks = listOf(
+                StockVerdict(
+                    "105560",
+                    true,
+                    Sentiment.POSITIVE,
+                    0.9,
+                    "섹터 밖 직접 발견",
+                    StockRelation.DIRECT,
+                    "KB금융과 반도체 업계 이슈",
+                ),
+            ),
             sectors = listOf(SectorVerdict("33", Sentiment.NEGATIVE, Impact.HIGH, 0.9, "2종목")),
         )
         val meters = SimpleMeterRegistry()
-        processor(fanoutCap = 2, meters = meters).process(entry("a1", "반도체 이슈", codes = emptyList()))
+        processor(fanoutCap = 2, meters = meters)
+            .process(entry("a1", "KB금융과 반도체 업계 이슈", codes = emptyList()))
 
         assertEquals(1.0, meters.counter("sector.fanout.tier2").count())
         assertEquals(listOf("105560", "005930", "000660"), events.inserted.map { it.code })
@@ -383,11 +480,21 @@ class NewsProcessorTest {
             summary = "은행 이슈",
             marketRelevant = true,
             scope = NewsScope.SECTOR,
-            stocks = listOf(StockVerdict("005930", true, Sentiment.POSITIVE, 0.9, "섹터 밖 발견")),
+            stocks = listOf(
+                StockVerdict(
+                    "005930",
+                    true,
+                    Sentiment.POSITIVE,
+                    0.9,
+                    "섹터 밖 직접 발견",
+                    StockRelation.DIRECT,
+                    "삼성전자 은행 이슈",
+                ),
+            ),
             sectors = listOf(SectorVerdict("27", Sentiment.NEUTRAL, Impact.LOW, 0.5, "3종목")),
         )
         val meters = SimpleMeterRegistry()
-        processor(fanoutCap = 3, meters = meters).process(entry("a1", "은행 이슈", codes = emptyList()))
+        processor(fanoutCap = 3, meters = meters).process(entry("a1", "삼성전자 은행 이슈", codes = emptyList()))
 
         assertEquals(listOf("005930"), events.inserted.map { it.code })
         assertEquals(1.0, meters.counter("sector.fanout.degraded").count())
@@ -440,16 +547,26 @@ class NewsProcessorTest {
             summary = "반도체 이슈",
             marketRelevant = true,
             scope = NewsScope.SECTOR,
-            stocks = listOf(StockVerdict("105560", true, Sentiment.POSITIVE, 0.9, "LLM 발견")),
+            stocks = listOf(
+                StockVerdict(
+                    "105560",
+                    true,
+                    Sentiment.POSITIVE,
+                    0.9,
+                    "기사 근거로 발견",
+                    StockRelation.DIRECT,
+                    "KB금융 반도체 이슈",
+                ),
+            ),
             sectors = listOf(SectorVerdict("27", Sentiment.NEGATIVE, Impact.HIGH, 0.9, "3종목")),
         )
         val p = processor(fanoutCap = 1, fanoutHardCap = 1)
-        p.process(entry("a1", "반도체 이슈", codes = emptyList()))
+        p.process(entry("a1", "KB금융 반도체 이슈", codes = emptyList()))
 
         assertTrue(events.inserted.isEmpty())
         assertEquals(1, store.clusters.size)
 
-        p.process(entry("a2", "[속보] 반도체 이슈", codes = listOf("105560")))
+        p.process(entry("a2", "[속보] KB금융 반도체 이슈", codes = listOf("105560")))
 
         assertEquals(1, store.clusters.size, "링크가 없어 새 클러스터가 생겼다")
         val event = events.inserted.single()
@@ -468,11 +585,22 @@ class NewsProcessorTest {
             summary = "반도체 이슈",
             marketRelevant = true,
             scope = NewsScope.SECTOR,
-            stocks = listOf(StockVerdict("005930", true, Sentiment.POSITIVE, 0.9, "섹터 구성원과 겹침")),
+            stocks = listOf(
+                StockVerdict(
+                    "005930",
+                    true,
+                    Sentiment.POSITIVE,
+                    0.9,
+                    "섹터 구성원과 겹침",
+                    StockRelation.DIRECT,
+                    "삼성전자 반도체 이슈",
+                ),
+            ),
             sectors = listOf(SectorVerdict("33", Sentiment.NEGATIVE, Impact.LOW, 0.9, "2종목")),
         )
         val meters = SimpleMeterRegistry()
-        processor(fanoutCap = 2, meters = meters).process(entry("a1", "반도체 이슈", codes = emptyList()))
+        processor(fanoutCap = 2, meters = meters)
+            .process(entry("a1", "삼성전자 반도체 이슈", codes = emptyList()))
 
         assertEquals(0.0, meters.counter("sector.fanout.tier2").count())
         assertEquals(listOf("005930", "000660"), events.inserted.map { it.code })

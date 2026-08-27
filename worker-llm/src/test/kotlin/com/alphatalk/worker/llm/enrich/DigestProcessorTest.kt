@@ -1,10 +1,12 @@
 package com.alphatalk.worker.llm.enrich
 
+import com.alphatalk.contracts.envelope.DigestData
 import com.alphatalk.contracts.envelope.Sentiment
 import com.alphatalk.contracts.queue.IngestQueueEntry
 import com.alphatalk.contracts.queue.IngestType
 import com.alphatalk.worker.llm.cluster.ClusterStatus
 import com.alphatalk.worker.llm.cluster.InMemoryClusterStore
+import com.alphatalk.worker.llm.config.LlmProperties
 import com.alphatalk.worker.llm.sector.SectorDirectory
 import com.alphatalk.worker.llm.sector.SectorInfo
 import org.junit.jupiter.api.Test
@@ -31,14 +33,20 @@ class DigestProcessorTest {
 
     private val marketDigests = InMemoryMarketDigestStore()
 
-    private val processor = DigestProcessor(
+    private val processor = newProcessor()
+
+    private fun newProcessor(
+        llm: LlmClient = FakeLlmClient(),
+        digest: LlmProperties.Digest = LlmProperties.Digest(),
+    ) = DigestProcessor(
         store = store,
         sectors = directory,
         events = events,
         marketDigests = marketDigests,
         publisher = publisher,
         eventIds = { "dg-${++ids}".padEnd(26, '0') },
-        llm = FakeLlmClient(),
+        llm = llm,
+        props = LlmProperties(digest = digest),
         clock = clock,
     )
 
@@ -146,5 +154,61 @@ class DigestProcessorTest {
         seedCluster("c1".padEnd(26, '0'), "옛날 뉴스", Sentiment.POSITIVE, Instant.parse("2026-07-10T02:00:00Z"))
         processor.process(digestEntry())
         assertTrue(events.inserted.isEmpty())
+    }
+
+    @Test
+    fun `입력과 payload를 유형별 상한으로 제한하고 전체 건수는 보존한다`() {
+        repeat(7) { index ->
+            seedCluster("p$index".padEnd(26, '0'), "호재 $index", Sentiment.POSITIVE, inWindow.plusSeconds(index.toLong()))
+            seedCluster("n$index".padEnd(26, '0'), "악재 $index", Sentiment.NEGATIVE, inWindow.plusSeconds(index.toLong()))
+        }
+        repeat(5) { index ->
+            seedCluster("z$index".padEnd(26, '0'), "중립 $index", Sentiment.NEUTRAL, inWindow.plusSeconds(index.toLong()))
+        }
+        repeat(7) { index ->
+            val id = "s$index".padEnd(26, '0')
+            seedCluster(id, "섹터 $index", null, inWindow.plusSeconds(index.toLong()), scope = "SECTOR", code = null)
+            store.upsertSectorLink(
+                id,
+                "33",
+                Sentiment.POSITIVE.name,
+                0.9,
+                if (index == 6) Impact.HIGH.name else Impact.LOW.name,
+            )
+        }
+        repeat(5) { index ->
+            seedCluster(
+                "m$index".padEnd(26, '0'),
+                "시장 $index",
+                null,
+                inWindow.plusSeconds(index.toLong()),
+                scope = "MARKET",
+                code = null,
+            )
+        }
+        lateinit var received: DigestInput
+        val recordingLlm = object : LlmClient {
+            override fun summarize(input: ClusterSummaryInput) = error("unused")
+            override fun digest(input: DigestInput): DigestOutput {
+                received = input
+                return DigestOutput("브리핑", "요약")
+            }
+            override fun marketDigest(input: MarketDigestInput) = error("unused")
+        }
+
+        newProcessor(llm = recordingLlm).process(digestEntry())
+
+        val digest = events.inserted.single().data.digest!!
+        assertEquals(5, digest.positives.size)
+        assertEquals(5, digest.negatives.size)
+        assertEquals(5, digest.sectorIssues.size)
+        assertEquals(3, digest.marketIssues.size)
+        assertEquals(DigestData.Counts(stock = 19, sector = 7, market = 5), digest.inputCounts)
+        assertEquals(DigestData.Counts(stock = 13, sector = 5, market = 3), digest.includedCounts)
+        assertEquals(2, digest.pipelineVersion)
+        assertEquals(5, digest.neutralCount)
+        assertEquals(13, received.stockClusters.size)
+        assertEquals("섹터 6", received.sectorClusters.first().title)
+        assertEquals(listOf("시장 4", "시장 3", "시장 2"), received.marketClusters.map { it.title })
     }
 }

@@ -306,7 +306,8 @@ class JdbcClusterStore(
     override fun stockClustersInWindow(code: String, from: Instant, to: Instant): List<DigestClusterRow> =
         jdbc.query(
             """
-            SELECT c.id, c.rep_title, c.summary, s.sentiment, c.article_count, s.stream_event_id
+            SELECT c.id, c.rep_title, c.summary, s.sentiment, c.article_count, s.stream_event_id,
+                   s.confidence, NULL::text AS impact, c.last_article_at
             FROM news_cluster c JOIN news_cluster_stock s ON s.cluster_id = c.id
             WHERE s.code = :code AND s.stream_event_id IS NOT NULL
               AND c.status = 'SUMMARIZED' AND c.scope = 'STOCK'
@@ -325,7 +326,8 @@ class JdbcClusterStore(
     ): List<DigestClusterRow> =
         jdbc.query(
             """
-            SELECT c.id, c.rep_title, c.summary, s.sentiment, c.article_count, stock.stream_event_id
+            SELECT c.id, c.rep_title, c.summary, s.sentiment, c.article_count, stock.stream_event_id,
+                   s.confidence, s.impact, c.last_article_at
             FROM news_cluster c JOIN news_cluster_sector s ON s.cluster_id = c.id
             LEFT JOIN news_cluster_stock stock ON stock.cluster_id = c.id AND stock.code = :stockCode
             WHERE s.sector_code = :sectorCode AND c.status = 'SUMMARIZED' AND c.scope = 'SECTOR'
@@ -344,7 +346,8 @@ class JdbcClusterStore(
     override fun marketClustersInWindow(from: Instant, to: Instant): List<DigestClusterRow> =
         jdbc.query(
             """
-            SELECT c.id, c.rep_title, c.summary, NULL AS sentiment, c.article_count, NULL AS stream_event_id
+            SELECT c.id, c.rep_title, c.summary, NULL AS sentiment, c.article_count, NULL AS stream_event_id,
+                   NULL::numeric AS confidence, NULL::text AS impact, c.last_article_at
             FROM news_cluster c
             WHERE c.scope = 'MARKET' AND c.status = 'SUMMARIZED'
               AND c.last_article_at >= :from AND c.last_article_at < :to
@@ -358,7 +361,7 @@ class JdbcClusterStore(
         jdbc.query(
             """
             SELECT DISTINCT c.id, c.rep_title, c.summary, NULL AS sentiment, c.article_count,
-                   NULL AS stream_event_id, c.last_article_at
+                   NULL AS stream_event_id, NULL::numeric AS confidence, s.impact, c.last_article_at
             FROM news_cluster c JOIN news_cluster_sector s ON s.cluster_id = c.id
             WHERE s.impact = 'HIGH' AND c.scope = 'SECTOR' AND c.status = 'SUMMARIZED'
               AND c.last_article_at >= :from AND c.last_article_at < :to
@@ -381,12 +384,15 @@ class JdbcClusterStore(
     )
 
     private fun digestRow(rs: ResultSet, @Suppress("UNUSED_PARAMETER") rowNum: Int) = DigestClusterRow(
-        clusterId = rs.getString(1),
-        title = rs.getString(2),
-        summary = rs.getString(3) ?: "",
-        sentiment = rs.getString(4),
-        articleCount = rs.getInt(5),
-        streamEventId = rs.getString(6),
+        clusterId = rs.getString("id"),
+        title = rs.getString("rep_title"),
+        summary = rs.getString("summary") ?: "",
+        sentiment = rs.getString("sentiment"),
+        articleCount = rs.getInt("article_count"),
+        streamEventId = rs.getString("stream_event_id"),
+        confidence = rs.getBigDecimal("confidence")?.toDouble(),
+        impact = rs.getString("impact"),
+        lastArticleAt = rs.getTimestamp("last_article_at").toInstant(),
     )
 
     private fun toVectorLiteral(embedding: FloatArray): String =

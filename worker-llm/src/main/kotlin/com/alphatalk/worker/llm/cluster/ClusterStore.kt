@@ -43,6 +43,9 @@ data class DigestClusterRow(
     val sentiment: String?,
     val articleCount: Int,
     val streamEventId: String?,
+    val confidence: Double?,
+    val impact: String?,
+    val lastArticleAt: Instant,
 )
 
 interface ClusterStore {

@@ -7,6 +7,7 @@ import com.alphatalk.contracts.envelope.StreamData
 import com.alphatalk.contracts.queue.IngestQueueEntry
 import com.alphatalk.worker.llm.cluster.ClusterStore
 import com.alphatalk.worker.llm.cluster.DigestClusterRow
+import com.alphatalk.worker.llm.config.LlmProperties
 import com.alphatalk.worker.llm.persist.EventIdGenerator
 import com.alphatalk.worker.llm.persist.MarketDigestStore
 import com.alphatalk.worker.llm.persist.StreamEventStore
@@ -28,9 +29,24 @@ class DigestProcessor(
     private val publisher: StreamPublisher,
     private val eventIds: EventIdGenerator,
     private val llm: LlmClient,
+    props: LlmProperties,
     private val zone: ZoneId = ZoneId.of("Asia/Seoul"),
     private val clock: Clock = Clock.systemUTC(),
 ) {
+    private val limits = props.digest
+
+    init {
+        require(
+            listOf(
+                limits.positiveLimit,
+                limits.negativeLimit,
+                limits.neutralLimit,
+                limits.sectorLimit,
+                limits.marketLimit,
+            ).all { it > 0 },
+        ) { "다이제스트 입력 상한은 모두 양수여야 한다: $limits" }
+    }
+
     fun process(entry: IngestQueueEntry) {
         val code = entry.codes.single()
         val date = entry.sourceId.substringAfterLast(':')
@@ -39,15 +55,22 @@ class DigestProcessor(
         val windowTo = LocalDate.parse(date).atTime(LocalTime.of(18, 0)).atZone(zone).toInstant()
         val windowFrom = windowTo.minus(Duration.ofHours(24))
 
-        val stockRows = store.stockClustersInWindow(code, windowFrom, windowTo)
-        val stockClusterIds = stockRows.map { it.clusterId }.toSet()
-        val sectorRows = sectors.sectorOf(code)
+        val allStockRows = store.stockClustersInWindow(code, windowFrom, windowTo)
+        val stockClusterIds = allStockRows.map { it.clusterId }.toSet()
+        val allSectorRows = sectors.sectorOf(code)
             ?.let { store.sectorClustersInWindow(it, code, windowFrom, windowTo) }
             .orEmpty()
             .filter { it.clusterId !in stockClusterIds }
-        val marketRows = store.marketClustersInWindow(windowFrom, windowTo)
+        val allMarketRows = store.marketClustersInWindow(windowFrom, windowTo)
             .filter { it.clusterId !in stockClusterIds }
-        if (stockRows.isEmpty() && sectorRows.isEmpty()) return
+        if (allStockRows.isEmpty() && allSectorRows.isEmpty()) return
+
+        val positives = selectStockRows(allStockRows, Sentiment.POSITIVE, limits.positiveLimit)
+        val negatives = selectStockRows(allStockRows, Sentiment.NEGATIVE, limits.negativeLimit)
+        val neutrals = selectStockRows(allStockRows, Sentiment.NEUTRAL, limits.neutralLimit)
+        val stockRows = positives + negatives + neutrals
+        val sectorRows = allSectorRows.sortedWith(SECTOR_ORDER).take(limits.sectorLimit)
+        val marketRows = allMarketRows.sortedByDescending(DigestClusterRow::lastArticleAt).take(limits.marketLimit)
 
         val stockName = sectors.stockName(code) ?: code
         val output = llm.digest(
@@ -68,8 +91,8 @@ class DigestProcessor(
             occurredAt = clock.millis(),
             digest = DigestData(
                 date = date,
-                positives = stockRows.filter { it.sentiment == Sentiment.POSITIVE.name }.map(::toItem),
-                negatives = stockRows.filter { it.sentiment == Sentiment.NEGATIVE.name }.map(::toItem),
+                positives = positives.map(::toItem),
+                negatives = negatives.map(::toItem),
                 sectorIssues = sectorRows.map {
                     DigestData.SectorIssue(
                         title = it.title,
@@ -80,8 +103,19 @@ class DigestProcessor(
                 },
                 marketIssues = marketRows.map { DigestData.MarketIssue(title = it.title, line = firstLine(it.summary)) },
                 marketAnalysis = runCatching { marketDigests.find(date) }.getOrNull(),
-                neutralCount = stockRows.count { it.sentiment == null || it.sentiment == Sentiment.NEUTRAL.name },
-                newsCount = (stockRows + sectorRows + marketRows).sumOf { it.articleCount },
+                inputCounts = DigestData.Counts(
+                    stock = allStockRows.size,
+                    sector = allSectorRows.size,
+                    market = allMarketRows.size,
+                ),
+                includedCounts = DigestData.Counts(
+                    stock = stockRows.size,
+                    sector = sectorRows.size,
+                    market = marketRows.size,
+                ),
+                pipelineVersion = PIPELINE_VERSION,
+                neutralCount = allStockRows.count { it.sentiment == null || it.sentiment == Sentiment.NEUTRAL.name },
+                newsCount = (allStockRows + allSectorRows + allMarketRows).sumOf { it.articleCount },
             ),
         )
         val eventId = eventIds.next()
@@ -106,4 +140,34 @@ class DigestProcessor(
 
     private fun firstLine(summary: String): String =
         summary.lineSequence().firstOrNull().orEmpty().take(80)
+
+    private fun selectStockRows(rows: List<DigestClusterRow>, sentiment: Sentiment, limit: Int): List<DigestClusterRow> =
+        rows.asSequence()
+            .filter {
+                if (sentiment == Sentiment.NEUTRAL) {
+                    it.sentiment == null || it.sentiment == Sentiment.NEUTRAL.name
+                } else {
+                    it.sentiment == sentiment.name
+                }
+            }
+            .sortedWith(STOCK_ORDER)
+            .take(limit)
+            .toList()
+
+    private companion object {
+        const val PIPELINE_VERSION = 2
+
+        val STOCK_ORDER = compareByDescending<DigestClusterRow> { it.confidence ?: 0.0 }
+            .thenByDescending(DigestClusterRow::lastArticleAt)
+
+        val SECTOR_ORDER = compareBy<DigestClusterRow> {
+            when (it.impact) {
+                Impact.HIGH.name -> 0
+                Impact.MEDIUM.name -> 1
+                else -> 2
+            }
+        }
+            .thenByDescending { it.confidence ?: 0.0 }
+            .thenByDescending(DigestClusterRow::lastArticleAt)
+    }
 }
