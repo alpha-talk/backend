@@ -35,6 +35,46 @@ class StructuredLlmCodecTest {
     }
 
     @Test
+    fun `종목 스키마와 파싱은 관계 유형과 기사 근거를 보존한다`() {
+        val stocks = StructuredLlmCodec.summarySchema.properties("stocks")
+        val item = stocks["items"] as Map<*, *>
+        val required = item["required"] as List<*>
+        assertTrue(required.containsAll(listOf("relation", "evidence")))
+
+        val output = StructuredLlmCodec.parseSummary(
+            StructuredLlmCodec.mapper.readTree(
+                """
+                {"summary":"요약","marketRelevant":true,"scope":"STOCK",
+                 "stocks":[{"code":"005930","relevant":true,"sentiment":"POSITIVE","confidence":0.9,
+                 "reason":"직접","relation":"DIRECT","evidence":"삼성전자 공급 계약"}],"sectors":[]}
+                """,
+            ),
+            ClusterSummaryInput("삼성전자 공급 계약", emptyList(), null, emptyList(), emptyList()),
+        )
+
+        assertEquals(StockRelation.DIRECT, output.stocks.single().relation)
+        assertEquals("삼성전자 공급 계약", output.stocks.single().evidence)
+    }
+
+    @Test
+    fun `다이제스트 프롬프트는 선택된 클러스터의 기존 요약을 포함한다`() {
+        val prompt = StructuredLlmCodec.digestPrompt(
+            DigestInput(
+                code = "005930",
+                stockName = "삼성전자",
+                date = "2026-08-27",
+                stockClusters = listOf(
+                    DigestCluster(null, "HBM 공급", "삼성전자가 HBM4 공급 계약을 체결했다.", com.alphatalk.contracts.envelope.Sentiment.POSITIVE, 1),
+                ),
+                sectorClusters = emptyList(),
+                marketClusters = emptyList(),
+            ),
+        )
+
+        assertTrue(prompt.contains("삼성전자가 HBM4 공급 계약을 체결했다."))
+    }
+
+    @Test
     fun `시장 다이제스트 파싱 - 출처 참조가 온전하면 통과한다`() {
         val output = StructuredLlmCodec.parseMarketDigest(
             StructuredLlmCodec.mapper.readTree(

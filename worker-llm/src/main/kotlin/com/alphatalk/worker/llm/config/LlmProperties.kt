@@ -22,7 +22,16 @@ data class LlmProperties(
     val embedding: Embedding = Embedding(),
     val article: Article = Article(),
     val market: Market = Market(),
+    val digest: Digest = Digest(),
 ) {
+    data class Digest(
+        val positiveLimit: Int = 5,
+        val negativeLimit: Int = 5,
+        val neutralLimit: Int = 3,
+        val sectorLimit: Int = 5,
+        val marketLimit: Int = 3,
+    )
+
     data class Market(
         val researchEnabled: Boolean = true,
         val researchMaxTurns: Int = 10,

@@ -37,7 +37,11 @@ data class StockVerdict(
     val sentiment: Sentiment,
     val confidence: Double,
     val reason: String,
+    val relation: StockRelation = StockRelation.DIRECT,
+    val evidence: String = "",
 )
+
+enum class StockRelation { DIRECT, INDIRECT }
 
 data class SectorVerdict(
     val sectorCode: String,

@@ -1,6 +1,8 @@
 package com.alphatalk.worker.llm.sector
 
 import jakarta.persistence.Column
+import jakarta.persistence.Embeddable
+import jakarta.persistence.EmbeddedId
 import jakarta.persistence.Entity
 import jakarta.persistence.Id
 import jakarta.persistence.Table
@@ -10,6 +12,7 @@ import org.springframework.data.jpa.repository.JpaRepository
 import org.springframework.data.jpa.repository.Query
 import org.springframework.data.repository.query.Param
 import org.springframework.stereotype.Repository
+import java.io.Serializable
 
 @Entity
 @Table(name = "sector")
@@ -34,6 +37,22 @@ class StockMasterEntity(
     var sectorCode: String? = null,
     @Column(name = "is_active", nullable = false)
     var isActive: Boolean = true,
+)
+
+@Embeddable
+data class StockAliasId(
+    @JdbcTypeCode(SqlTypes.CHAR)
+    @Column(name = "code", nullable = false, length = 6)
+    var code: String = "",
+    @Column(name = "alias", nullable = false)
+    var alias: String = "",
+) : Serializable
+
+@Entity
+@Table(name = "stock_alias")
+class StockAliasEntity(
+    @EmbeddedId
+    var id: StockAliasId = StockAliasId(),
 )
 
 interface SectorJpaRepository : JpaRepository<SectorEntity, String> {
@@ -63,10 +82,16 @@ interface StockMasterJpaRepository : JpaRepository<StockMasterEntity, String> {
     fun findByIsActiveTrue(): List<StockMasterEntity>
 }
 
+interface StockAliasJpaRepository : JpaRepository<StockAliasEntity, StockAliasId> {
+    @Query("select a.id.alias from StockAliasEntity a where a.id.code = :stockCode order by a.id.alias asc")
+    fun findAliases(@Param("stockCode") stockCode: String): List<String>
+}
+
 @Repository
 class JpaSectorDirectory(
     private val sectors: SectorJpaRepository,
     private val stocks: StockMasterJpaRepository,
+    private val aliases: StockAliasJpaRepository,
 ) : SectorDirectory {
 
     override fun allSectors(): List<SectorInfo> =
@@ -86,6 +111,9 @@ class JpaSectorDirectory(
 
     override fun stockName(stockCode: String): String? =
         stocks.findById(stockCode).orElse(null)?.takeIf { it.isActive }?.name
+
+    override fun stockAliases(stockCode: String): Set<String> =
+        stockName(stockCode)?.let { setOf(it) + aliases.findAliases(stockCode) }.orEmpty()
 
     override fun sectorOf(stockCode: String): String? =
         stocks.findById(stockCode).orElse(null)?.sectorCode

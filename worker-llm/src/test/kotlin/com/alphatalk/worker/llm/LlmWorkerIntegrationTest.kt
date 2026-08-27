@@ -19,6 +19,7 @@ import com.alphatalk.worker.llm.enrich.ClusterSummarizer
 import com.alphatalk.worker.llm.enrich.DigestProcessor
 import com.alphatalk.worker.llm.enrich.MarketDigestProcessor
 import com.alphatalk.worker.llm.enrich.NewsProcessor
+import com.alphatalk.worker.llm.enrich.StockEvidenceValidator
 import com.alphatalk.worker.llm.enrich.TransactionRunner
 import com.alphatalk.worker.llm.persist.EventIdGenerator
 import com.alphatalk.worker.llm.persist.JdbcMarketDigestStore
@@ -138,6 +139,7 @@ class LlmWorkerIntegrationTest {
         assigner = clusterAssigner,
         fetcher = articleFetcher,
         summarizer = summarizer,
+        stockEvidence = StockEvidenceValidator(sectorDirectory),
         sectors = sectorDirectory,
         events = eventStore,
         publisher = streamPublisher,

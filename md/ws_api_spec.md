@@ -1,6 +1,7 @@
-# Alpha Talk — WebSocket(STOMP) API 명세 v0.9
+# Alpha Talk — WebSocket(STOMP) API 명세 v0.10
 **WS Gateway · 실시간 푸시 전용**
 
+> **v0.9 → v0.10**: `digest{}`에 optional `inputCounts{stock,sector,market}`·`includedCounts{stock,sector,market}`·`pipelineVersion` 추가 — 일일 브리핑은 원본 전체 건수를 보존하면서 호재 5·악재 5·중립 3·섹터 5·시장 3의 유계 입력만 요약·노출한다([뉴스 파이프라인 명세](alphatalk_news_worker_spec.md) §4.2). 기존 클라이언트는 모르는 필드를 무시한다.
 > **v0.8 → v0.9**: 방 토픽에 `/topic/rooms/{code}/quote` 추가 — 방 입장(SUBSCRIBE)만으로 관심목록 여부와 무관하게 그 방의 실시간 시세를 받는다(§3.2). 봉투·`quote` data는 §4.2와 동일이고, 관심목록에도 있는 종목이면 같은 틱이 `/user/queue/quote`와 방 토픽 양쪽으로 도착할 수 있다 — `quote`는 항상 "최신 스냅샷"(§6)이라 서버는 중복 제거하지 않는다. 대신 클라가 **라이브 틱끼리 `ts` 역행을 버려 완화한다**(§6 — 게이트웨이는 종목별 틱 순서를 보장하지 않고 `ts`도 단조 증가가 아니다. REST 스냅샷은 초기값 전용이라 라이브를 덮지 않는다). 게이트웨이는 방 quote 구독을 `demand:room`에 반영해 price-worker 수집을 트리거한다([Redis 계약](redis_contract.md) v0.22).
 > **v0.7 → v0.8**: `digest{}`에 optional `marketAnalysis{}` 추가 — 하루 1건 생성되는 시장 매크로 브리핑(순환매·수급·해외 지표)을 전 종목 일일 브리핑에 동일하게 삽입([뉴스 파이프라인 명세](alphatalk_news_worker_spec.md) §4.3). 생성이 늦거나 실패하면 필드가 생략된다. 기존 필드 변경 없음 — 비파괴.
 > **v0.6 → v0.7**: `opinion{}`에서 `ratingCode`·`previousRatingCode` **제거** — KIS 실계정 계측 결과 `invt_opnn_cls_code`는 등급 분류가 아니라 위치 값(현재 의견=2·직전 의견=3 고정)이라 정보가 없다([KIS 워커 명세](alphatalk_kis_worker_spec.md) §3.3·§9-7). 아직 발행 코드가 없어 기수신 클라이언트 영향도 없다. 필수 필드는 `brokerCode`·`rating`·`businessDate`.
@@ -134,6 +135,9 @@ accept-version:1.2
   "sources": [ { "name": "한국경제", "url": "https://..." } ],
   "digest": {
     "date": "2026-07-16", "positives": [], "negatives": [], "sectorIssues": [], "marketIssues": [],
+    "inputCounts": { "stock": 17, "sector": 51, "market": 103 },
+    "includedCounts": { "stock": 10, "sector": 5, "market": 3 },
+    "pipelineVersion": 2,
     "neutralCount": 0, "newsCount": 0,
     "marketAnalysis": {
       "summary": "…시장 종합 3줄…",
@@ -160,7 +164,7 @@ accept-version:1.2
 
 - 빈 줄 아래 필드는 **전부 optional**이다.
   - `sentiment`·`scope`·`sector`·`sources`: 뉴스·공시·일반 리포트
-  - `digest`: `category=ai` 일일 브리핑. `digest.marketAnalysis`는 그 안에서도 optional이다 — 하루 1건의 시장 브리핑을 전 종목에 동일 삽입하며(종목별 내용이 아니다), 생성 지연·실패 시 생략된다. `degraded=true`는 일부 입력(해외 리서치 등)이 빠진 채 생성됐다는 뜻이고, `global[]` 항목의 `sourceIds`가 `sources[]`의 `id`를 가리켜 수치별 검색 근거를 잇는다. 신선도 판단은 `date`가 아니라 `asOf`(생성 기준 시각)·`factDate`(국내 데이터 기준 거래일)로 한다 — 지연 생성 시 `asOf`가 늦고, 주말·휴장일엔 `factDate`가 지난 거래일이며, 국내 팩트 층이 빠진 산출물엔 `factDate`가 없다(optional)
+  - `digest`: `category=ai` 일일 브리핑. `inputCounts`는 윈도 전체 클러스터 수, `includedCounts`는 상한 적용 뒤 실제 LLM 입력에 포함한 수, `pipelineVersion`은 선별 규칙 버전이다. `includedCounts.stock`은 중립 입력을 포함하므로 `positives+negatives` 배열 합보다 클 수 있다(중립은 프롬프트에만 반영·배열 미노출). 세 필드는 구버전 이벤트에는 없을 수 있다. `digest.marketAnalysis`는 그 안에서도 optional이다 — 하루 1건의 시장 브리핑을 전 종목에 동일 삽입하며(종목별 내용이 아니다), 생성 지연·실패 시 생략된다. `degraded=true`는 일부 입력(해외 리서치 등)이 빠진 채 생성됐다는 뜻이고, `global[]` 항목의 `sourceIds`가 `sources[]`의 `id`를 가리켜 수치별 검색 근거를 잇는다. 신선도 판단은 `date`가 아니라 `asOf`(생성 기준 시각)·`factDate`(국내 데이터 기준 거래일)로 한다 — 지연 생성 시 `asOf`가 늦고, 주말·휴장일엔 `factDate`가 지난 거래일이며, 국내 팩트 층이 빠진 산출물엔 `factDate`가 없다(optional)
   - `kind=opinion`·`opinion`: `category=report`인 증권사 투자의견
 - 투자의견은 `summary`·`sourceUrl`·`sentiment`를 싣지 않는다. `occurredAt`은 최초 수집 시각이다. KIS가 제공한 영업일자는 `opinion.businessDate`에 원문 그대로 둔다.
 - `opinion.brokerCode`는 KIS 회원사 마스터의 5자리 코드, `opinion.brokerName`은 KIS 응답의 회원사명이다. `rating`·`previousRating`은 회원사가 쓴 표기 그대로다(`매수`·`BUY`·`NotRated` 등 — 표준화하지 않는다).
