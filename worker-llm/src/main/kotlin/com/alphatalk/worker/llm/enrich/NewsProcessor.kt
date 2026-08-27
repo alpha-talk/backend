@@ -83,6 +83,8 @@ class NewsProcessor(
         )
         val verdict = summarizer.summarize(summaryInput)
         val publications = mutableListOf<PendingPublication>()
+        var evidenceRejected = emptyList<StockVerdict>()
+        var downgradedFromStock = false
         transactions.run {
             ensureSummarizeLease(cluster.id, token)
             if (!verdict.marketRelevant) {
@@ -95,8 +97,17 @@ class NewsProcessor(
             }
 
             val candidates = entry.codes.toSet()
-            val relevantStocks = verdict.stocks
-                .filter { stockEvidence.accepts(it, candidates, summaryInput) }
+            val (relevantStocks, excludedStocks) = verdict.stocks
+                .filter(StockVerdict::relevant)
+                .partition { stockEvidence.accepts(it, candidates, summaryInput) }
+            evidenceRejected = excludedStocks.filter { it.relation == StockRelation.DIRECT }
+            if (evidenceRejected.isNotEmpty()) {
+                log.info(
+                    "stock evidence rejected: clusterId={} codes={}",
+                    cluster.id,
+                    evidenceRejected.map(StockVerdict::code),
+                )
+            }
             val relevantCodes = relevantStocks.map { it.code }.toSet()
             entry.codes.filter { it !in relevantCodes }.forEach { code ->
                 val confidence = verdict.stocks.firstOrNull { it.code == code }?.confidence
@@ -107,6 +118,12 @@ class NewsProcessor(
                     if (relevantStocks.isNotEmpty()) {
                         persistStockScope(cluster, verdict, relevantStocks, publications)
                     } else {
+                        downgradedFromStock = true
+                        log.info(
+                            "stock scope downgraded: clusterId={} sectors={}",
+                            cluster.id,
+                            sectorVerdicts.size,
+                        )
                         persistSectorScope(cluster, verdict, sectorVerdicts, emptyList(), candidates, publications)
                     }
                 NewsScope.SECTOR ->
@@ -118,6 +135,12 @@ class NewsProcessor(
             } else if (!store.markSummarized(cluster.id, token, verdict.summary, finalScope.name)) {
                 throw ClusterContendedException(cluster.id)
             }
+        }
+        if (evidenceRejected.isNotEmpty()) {
+            meters.counter("stock.evidence.rejected").increment(evidenceRejected.size.toDouble())
+        }
+        if (downgradedFromStock) {
+            meters.counter("stock.scope.downgraded").increment()
         }
         publish(publications)
     }

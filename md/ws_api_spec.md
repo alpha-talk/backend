@@ -164,7 +164,7 @@ accept-version:1.2
 
 - 빈 줄 아래 필드는 **전부 optional**이다.
   - `sentiment`·`scope`·`sector`·`sources`: 뉴스·공시·일반 리포트
-  - `digest`: `category=ai` 일일 브리핑. `inputCounts`는 윈도 전체 클러스터 수, `includedCounts`는 상한 적용 뒤 실제 요약·노출한 수, `pipelineVersion`은 선별 규칙 버전이다. 세 필드는 구버전 이벤트에는 없을 수 있다. `digest.marketAnalysis`는 그 안에서도 optional이다 — 하루 1건의 시장 브리핑을 전 종목에 동일 삽입하며(종목별 내용이 아니다), 생성 지연·실패 시 생략된다. `degraded=true`는 일부 입력(해외 리서치 등)이 빠진 채 생성됐다는 뜻이고, `global[]` 항목의 `sourceIds`가 `sources[]`의 `id`를 가리켜 수치별 검색 근거를 잇는다. 신선도 판단은 `date`가 아니라 `asOf`(생성 기준 시각)·`factDate`(국내 데이터 기준 거래일)로 한다 — 지연 생성 시 `asOf`가 늦고, 주말·휴장일엔 `factDate`가 지난 거래일이며, 국내 팩트 층이 빠진 산출물엔 `factDate`가 없다(optional)
+  - `digest`: `category=ai` 일일 브리핑. `inputCounts`는 윈도 전체 클러스터 수, `includedCounts`는 상한 적용 뒤 실제 LLM 입력에 포함한 수, `pipelineVersion`은 선별 규칙 버전이다. `includedCounts.stock`은 중립 입력을 포함하므로 `positives+negatives` 배열 합보다 클 수 있다(중립은 프롬프트에만 반영·배열 미노출). 세 필드는 구버전 이벤트에는 없을 수 있다. `digest.marketAnalysis`는 그 안에서도 optional이다 — 하루 1건의 시장 브리핑을 전 종목에 동일 삽입하며(종목별 내용이 아니다), 생성 지연·실패 시 생략된다. `degraded=true`는 일부 입력(해외 리서치 등)이 빠진 채 생성됐다는 뜻이고, `global[]` 항목의 `sourceIds`가 `sources[]`의 `id`를 가리켜 수치별 검색 근거를 잇는다. 신선도 판단은 `date`가 아니라 `asOf`(생성 기준 시각)·`factDate`(국내 데이터 기준 거래일)로 한다 — 지연 생성 시 `asOf`가 늦고, 주말·휴장일엔 `factDate`가 지난 거래일이며, 국내 팩트 층이 빠진 산출물엔 `factDate`가 없다(optional)
   - `kind=opinion`·`opinion`: `category=report`인 증권사 투자의견
 - 투자의견은 `summary`·`sourceUrl`·`sentiment`를 싣지 않는다. `occurredAt`은 최초 수집 시각이다. KIS가 제공한 영업일자는 `opinion.businessDate`에 원문 그대로 둔다.
 - `opinion.brokerCode`는 KIS 회원사 마스터의 5자리 코드, `opinion.brokerName`은 KIS 응답의 회원사명이다. `rating`·`previousRating`은 회원사가 쓴 표기 그대로다(`매수`·`BUY`·`NotRated` 등 — 표준화하지 않는다).

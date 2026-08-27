@@ -223,10 +223,37 @@ class NewsProcessorTest {
             ),
         )
 
-        processor().process(entry("lg1", "LG전자 게이밍 모니터 출시", codes = emptyList()))
+        val meters = SimpleMeterRegistry()
+        processor(meters = meters).process(entry("lg1", "LG전자 게이밍 모니터 출시", codes = emptyList()))
 
         assertTrue(events.inserted.isEmpty())
         assertEquals(ClusterStatus.IRRELEVANT, store.clusters.values.single().status)
+        assertEquals(0.0, meters.counter("stock.evidence.rejected").count())
+        assertEquals(1.0, meters.counter("stock.scope.downgraded").count())
+    }
+
+    @Test
+    fun `후보 밖 DIRECT의 근거가 원문에 없으면 기각하고 계수한다`() {
+        verdict = stockVerdict().copy(
+            stocks = listOf(
+                StockVerdict(
+                    "005930",
+                    true,
+                    Sentiment.POSITIVE,
+                    0.9,
+                    "조작된 근거",
+                    StockRelation.DIRECT,
+                    "삼성전자 HBM 수주",
+                ),
+            ),
+        )
+        val meters = SimpleMeterRegistry()
+
+        processor(meters = meters).process(entry("f1", "LG전자 신제품 출시", codes = emptyList()))
+
+        assertTrue(events.inserted.isEmpty())
+        assertEquals(1.0, meters.counter("stock.evidence.rejected").count())
+        assertEquals(1.0, meters.counter("stock.scope.downgraded").count())
     }
 
     @Test
@@ -249,11 +276,14 @@ class NewsProcessorTest {
             sectors = listOf(SectorVerdict("33", Sentiment.NEUTRAL, Impact.MEDIUM, 0.8, "업계 경쟁")),
         )
 
-        processor().process(entry("lg2", "LG전자 신제품 출시", codes = emptyList()))
+        val meters = SimpleMeterRegistry()
+        processor(meters = meters).process(entry("lg2", "LG전자 신제품 출시", codes = emptyList()))
 
         assertEquals("SECTOR", store.clusters.values.single().scope)
         assertEquals(listOf("005930", "000660"), events.inserted.map { it.code })
         assertTrue(events.inserted.all { it.data.scope == "SECTOR" })
+        assertEquals(0.0, meters.counter("stock.evidence.rejected").count())
+        assertEquals(1.0, meters.counter("stock.scope.downgraded").count())
     }
 
     @Test
