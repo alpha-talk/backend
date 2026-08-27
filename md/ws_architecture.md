@@ -1,6 +1,6 @@
 # Alpha Talk — `ws` 모듈 아키텍처 설계 v0.8
 
-> 상위 문서: [구현 계획 v0.3](ws_module_plan.md) · [WS API 명세 v0.9](ws_api_spec.md) · [Redis 계약 v0.22](redis_contract.md)
+> 상위 문서: [구현 계획 v0.3](ws_module_plan.md) · [WS API 명세 v0.10](ws_api_spec.md) · [Redis 계약 v0.22](redis_contract.md)
 
 이 문서는 `ws` 게이트웨이의 **코드 레벨 설계 기준**이다. 컴포넌트 경계와 포트 계약, 인메모리 인덱스와 동시성 규율, 핵심 시퀀스, 에러 정책을 여기서 확정한다. `ws` 코드를 쓰거나 리뷰하기 전에 읽고, 코드와 어긋나면 둘 중 하나를 고친다. 역할 분담은 이렇다 — 단계(S0~S7)와 DoD는 계획서, 클라 ↔ 게이트웨이 STOMP 프로토콜은 API 명세, 서비스 간 채널·키 계약은 Redis 계약이 소유하고, 이 문서는 "어떤 구조로 구현하나"만 답한다.
 

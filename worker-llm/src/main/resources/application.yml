@@ -38,6 +38,12 @@ alphatalk:
     sector:
       fanout-cap: 100             # 1차 상한 — 초과 시 impact=LOW 섹터를 덜어내고 재시도 (명세 §3.6)
       fanout-hard-cap: 500        # 2차 상한 — MEDIUM 이상만으로도 넘으면 LLM 오판정으로 보고 실시간 억제
+    digest:
+      positive-limit: 5
+      negative-limit: 5
+      neutral-limit: 3
+      sector-limit: 5
+      market-limit: 3
     article:
       allowed-host-suffixes:     # 비우면 본문 fetch 전면 차단 — worker-ingest 피드 언론사와 짝을 맞춘다
         - yna.co.kr

@@ -34,8 +34,18 @@ internal object StructuredLlmCodec {
                         ),
                         "confidence" to mapOf("type" to "number"),
                         "reason" to mapOf("type" to "string"),
+                        "relation" to mapOf("type" to "string", "enum" to listOf("DIRECT", "INDIRECT")),
+                        "evidence" to mapOf("type" to "string"),
                     ),
-                    "required" to listOf("code", "relevant", "sentiment", "confidence", "reason"),
+                    "required" to listOf(
+                        "code",
+                        "relevant",
+                        "sentiment",
+                        "confidence",
+                        "reason",
+                        "relation",
+                        "evidence",
+                    ),
                 ),
             ),
             "sectors" to mapOf(
@@ -135,17 +145,26 @@ internal object StructuredLlmCodec {
         appendLine("종목 후보: ${input.stocks.joinToString { "${it.code}=${it.name}" }.ifEmpty { "(없음)" }}")
         appendLine("섹터 후보: ${input.sectors.joinToString { "${it.code}=${it.name}" }}")
         appendLine("먼저 한국 증시나 상장사에 실질적 영향이 있는 기사인지 marketRelevant로 판정하라. 단순 생활·사건·연예·스포츠 등 증시와 무관하면 false다.")
-        appendLine("marketRelevant=true이면 후보 각각의 실제 관련 여부를 판정하고, 후보에 없어도 이 뉴스의 실질적 영향(정책·규제·수혜 포함)을 받는 상장사가 확실하면 stocks에 6자리 종목코드로 추가하라. 코드가 불확실한 종목은 넣지 않는다.")
+        appendLine("marketRelevant=true이면 후보 각각의 실제 관련 여부를 판정하라. 기사에 회사명·등록 별칭이 직접 등장하는 기업은 DIRECT, 기사에 이름이 없고 정책·업황·경쟁 효과로만 영향받는 기업은 INDIRECT다.")
+        appendLine("후보 밖 종목은 기사에 회사명·등록 별칭이 직접 등장할 때만 DIRECT로 추가하라. evidence에는 제목이나 본문에 실제로 존재하면서 해당 회사명·별칭을 포함하는 최소 구절을 그대로 복사하라. INDIRECT 종목은 개별 종목 배달 근거가 아니며, 코드가 불확실하면 넣지 않는다.")
         appendLine("scope는 특정 기업 뉴스면 STOCK, 업종 전반이면 SECTOR, 시장 전체면 MARKET이다. marketRelevant=false이면 모든 종목 후보도 relevant=false로 기각하라.")
         appendLine("섹터마다 impact를 판정하라 — $IMPACT_CRITERIA")
     }
 
     fun digestPrompt(input: DigestInput): String = buildString {
         appendLine("${input.stockName}(${input.code})의 ${input.date} 데일리 브리핑을 작성하라. 투자 조언이 아니라 정보 요약이며, 종합 3줄로.")
-        appendLine("종목 뉴스: ${input.stockClusters.joinToString(" | ") { "${it.title}(${it.sentiment})" }}")
-        appendLine("섹터 이슈: ${input.sectorClusters.joinToString(" | ") { "${it.title}(${it.sentiment})" }}")
-        appendLine("시장 이슈: ${input.marketClusters.joinToString(" | ") { it.title }}")
+        appendLine("종목 뉴스: ${input.stockClusters.joinToString(" | ") { digestFact(it, it.sentiment.name) }}")
+        appendLine("섹터 이슈: ${input.sectorClusters.joinToString(" | ") { digestFact(it, it.sentiment.name) }}")
+        appendLine("시장 이슈: ${input.marketClusters.joinToString(" | ") { digestFact(it, null) }}")
     }
+
+    private fun digestFact(cluster: DigestCluster, label: String?): String =
+        buildString {
+            append(cluster.title)
+            label?.let { append("[$it]") }
+            append(" — ")
+            append(cluster.summary.replace(WHITESPACE, " ").trim().take(DIGEST_SUMMARY_LIMIT))
+        }
 
     fun parseSummary(node: JsonNode, input: ClusterSummaryInput): ClusterSummaryOutput =
         ClusterSummaryOutput(
@@ -161,6 +180,10 @@ internal object StructuredLlmCodec {
                     sentiment = sentimentOf(stock),
                     confidence = stock.path("confidence").asDouble(0.0),
                     reason = stock.path("reason").asText(),
+                    relation = runCatching {
+                        StockRelation.valueOf(stock.path("relation").asText())
+                    }.getOrDefault(StockRelation.INDIRECT),
+                    evidence = stock.path("evidence").asText(),
                 )
             },
             sectors = node.path("sectors").mapNotNull { sector ->
@@ -268,4 +291,6 @@ internal object StructuredLlmCodec {
             "LOW는 관련성은 있으나 영향 경로가 약하거나 일반적인 업계 언급이다."
 
     private val STOCK_CODE = Regex("\\d{6}")
+    private val WHITESPACE = Regex("\\s+")
+    private const val DIGEST_SUMMARY_LIMIT = 240
 }

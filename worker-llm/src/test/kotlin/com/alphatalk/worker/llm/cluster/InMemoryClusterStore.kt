@@ -185,7 +185,7 @@ class InMemoryClusterStore : ClusterStore {
         stockLinkRows.filterKeys { it.second == code }.entries.mapNotNull { (key, link) ->
             if (link.streamEventId == null) return@mapNotNull null
             if (clusters.getValue(key.first).scope != "STOCK") return@mapNotNull null
-            digestRow(key.first, from, to, link.sentiment, link.streamEventId)
+            digestRow(key.first, from, to, link.sentiment, link.streamEventId, link.confidence, null)
         }
 
     @Synchronized
@@ -197,13 +197,21 @@ class InMemoryClusterStore : ClusterStore {
     ): List<DigestClusterRow> =
         sectorLinkRows.filterKeys { it.second == sectorCode }.entries.mapNotNull { (key, value) ->
             if (clusters.getValue(key.first).scope != "SECTOR") return@mapNotNull null
-            digestRow(key.first, from, to, value.first, stockLinkRows[key.first to stockCode]?.streamEventId)
+            digestRow(
+                key.first,
+                from,
+                to,
+                value.first,
+                stockLinkRows[key.first to stockCode]?.streamEventId,
+                value.second,
+                value.third,
+            )
         }
 
     @Synchronized
     override fun marketClustersInWindow(from: Instant, to: Instant): List<DigestClusterRow> =
         clusters.entries.filter { it.value.scope == "MARKET" }.mapNotNull { (id, _) ->
-            digestRow(id, from, to, null, null)
+            digestRow(id, from, to, null, null, null, null)
         }
 
     @Synchronized
@@ -213,13 +221,31 @@ class InMemoryClusterStore : ClusterStore {
                 state.scope == "SECTOR" &&
                     sectorLinkRows.any { (key, value) -> key.first == id && value.third == "HIGH" }
             }
-            .mapNotNull { (id, _) -> digestRow(id, from, to, null, null) }
+            .mapNotNull { (id, _) -> digestRow(id, from, to, null, null, null, "HIGH") }
 
-    private fun digestRow(clusterId: String, from: Instant, to: Instant, sentiment: String?, eventId: String?): DigestClusterRow? {
+    private fun digestRow(
+        clusterId: String,
+        from: Instant,
+        to: Instant,
+        sentiment: String?,
+        eventId: String?,
+        confidence: Double?,
+        impact: String?,
+    ): DigestClusterRow? {
         val state = clusters.getValue(clusterId)
         if (state.status != ClusterStatus.SUMMARIZED) return null
         if (state.lastAt < from || state.lastAt >= to) return null
-        return DigestClusterRow(clusterId, state.repTitle, state.summary.orEmpty(), sentiment, state.articleCount, eventId)
+        return DigestClusterRow(
+            clusterId,
+            state.repTitle,
+            state.summary.orEmpty(),
+            sentiment,
+            state.articleCount,
+            eventId,
+            confidence,
+            impact,
+            state.lastAt,
+        )
     }
 
     private fun cosine(a: FloatArray, b: FloatArray): Double {

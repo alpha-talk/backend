@@ -30,6 +30,8 @@ class FakeLlmClient : LlmClient {
                     sentiment = sentiment,
                     confidence = if (sentiment == Sentiment.NEUTRAL) 0.5 else 0.9,
                     reason = "keyword",
+                    relation = StockRelation.DIRECT,
+                    evidence = it.name,
                 )
             },
             sectors = matchedSectors.map {
