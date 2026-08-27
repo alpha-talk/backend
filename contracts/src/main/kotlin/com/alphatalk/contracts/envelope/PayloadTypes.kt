@@ -64,6 +64,9 @@ data class DigestData(
     val sectorIssues: List<SectorIssue> = emptyList(),
     val marketIssues: List<MarketIssue> = emptyList(),
     val marketAnalysis: MarketAnalysis? = null,
+    val inputCounts: Counts? = null,
+    val includedCounts: Counts? = null,
+    val pipelineVersion: Int? = null,
     val neutralCount: Int = 0,
     val newsCount: Int = 0,
 ) {
@@ -74,6 +77,8 @@ data class DigestData(
     data class SectorIssue(val title: String, val line: String, val sentiment: String, val eventId: String? = null)
 
     data class MarketIssue(val title: String, val line: String)
+
+    data class Counts(val stock: Int, val sector: Int, val market: Int)
 }
 
 @JsonInclude(JsonInclude.Include.NON_NULL)

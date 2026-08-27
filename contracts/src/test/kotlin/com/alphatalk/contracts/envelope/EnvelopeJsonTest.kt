@@ -124,6 +124,9 @@ class EnvelopeJsonTest {
                 DigestData.SectorIssue(title = "기준금리 인상", line = "이자이익 개선", sentiment = Sentiment.POSITIVE.name),
             ),
             marketIssues = listOf(DigestData.MarketIssue(title = "외국인 순매도", line = "지속")),
+            inputCounts = DigestData.Counts(stock = 17, sector = 51, market = 103),
+            includedCounts = DigestData.Counts(stock = 10, sector = 5, market = 3),
+            pipelineVersion = 2,
             neutralCount = 4,
             newsCount = 12,
         )
