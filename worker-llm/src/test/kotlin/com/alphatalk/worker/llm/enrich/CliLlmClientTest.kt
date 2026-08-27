@@ -35,7 +35,9 @@ class CliLlmClientTest {
                             "relevant": true,
                             "sentiment": "POSITIVE",
                             "confidence": 0.91,
-                            "reason": "공급 계약"
+                            "reason": "공급 계약",
+                            "relation": "DIRECT",
+                            "evidence": "삼성전자가 신규 공급 계약"
                           }
                         ],
                         "sectors": []
@@ -61,6 +63,7 @@ class CliLlmClientTest {
         assertTrue(output.marketRelevant)
         assertEquals(NewsScope.STOCK, output.scope)
         assertEquals(Sentiment.POSITIVE, output.stocks.single().sentiment)
+        assertEquals(StockRelation.DIRECT, output.stocks.single().relation)
         assertEquals("claude-test", request.command.first())
         assertTrue(request.command.containsAll(listOf("--json-schema", "--safe-mode", "--no-session-persistence")))
         assertFalse(request.command.contains("--bare"))
@@ -122,7 +125,9 @@ class CliLlmClientTest {
                           "relevant": true,
                           "sentiment": "POSITIVE",
                           "confidence": 0.91,
-                          "reason": "공급 계약"
+                          "reason": "공급 계약",
+                          "relation": "DIRECT",
+                          "evidence": "삼성전자가 신규 공급 계약"
                         }
                       ],
                       "sectors": []
@@ -146,6 +151,7 @@ class CliLlmClientTest {
         val output = client.summarize(summaryInput())
 
         assertEquals(Sentiment.POSITIVE, output.stocks.single().sentiment)
+        assertEquals(StockRelation.DIRECT, output.stocks.single().relation)
         assertEquals("codex-test", request.command.first())
         assertTrue(request.command.containsAll(listOf("exec", "--ephemeral", "--ignore-user-config", "--ignore-rules")))
         assertEquals("read-only", request.command[request.command.indexOf("--sandbox") + 1])
