@@ -181,8 +181,11 @@ DB를 사용하는 모든 서버 모듈은 Spring Data JPA를 기본이자 우�
 
 1. `JpaRepository` 기본 CRUD와 파생 쿼리 — 조회 컬럼을 좁혀야 하면 projection을, 연관을 함께 로딩해야 하면 `@EntityGraph`를 붙인다
 2. `@Query`의 JPQL — 파생 쿼리로 의도가 불명확하거나 조인·DTO projection·fetch join·벌크 갱신이 필요할 때
+3. QueryDSL — 실행 시점에 조건 조합이 달라지는 동적 쿼리(선택적 필터, 가변 개수 OR 윈도우)일 때. 문자열 프로퍼티 참조(Specification·Criteria API) 대신 kapt가 생성한 Q타입으로 조건을 컴파일타임에 검증한다
 
 엔티티 중심 CRUD와 일반 조회는 먼저 Spring Data JPA로 표현한다.
+
+QueryDSL은 JPQL을 생성하는 계층이므로 아래 raw SQL 금지 규칙의 예외가 아니다. 다만 1·2로 표현되는 정적 쿼리를 QueryDSL로 옮기지 않는다 — 사용 범위는 동적 조건 조합이 필요한 조회로 한정한다(현재 core-api `stream` 모듈의 `JpaStreamStore`·`JpaStreamInbox`). kapt와 Q타입 생성은 QueryDSL을 쓰는 모듈에만 적용하고, 어노테이션 프로세서는 명시 선언으로 한정한다(루트 `gradle.properties`의 `kapt.include.compile.classpath=false`). QueryDSL 조회도 저장소 프록시를 거치지 않으므로 어댑터에 읽기 전용 트랜잭션 경계(`@Transactional(readOnly = true)`)를 직접 선언하고, 쿼리 동작은 통합 테스트로 고정한다.
 
 **native query, `JdbcTemplate`, `JdbcClient`, 직접 JDBC와 문자열 SQL은 일반적인 선택지에 포함하지 않는다. 에이전트는 이를 자체 판단으로 도입하거나 JPA 구현을 raw SQL로 교체하지 않는다.** 불가피하다고 판단하면 코드를 작성하기 전에 다음 내용을 사용자에게 제시하고 명시적 합의를 받는다.
 

@@ -2,6 +2,7 @@ plugins {
     alias(libs.plugins.kotlin.jvm)
     alias(libs.plugins.kotlin.spring)
     alias(libs.plugins.kotlin.jpa)
+    alias(libs.plugins.kotlin.kapt)
     alias(libs.plugins.spring.boot)
     alias(libs.plugins.spring.dependency.management)
 }
@@ -45,6 +46,10 @@ dependencies {
     implementation("org.jetbrains.kotlin:kotlin-reflect")
     implementation(libs.spring.modulith.core)
     implementation(libs.ulid.creator)
+    implementation("com.querydsl:querydsl-jpa:${libs.versions.querydsl.get()}:jakarta")
+    kapt("com.querydsl:querydsl-apt:${libs.versions.querydsl.get()}:jakarta")
+    kapt("jakarta.persistence:jakarta.persistence-api")
+    kapt("jakarta.annotation:jakarta.annotation-api")
     runtimeOnly("org.postgresql:postgresql")
 
     testImplementation(kotlin("test"))
