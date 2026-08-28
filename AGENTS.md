@@ -31,7 +31,7 @@
 - Kotlin 2.x / JVM 21 / Spring Boot 3.5.x (3.x 최신 패치)
 - WebSocket: **Spring MVC 스택 + `@EnableWebSocketMessageBroker`(SimpleBroker)** — WebFlux 아님 (v0.2에서 전환 결정)
 - Redis: Spring Data Redis (Lettuce), Pub/Sub 구독 전용
-- 관계형 DB 접근: DB를 사용하는 모든 서버 모듈은 **Spring Data JPA를 기본이자 우선 구현으로 사용한다**. 우선순위는 `JpaRepository` 기본 CRUD·파생 쿼리(필요 시 projection·`@EntityGraph`) → `@Query` JPQL(DTO projection·fetch join 포함)이다. native query, `JdbcTemplate`, `JdbcClient`, 직접 JDBC와 문자열 SQL은 에이전트가 자체 판단으로 도입하지 않는다. 불가피하다고 판단하면 구현 전에 JPA/JPQL로 해결할 수 없는 근거와 측정 결과를 제시하고 사용자 합의를 받은 뒤 설계 문서에 예외를 기록한다.
+- 관계형 DB 접근: DB를 사용하는 모든 서버 모듈은 **Spring Data JPA를 기본이자 우선 구현으로 사용한다**. 우선순위는 `JpaRepository` 기본 CRUD·파생 쿼리(필요 시 projection·`@EntityGraph`) → `@Query` JPQL(DTO projection·fetch join 포함) → 동적 조건 조합만 QueryDSL(kapt Q타입, 범위·기준은 [md/coding_convention.md](md/coding_convention.md) §7)이다. native query, `JdbcTemplate`, `JdbcClient`, 직접 JDBC와 문자열 SQL은 에이전트가 자체 판단으로 도입하지 않는다. 불가피하다고 판단하면 구현 전에 JPA/JPQL로 해결할 수 없는 근거와 측정 결과를 제시하고 사용자 합의를 받은 뒤 설계 문서에 예외를 기록한다.
 - 빌드: Gradle Kotlin DSL 멀티모듈 + `gradle/libs.versions.toml`
 - 테스트: JUnit5 + Testcontainers(Redis) + `WebSocketStompClient`
 

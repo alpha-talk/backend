@@ -1,11 +1,12 @@
 package com.alphatalk.coreapi.stream
 
+import com.alphatalk.coreapi.stream.QStreamEventEntity.streamEventEntity
 import com.fasterxml.jackson.databind.ObjectMapper
+import com.querydsl.core.types.dsl.BooleanExpression
+import com.querydsl.jpa.impl.JPAQueryFactory
 import org.springframework.data.domain.PageRequest
 import org.springframework.data.domain.Sort
-import org.springframework.data.jpa.domain.Specification
 import org.springframework.data.jpa.repository.JpaRepository
-import org.springframework.data.jpa.repository.JpaSpecificationExecutor
 import org.springframework.data.jpa.repository.Query
 import org.springframework.data.repository.query.Param
 import org.springframework.stereotype.Repository
@@ -15,9 +16,7 @@ interface StreamEventIdView {
     val eventId: String
 }
 
-interface StreamInboxJpaRepository :
-    JpaRepository<StreamEventEntity, String>,
-    JpaSpecificationExecutor<StreamEventEntity> {
+interface StreamInboxJpaRepository : JpaRepository<StreamEventEntity, String> {
     fun findByCodeAndEventIdGreaterThan(code: String, eventId: String, pageable: PageRequest): List<StreamEventIdView>
 
     fun findByCode(code: String, pageable: PageRequest): List<StreamEventIdView>
@@ -42,6 +41,7 @@ interface StreamInboxJpaRepository :
 @Transactional(readOnly = true)
 class JpaStreamInbox(
     private val events: StreamInboxJpaRepository,
+    private val queryFactory: JPAQueryFactory,
     private val mapper: ObjectMapper,
 ) : StreamInbox {
     override fun countUnread(windows: List<UnreadWindow>, perCodeFetchLimit: Int): Map<String, Int> {
@@ -62,14 +62,11 @@ class JpaStreamInbox(
         limit: Int,
     ): List<StreamItem> {
         if (windows.isEmpty()) return emptyList()
-        val spec = unreadIn(windows)
-            .and(ofTypes(types))
-            .and(beforeEventId?.let(::olderThan))
-        return events.findBy<StreamEventEntity, List<StreamEventEntity>>(spec) {
-            it.sortBy(Sort.by(Sort.Direction.DESC, "eventId"))
-                .limit(limit)
-                .all()
-        }
+        return queryFactory.selectFrom(streamEventEntity)
+            .where(unreadIn(windows), ofTypes(types), beforeEventId?.let(::olderThan))
+            .orderBy(streamEventEntity.eventId.desc())
+            .limit(limit.toLong())
+            .fetch()
             .map(::toItem)
     }
 
@@ -79,7 +76,7 @@ class JpaStreamInbox(
         eventId: String,
     ): Boolean {
         if (windows.isEmpty()) return false
-        return events.exists(unreadIn(windows).and(ofTypes(types)).and(olderThan(eventId)))
+        return exists(unreadIn(windows), ofTypes(types), olderThan(eventId))
     }
 
     override fun hasUnreadNewerThan(
@@ -88,7 +85,7 @@ class JpaStreamInbox(
         eventId: String,
     ): Boolean {
         if (windows.isEmpty()) return false
-        return events.exists(unreadIn(windows).and(ofTypes(types)).and(newerThan(eventId)))
+        return exists(unreadIn(windows), ofTypes(types), newerThan(eventId))
     }
 
     override fun latestEventIds(codes: Collection<String>): Map<String, String> {
@@ -96,28 +93,26 @@ class JpaStreamInbox(
         return events.latestByCodes(codes).associate { it.code.trim() to it.eventId }
     }
 
-    private fun unreadIn(windows: List<UnreadWindow>) = Specification<StreamEventEntity> { root, _, builder ->
-        builder.or(
-            *windows.map { window ->
-                val inRoom = builder.equal(root.get<String>("code"), window.code)
-                window.afterEventId
-                    ?.let { builder.and(inRoom, builder.greaterThan(root.get("eventId"), it)) }
-                    ?: inRoom
-            }.toTypedArray(),
-        )
-    }
+    private fun exists(vararg conditions: BooleanExpression?): Boolean =
+        queryFactory.selectOne()
+            .from(streamEventEntity)
+            .where(*conditions)
+            .fetchFirst() != null
 
-    private fun ofTypes(types: List<StreamEventType>) = Specification<StreamEventEntity> { root, _, _ ->
-        if (types.isEmpty()) null else root.get<String>("type").`in`(types.map(StreamEventType::storedType))
-    }
+    private fun unreadIn(windows: List<UnreadWindow>): BooleanExpression =
+        windows.map { window ->
+            val inRoom = streamEventEntity.code.eq(window.code)
+            window.afterEventId
+                ?.let { inRoom.and(streamEventEntity.eventId.gt(it)) }
+                ?: inRoom
+        }.reduce(BooleanExpression::or)
 
-    private fun olderThan(eventId: String) = Specification<StreamEventEntity> { root, _, builder ->
-        builder.lessThan(root.get("eventId"), eventId)
-    }
+    private fun ofTypes(types: List<StreamEventType>): BooleanExpression? =
+        if (types.isEmpty()) null else streamEventEntity.type.`in`(types.map(StreamEventType::storedType))
 
-    private fun newerThan(eventId: String) = Specification<StreamEventEntity> { root, _, builder ->
-        builder.greaterThan(root.get("eventId"), eventId)
-    }
+    private fun olderThan(eventId: String): BooleanExpression = streamEventEntity.eventId.lt(eventId)
+
+    private fun newerThan(eventId: String): BooleanExpression = streamEventEntity.eventId.gt(eventId)
 
     private fun toItem(entity: StreamEventEntity) = StreamItem(
         eventId = entity.eventId.trim(),

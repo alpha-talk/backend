@@ -1,6 +1,9 @@
 package com.alphatalk.coreapi.stream
 
+import com.alphatalk.coreapi.stream.QStreamEventEntity.streamEventEntity
 import com.fasterxml.jackson.databind.ObjectMapper
+import com.querydsl.core.types.dsl.BooleanExpression
+import com.querydsl.jpa.impl.JPAQueryFactory
 import jakarta.persistence.Column
 import jakarta.persistence.Entity
 import jakarta.persistence.Id
@@ -8,11 +11,9 @@ import jakarta.persistence.Table
 import org.hibernate.annotations.Immutable
 import org.hibernate.annotations.JdbcTypeCode
 import org.hibernate.type.SqlTypes
-import org.springframework.data.domain.Sort
-import org.springframework.data.jpa.domain.Specification
 import org.springframework.data.jpa.repository.JpaRepository
-import org.springframework.data.jpa.repository.JpaSpecificationExecutor
 import org.springframework.stereotype.Repository
+import org.springframework.transaction.annotation.Transactional
 import java.time.Instant
 
 @Entity
@@ -37,55 +38,52 @@ class StreamEventEntity(
     var payload: String = "",
 )
 
-interface StreamEventJpaRepository :
-    JpaRepository<StreamEventEntity, String>,
-    JpaSpecificationExecutor<StreamEventEntity>
+interface StreamEventJpaRepository : JpaRepository<StreamEventEntity, String>
 
 @Repository
+@Transactional(readOnly = true)
 class JpaStreamStore(
     private val events: StreamEventJpaRepository,
+    private val queryFactory: JPAQueryFactory,
     private val mapper: ObjectMapper,
 ) : StreamStore {
     override fun find(query: StreamQuery): List<StreamItem> {
         val ascending = query.direction == CursorDirection.AFTER
-        val spec = inRoom(query.code)
-            .and(ofTypes(query.types))
-            .and(query.cursor?.let { if (ascending) newerThan(it) else olderThan(it) })
-        val order = if (ascending) Sort.Direction.ASC else Sort.Direction.DESC
-        return events.findBy<StreamEventEntity, List<StreamEventEntity>>(spec) {
-            it.sortBy(Sort.by(order, "eventId"))
-                .limit(query.limit)
-                .all()
-        }
+        val order = if (ascending) streamEventEntity.eventId.asc() else streamEventEntity.eventId.desc()
+        val cursorFilter = query.cursor?.let { if (ascending) newerThan(it) else olderThan(it) }
+        return queryFactory.selectFrom(streamEventEntity)
+            .where(inRoom(query.code), ofTypes(query.types), cursorFilter)
+            .orderBy(order)
+            .limit(query.limit.toLong())
+            .fetch()
             .map(::toItem)
     }
 
     override fun hasOlderThan(code: String, eventId: String, types: List<StreamEventType>): Boolean =
-        events.exists(inRoom(code).and(ofTypes(types)).and(olderThan(eventId)))
+        exists(inRoom(code), ofTypes(types), olderThan(eventId))
 
     override fun hasNewerThan(code: String, eventId: String, types: List<StreamEventType>): Boolean =
-        events.exists(inRoom(code).and(ofTypes(types)).and(newerThan(eventId)))
+        exists(inRoom(code), ofTypes(types), newerThan(eventId))
 
     override fun findInRoom(code: String, eventId: String): StreamItem? =
         events.findById(eventId).orElse(null)
             ?.takeIf { it.code.trim() == code }
             ?.let(::toItem)
 
-    private fun inRoom(code: String) = Specification<StreamEventEntity> { root, _, builder ->
-        builder.equal(root.get<String>("code"), code)
-    }
+    private fun exists(vararg conditions: BooleanExpression?): Boolean =
+        queryFactory.selectOne()
+            .from(streamEventEntity)
+            .where(*conditions)
+            .fetchFirst() != null
 
-    private fun ofTypes(types: List<StreamEventType>) = Specification<StreamEventEntity> { root, _, _ ->
-        if (types.isEmpty()) null else root.get<String>("type").`in`(types.map(StreamEventType::storedType))
-    }
+    private fun inRoom(code: String): BooleanExpression = streamEventEntity.code.eq(code)
 
-    private fun olderThan(eventId: String) = Specification<StreamEventEntity> { root, _, builder ->
-        builder.lessThan(root.get("eventId"), eventId)
-    }
+    private fun ofTypes(types: List<StreamEventType>): BooleanExpression? =
+        if (types.isEmpty()) null else streamEventEntity.type.`in`(types.map(StreamEventType::storedType))
 
-    private fun newerThan(eventId: String) = Specification<StreamEventEntity> { root, _, builder ->
-        builder.greaterThan(root.get("eventId"), eventId)
-    }
+    private fun olderThan(eventId: String): BooleanExpression = streamEventEntity.eventId.lt(eventId)
+
+    private fun newerThan(eventId: String): BooleanExpression = streamEventEntity.eventId.gt(eventId)
 
     private fun toItem(entity: StreamEventEntity) = StreamItem(
         eventId = entity.eventId.trim(),

@@ -14,6 +14,7 @@ resilience4j = "2.3.0"
 java-websocket = "1.6.0"
 shedlock = "5.16.0"
 spring-modulith = "1.3.5"
+querydsl = "5.1.0"
 
 [libraries]
 jackson-annotations = { module = "com.fasterxml.jackson.core:jackson-annotations", version.ref = "jackson" }
@@ -41,5 +42,6 @@ spring-modulith-test = { module = "org.springframework.modulith:spring-modulith-
 kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
 kotlin-spring = { id = "org.jetbrains.kotlin.plugin.spring", version.ref = "kotlin" }
 kotlin-jpa = { id = "org.jetbrains.kotlin.plugin.jpa", version.ref = "kotlin" }
+kotlin-kapt = { id = "org.jetbrains.kotlin.kapt", version.ref = "kotlin" }
 spring-boot = { id = "org.springframework.boot", version.ref = "spring-boot" }
 spring-dependency-management = { id = "io.spring.dependency-management", version.ref = "spring-dependency-management" }
