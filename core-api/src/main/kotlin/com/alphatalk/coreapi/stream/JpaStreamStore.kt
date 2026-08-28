@@ -13,6 +13,7 @@ import org.hibernate.annotations.JdbcTypeCode
 import org.hibernate.type.SqlTypes
 import org.springframework.data.jpa.repository.JpaRepository
 import org.springframework.stereotype.Repository
+import org.springframework.transaction.annotation.Transactional
 import java.time.Instant
 
 @Entity
@@ -40,6 +41,7 @@ class StreamEventEntity(
 interface StreamEventJpaRepository : JpaRepository<StreamEventEntity, String>
 
 @Repository
+@Transactional(readOnly = true)
 class JpaStreamStore(
     private val events: StreamEventJpaRepository,
     private val queryFactory: JPAQueryFactory,
