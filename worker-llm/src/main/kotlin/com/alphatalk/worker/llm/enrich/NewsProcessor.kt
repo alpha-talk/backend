@@ -2,6 +2,7 @@ package com.alphatalk.worker.llm.enrich
 
 import com.alphatalk.contracts.envelope.NewsScope
 import com.alphatalk.contracts.envelope.SectorRef
+import com.alphatalk.contracts.envelope.SourceRef
 import com.alphatalk.contracts.envelope.StreamData
 import com.alphatalk.contracts.queue.IngestQueueEntry
 import com.alphatalk.worker.llm.article.ArticleFetcher
@@ -82,122 +83,142 @@ class NewsProcessor(
             sectors = sectors.allSectors().map { SectorCandidate(it.code, it.name) },
         )
         val verdict = summarizer.summarize(summaryInput)
+        ensureSummarizeLease(cluster.id, token)
+        val plan = planPublication(entry, cluster.id, verdict, summaryInput)
         val publications = mutableListOf<PendingPublication>()
-        var evidenceRejected = emptyList<StockVerdict>()
-        var downgradedFromStock = false
         transactions.run {
             ensureSummarizeLease(cluster.id, token)
-            if (!verdict.marketRelevant) {
-                if (!store.markIrrelevant(cluster.id, token)) throw ClusterContendedException(cluster.id)
-                return@run
-            }
-            val sectorVerdicts = normalizeSectors(verdict.sectors)
-            sectorVerdicts.forEach {
-                store.upsertSectorLink(cluster.id, it.sectorCode, it.sentiment.name, it.confidence, it.impact.name)
-            }
-
-            val candidates = entry.codes.toSet()
-            val (relevantStocks, excludedStocks) = verdict.stocks
-                .filter(StockVerdict::relevant)
-                .partition { stockEvidence.accepts(it, candidates, summaryInput) }
-            evidenceRejected = excludedStocks.filter { it.relation == StockRelation.DIRECT }
-            if (evidenceRejected.isNotEmpty()) {
-                log.info(
-                    "stock evidence rejected: clusterId={} codes={}",
-                    cluster.id,
-                    evidenceRejected.map(StockVerdict::code),
-                )
-            }
-            val relevantCodes = relevantStocks.map { it.code }.toSet()
-            entry.codes.filter { it !in relevantCodes }.forEach { code ->
-                val confidence = verdict.stocks.firstOrNull { it.code == code }?.confidence
-                store.applyStockVerdict(cluster.id, code, null, confidence, rejected = true)
-            }
-            val finalScope = when (verdict.scope) {
-                NewsScope.STOCK ->
-                    if (relevantStocks.isNotEmpty()) {
-                        persistStockScope(cluster, verdict, relevantStocks, publications)
-                    } else {
-                        downgradedFromStock = true
-                        log.info(
-                            "stock scope downgraded: clusterId={} sectors={}",
-                            cluster.id,
-                            sectorVerdicts.size,
-                        )
-                        persistSectorScope(cluster, verdict, sectorVerdicts, emptyList(), candidates, publications)
-                    }
-                NewsScope.SECTOR ->
-                    persistSectorScope(cluster, verdict, sectorVerdicts, relevantStocks, candidates, publications)
-                NewsScope.MARKET -> NewsScope.MARKET
-            }
-            if (finalScope == null) {
-                if (!store.markIrrelevant(cluster.id, token)) throw ClusterContendedException(cluster.id)
-            } else if (!store.markSummarized(cluster.id, token, verdict.summary, finalScope.name)) {
-                throw ClusterContendedException(cluster.id)
-            }
+            applyPlan(cluster, verdict.summary, plan, token, publications)
         }
-        if (evidenceRejected.isNotEmpty()) {
-            meters.counter("stock.evidence.rejected").increment(evidenceRejected.size.toDouble())
-        }
-        if (downgradedFromStock) {
-            meters.counter("stock.scope.downgraded").increment()
-        }
+        recordPlanMetrics(plan)
         publish(publications)
     }
 
-    private fun persistStockScope(
-        cluster: ClusterRecord,
+    private fun planPublication(
+        entry: IngestQueueEntry,
+        clusterId: String,
         verdict: ClusterSummaryOutput,
-        relevantStocks: List<StockVerdict>,
-        publications: MutableList<PendingPublication>,
-    ): NewsScope? {
-        if (relevantStocks.isEmpty()) return null
-        relevantStocks.forEach { stock ->
-            persistStockEvent(cluster, verdict.summary, stock.code, stock.sentiment.name, stock.confidence, null, null)
-                ?.let(publications::add)
+        summaryInput: ClusterSummaryInput,
+    ): SummaryPlan {
+        if (!verdict.marketRelevant) return SummaryPlan()
+
+        val sectorVerdicts = normalizeSectors(verdict.sectors)
+        val candidates = entry.codes.toSet()
+        val (relevantStocks, excludedStocks) = verdict.stocks
+            .filter(StockVerdict::relevant)
+            .partition { stockEvidence.accepts(it, candidates, summaryInput) }
+        val evidenceRejected = excludedStocks.filter { it.relation == StockRelation.DIRECT }
+        if (evidenceRejected.isNotEmpty()) {
+            log.info(
+                "stock evidence rejected: clusterId={} codes={}",
+                clusterId,
+                evidenceRejected.map(StockVerdict::code),
+            )
         }
-        return NewsScope.STOCK
+        val relevantCodes = relevantStocks.map { it.code }.toSet()
+        val rejectedCandidates = entry.codes.filter { it !in relevantCodes }.map { code ->
+            StockLinkWrite(
+                code = code,
+                sentiment = null,
+                confidence = verdict.stocks.firstOrNull { it.code == code }?.confidence,
+                rejected = true,
+            )
+        }
+        val base = SummaryPlan(
+            sectorVerdicts = sectorVerdicts,
+            stockLinkWrites = rejectedCandidates,
+            evidenceRejected = evidenceRejected,
+        )
+
+        return when (verdict.scope) {
+            NewsScope.STOCK ->
+                if (relevantStocks.isNotEmpty()) {
+                    base.copy(
+                        finalScope = NewsScope.STOCK,
+                        stockEvents = relevantStocks.distinctBy(StockVerdict::code).map {
+                            PlannedStockEvent(it.code, it.sentiment.name, it.confidence, null, null)
+                        },
+                    )
+                } else {
+                    log.info("stock scope downgraded: clusterId={} sectors={}", clusterId, sectorVerdicts.size)
+                    planSectorScope(clusterId, base, emptyList(), candidates).copy(downgradedFromStock = true)
+                }
+            NewsScope.SECTOR -> planSectorScope(clusterId, base, relevantStocks, candidates)
+            NewsScope.MARKET -> base.copy(finalScope = NewsScope.MARKET)
+        }
     }
 
-    private fun persistSectorScope(
-        cluster: ClusterRecord,
-        verdict: ClusterSummaryOutput,
-        sectorVerdicts: List<SectorVerdict>,
+    private fun planSectorScope(
+        clusterId: String,
+        base: SummaryPlan,
         relevantStocks: List<StockVerdict>,
         sourceCandidates: Set<String>,
-        publications: MutableList<PendingPublication>,
-    ): NewsScope? {
-        if (relevantStocks.isEmpty() && sectorVerdicts.isEmpty()) return null
+    ): SummaryPlan {
+        if (relevantStocks.isEmpty() && base.sectorVerdicts.isEmpty()) return base
+
         val (sourced, discovered) = relevantStocks.partition { it.code in sourceCandidates }
         val discoveredCodes = discovered.mapTo(mutableSetOf(), StockVerdict::code)
         val exemptCodes = sourced.mapTo(mutableSetOf(), StockVerdict::code)
-        val plan = resolveFanout(cluster.id, sectorVerdicts, discoveredCodes, exemptCodes)
-        if (!plan.includeDiscovered) {
-            discovered.forEach {
-                store.applyStockVerdict(cluster.id, it.code, it.sentiment.name, it.confidence, rejected = false)
+        val outcome = resolveFanout(clusterId, base.sectorVerdicts, discoveredCodes, exemptCodes)
+
+        val linkOnly = if (outcome.plan.includeDiscovered) {
+            emptyList()
+        } else {
+            discovered.map { StockLinkWrite(it.code, it.sentiment.name, it.confidence, rejected = false) }
+        }
+        val capExempt = sourced + if (outcome.plan.includeDiscovered) discovered else emptyList()
+        val stockEvents = (
+            capExempt.map {
+                PlannedStockEvent(it.code, it.sentiment.name, it.confidence, NewsScope.SECTOR, sectorRefOf(it.code))
+            } +
+                outcome.plan.members.map { (code, context) ->
+                    val (sectorVerdict, ref) = context
+                    PlannedStockEvent(
+                        code,
+                        sectorVerdict.sentiment.name,
+                        sectorVerdict.confidence,
+                        NewsScope.SECTOR,
+                        ref,
+                    )
+                }
+            ).distinctBy(PlannedStockEvent::code)
+
+        return base.copy(
+            finalScope = NewsScope.SECTOR,
+            stockLinkWrites = base.stockLinkWrites + linkOnly,
+            stockEvents = stockEvents,
+            fanoutCounters = outcome.counters,
+        )
+    }
+
+    private fun applyPlan(
+        cluster: ClusterRecord,
+        summary: String,
+        plan: SummaryPlan,
+        token: String,
+        publications: MutableList<PendingPublication>,
+    ) {
+        plan.sectorVerdicts.forEach {
+            store.upsertSectorLink(cluster.id, it.sectorCode, it.sentiment.name, it.confidence, it.impact.name)
+        }
+        plan.stockLinkWrites.forEach {
+            store.applyStockVerdict(cluster.id, it.code, it.sentiment, it.confidence, it.rejected)
+        }
+        if (plan.stockEvents.isNotEmpty()) {
+            val context = EventContext(
+                sources = store.articleSources(cluster.id),
+                sourceUrl = store.representativeUrl(cluster.id),
+                eventIdByCode = store.stockLinks(cluster.id).associate { it.code to it.streamEventId },
+            )
+            plan.stockEvents.forEach { event ->
+                persistStockEvent(cluster, summary, event, context)?.let(publications::add)
             }
         }
-
-        val published = mutableSetOf<String>()
-        val capExempt = sourced + if (plan.includeDiscovered) discovered else emptyList()
-        capExempt.forEach { stock ->
-            published += stock.code
-            persistStockEvent(
-                cluster,
-                verdict.summary,
-                stock.code,
-                stock.sentiment.name,
-                stock.confidence,
-                NewsScope.SECTOR,
-                sectorRefOf(stock.code),
-            )?.let(publications::add)
+        if (plan.finalScope == null) {
+            if (!store.markIrrelevant(cluster.id, token)) throw ClusterContendedException(cluster.id)
+        } else if (!store.markSummarized(cluster.id, token, summary, plan.finalScope.name)) {
+            throw ClusterContendedException(cluster.id)
         }
-        plan.members.filterKeys { it !in published }.forEach { (code, ctx) ->
-            val (sv, ref) = ctx
-            persistStockEvent(cluster, verdict.summary, code, sv.sentiment.name, sv.confidence, NewsScope.SECTOR, ref)
-                ?.let(publications::add)
-        }
-        return NewsScope.SECTOR
     }
 
     private fun normalizeSectors(verdicts: List<SectorVerdict>): List<SectorVerdict> =
@@ -208,31 +229,31 @@ class NewsProcessor(
         verdicts: List<SectorVerdict>,
         discovered: Set<String>,
         exemptCodes: Set<String>,
-    ): FanoutPlan {
+    ): FanoutOutcome {
         val all = memberFanout(verdicts)
         val allCount = cappedCount(all, discovered, exemptCodes)
-        if (allCount <= fanoutCap) return FanoutPlan(all, includeDiscovered = true)
+        if (allCount <= fanoutCap) return FanoutOutcome(FanoutPlan(all, includeDiscovered = true), emptyList())
 
-        meters.counter("sector.fanout.tier2").increment()
+        val counters = mutableListOf("sector.fanout.tier2")
         val material = all.filterValues { it.first.impact != Impact.LOW }
         val materialCount = cappedCount(material, discovered, exemptCodes)
         if ((material.isEmpty() && discovered.isEmpty()) || materialCount > fanoutHardCap) {
-            meters.counter("sector.fanout.suppressed").increment()
+            counters += "sector.fanout.suppressed"
             log.warn(
                 "sector fan-out suppressed: clusterId={} sectors={} all={} material={} discovered={} " +
                     "cap={} hardCap={}",
                 clusterId, sectorCodesOf(verdicts), allCount, materialCount, discovered.size, fanoutCap, fanoutHardCap,
             )
-            return FanoutPlan(emptyMap(), includeDiscovered = false)
+            return FanoutOutcome(FanoutPlan(emptyMap(), includeDiscovered = false), counters)
         }
         if (materialCount < allCount) {
-            meters.counter("sector.fanout.degraded").increment()
+            counters += "sector.fanout.degraded"
             log.info(
                 "sector fan-out degraded to material impact: clusterId={} sectors={} all={} material={} discovered={}",
                 clusterId, sectorCodesOf(verdicts), allCount, materialCount, discovered.size,
             )
         }
-        return FanoutPlan(material, includeDiscovered = true)
+        return FanoutOutcome(FanoutPlan(material, includeDiscovered = true), counters)
     }
 
     private fun cappedCount(
@@ -245,6 +266,8 @@ class NewsProcessor(
         val members: Map<String, Pair<SectorVerdict, SectorRef>>,
         val includeDiscovered: Boolean,
     )
+
+    private data class FanoutOutcome(val plan: FanoutPlan, val counters: List<String>)
 
     private fun sectorCodesOf(verdicts: List<SectorVerdict>): String =
         verdicts.take(LOGGED_SECTORS).joinToString(",") { "${it.sectorCode}:${it.impact}" } +
@@ -265,16 +288,13 @@ class NewsProcessor(
     private fun persistStockEvent(
         cluster: ClusterRecord,
         summary: String,
-        code: String,
-        sentiment: String?,
-        confidence: Double?,
-        scope: NewsScope?,
-        sector: SectorRef?,
+        event: PlannedStockEvent,
+        context: EventContext,
     ): PendingPublication? {
-        store.applyStockVerdict(cluster.id, code, sentiment, confidence, rejected = false)
-        val eventId = store.stockLinks(cluster.id).first { it.code == code }.streamEventId
-            ?: eventIds.next().takeIf { store.claimStockEvent(cluster.id, code, it) }
-            ?: store.stockLinks(cluster.id).first { it.code == code }.streamEventId
+        store.applyStockVerdict(cluster.id, event.code, event.sentiment, event.confidence, rejected = false)
+        val eventId = context.eventIdByCode[event.code]
+            ?: eventIds.next().takeIf { store.claimStockEvent(cluster.id, event.code, it) }
+            ?: store.stockLinks(cluster.id).firstOrNull { it.code == event.code }?.streamEventId
             ?: return null
 
         val category = cluster.category
@@ -282,39 +302,52 @@ class NewsProcessor(
             category = category.payload,
             title = cluster.repTitle,
             summary = summary,
-            sourceUrl = store.representativeUrl(cluster.id),
+            sourceUrl = context.sourceUrl,
             occurredAt = clock.millis(),
-            sentiment = sentiment,
-            scope = scope?.name,
-            sector = sector,
-            sources = store.articleSources(cluster.id),
+            sentiment = event.sentiment,
+            scope = event.scope?.name,
+            sector = event.sector,
+            sources = context.sources,
         )
-        return PendingPublication(code, eventId, data)
-            .takeIf { events.insertEvent(eventId, code, category.eventType, clock.instant(), "worker-llm", data) }
+        return PendingPublication(event.code, eventId, data)
+            .takeIf { events.insertEvent(eventId, event.code, category.eventType, clock.instant(), "worker-llm", data) }
     }
 
     private fun refreshAfterJoin(entry: IngestQueueEntry, cluster: ClusterRecord) {
+        val sectorScoped = cluster.scope == NewsScope.SECTOR.name
+        val sectorRefs = if (sectorScoped) entry.codes.associateWith(::sectorRefOf) else emptyMap()
         val publications = mutableListOf<PendingPublication>()
         transactions.run {
-            val sourcesJson = mapper.writeValueAsString(store.articleSources(cluster.id))
+            val sources = store.articleSources(cluster.id)
             val links = store.stockLinks(cluster.id)
+            val sourcesJson = mapper.writeValueAsString(sources)
             links.mapNotNull { it.streamEventId }.forEach { events.refreshSources(it, sourcesJson) }
 
             val published = links.filter { it.streamEventId != null }.map { it.code }.toSet()
             val rejected = links.filter { it.rejected == true }.map { it.code }.toSet()
             val linkByCode = links.associateBy(StockLink::code)
-            val sectorScoped = cluster.scope == NewsScope.SECTOR.name
-            entry.codes.filter { it !in published && it !in rejected }.forEach { code ->
-                val existing = linkByCode[code]
-                persistStockEvent(
-                    cluster,
-                    cluster.summary.orEmpty(),
-                    code,
-                    existing?.sentiment,
-                    existing?.confidence,
-                    if (sectorScoped) NewsScope.SECTOR else null,
-                    if (sectorScoped) sectorRefOf(code) else null,
-                )?.let(publications::add)
+            val pending = entry.codes.filter { it !in published && it !in rejected }
+            if (pending.isNotEmpty()) {
+                val context = EventContext(
+                    sources = sources,
+                    sourceUrl = store.representativeUrl(cluster.id),
+                    eventIdByCode = links.associate { it.code to it.streamEventId },
+                )
+                pending.forEach { code ->
+                    val existing = linkByCode[code]
+                    persistStockEvent(
+                        cluster,
+                        cluster.summary.orEmpty(),
+                        PlannedStockEvent(
+                            code = code,
+                            sentiment = existing?.sentiment,
+                            confidence = existing?.confidence,
+                            scope = if (sectorScoped) NewsScope.SECTOR else null,
+                            sector = sectorRefs[code],
+                        ),
+                        context,
+                    )?.let(publications::add)
+                }
             }
         }
         publish(publications)
@@ -326,6 +359,16 @@ class NewsProcessor(
         }
     }
 
+    private fun recordPlanMetrics(plan: SummaryPlan) {
+        if (plan.evidenceRejected.isNotEmpty()) {
+            meters.counter("stock.evidence.rejected").increment(plan.evidenceRejected.size.toDouble())
+        }
+        if (plan.downgradedFromStock) {
+            meters.counter("stock.scope.downgraded").increment()
+        }
+        plan.fanoutCounters.forEach { meters.counter(it).increment() }
+    }
+
     private fun publish(publications: List<PendingPublication>) {
         publications.forEach { publisher.publish(it.code, it.eventId, it.data) }
     }
@@ -333,6 +376,37 @@ class NewsProcessor(
     private companion object {
         const val LOGGED_SECTORS = 10
     }
+
+    private data class SummaryPlan(
+        val finalScope: NewsScope? = null,
+        val sectorVerdicts: List<SectorVerdict> = emptyList(),
+        val stockLinkWrites: List<StockLinkWrite> = emptyList(),
+        val stockEvents: List<PlannedStockEvent> = emptyList(),
+        val evidenceRejected: List<StockVerdict> = emptyList(),
+        val fanoutCounters: List<String> = emptyList(),
+        val downgradedFromStock: Boolean = false,
+    )
+
+    private data class StockLinkWrite(
+        val code: String,
+        val sentiment: String?,
+        val confidence: Double?,
+        val rejected: Boolean,
+    )
+
+    private data class PlannedStockEvent(
+        val code: String,
+        val sentiment: String?,
+        val confidence: Double?,
+        val scope: NewsScope?,
+        val sector: SectorRef?,
+    )
+
+    private data class EventContext(
+        val sources: List<SourceRef>,
+        val sourceUrl: String?,
+        val eventIdByCode: Map<String, String?>,
+    )
 
     private data class PendingPublication(
         val code: String,
