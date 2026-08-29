@@ -5,6 +5,8 @@ import com.alphatalk.contracts.envelope.Sentiment
 import com.alphatalk.contracts.queue.IngestQueueEntry
 import com.alphatalk.contracts.queue.IngestType
 import com.alphatalk.worker.llm.cluster.ClusterStatus
+import com.alphatalk.worker.llm.cluster.SectorLinkWrite
+import com.alphatalk.worker.llm.cluster.StockVerdictWrite
 import com.alphatalk.worker.llm.cluster.InMemoryClusterStore
 import com.alphatalk.worker.llm.config.LlmProperties
 import com.alphatalk.worker.llm.sector.SectorDirectory
@@ -68,8 +70,8 @@ class DigestProcessorTest {
             it.scope = scope
         }
         code?.let {
-            store.applyStockVerdict(id, it, sentiment?.name, 0.9, rejected = false)
-            store.claimStockEvent(id, it, "ev-$id".take(26).padEnd(26, '0'))
+            store.applyStockVerdicts(id, listOf(StockVerdictWrite(it, sentiment?.name, 0.9, rejected = false)))
+            store.claimStockEvents(id, mapOf(it to "ev-$id".take(26).padEnd(26, '0')))
         }
     }
 
@@ -81,7 +83,7 @@ class DigestProcessorTest {
         seedCluster("c2".padEnd(26, '0'), "공장 화재", Sentiment.NEGATIVE, inWindow)
         seedCluster("c3".padEnd(26, '0'), "단순 소식", Sentiment.NEUTRAL, inWindow)
         seedCluster("c4".padEnd(26, '0'), "반도체 업황 개선", null, inWindow, scope = "SECTOR", code = null)
-        store.upsertSectorLink("c4".padEnd(26, '0'), "33", "POSITIVE", 0.9, "HIGH")
+        store.upsertSectorLinks("c4".padEnd(26, '0'), listOf(SectorLinkWrite("33", "POSITIVE", 0.9, "HIGH")))
         seedCluster("c5".padEnd(26, '0'), "외국인 순매도", null, inWindow, scope = "MARKET", code = null)
 
         processor.process(digestEntry())
@@ -132,7 +134,7 @@ class DigestProcessorTest {
     fun `SECTOR fan-out 클러스터는 positives가 아니라 sectorIssues로 분류`() {
         val id = "c7".padEnd(26, '0')
         seedCluster(id, "반도체 업황 개선", Sentiment.POSITIVE, inWindow, scope = "SECTOR")
-        store.upsertSectorLink(id, "33", "POSITIVE", 0.9, "HIGH")
+        store.upsertSectorLinks(id, listOf(SectorLinkWrite("33", "POSITIVE", 0.9, "HIGH")))
 
         processor.process(digestEntry())
 
@@ -168,12 +170,16 @@ class DigestProcessorTest {
         repeat(7) { index ->
             val id = "s$index".padEnd(26, '0')
             seedCluster(id, "섹터 $index", null, inWindow.plusSeconds(index.toLong()), scope = "SECTOR", code = null)
-            store.upsertSectorLink(
+            store.upsertSectorLinks(
                 id,
-                "33",
-                Sentiment.POSITIVE.name,
-                0.9,
-                if (index == 6) Impact.HIGH.name else Impact.LOW.name,
+                listOf(
+                    SectorLinkWrite(
+                        "33",
+                        Sentiment.POSITIVE.name,
+                        0.9,
+                        if (index == 6) Impact.HIGH.name else Impact.LOW.name,
+                    ),
+                ),
             )
         }
         repeat(5) { index ->

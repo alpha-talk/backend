@@ -146,30 +146,27 @@ class InMemoryClusterStore : ClusterStore {
         stockLinkRows.filterKeys { it.first == clusterId }.values.toList()
 
     @Synchronized
-    override fun applyStockVerdict(
-        clusterId: String,
-        code: String,
-        sentiment: String?,
-        confidence: Double?,
-        rejected: Boolean,
-    ) {
-        val key = clusterId to code
-        val existing = stockLinkRows[key]
-        stockLinkRows[key] = StockLink(code, sentiment, confidence, existing?.streamEventId, rejected)
+    override fun applyStockVerdicts(clusterId: String, verdicts: List<StockVerdictWrite>) {
+        verdicts.forEach {
+            val key = clusterId to it.code
+            val existing = stockLinkRows[key]
+            stockLinkRows[key] = StockLink(it.code, it.sentiment, it.confidence, existing?.streamEventId, it.rejected)
+        }
     }
 
     @Synchronized
-    override fun claimStockEvent(clusterId: String, code: String, eventId: String): Boolean {
-        val key = clusterId to code
-        val link = stockLinkRows[key] ?: return false
-        if (link.streamEventId != null) return false
-        stockLinkRows[key] = link.copy(streamEventId = eventId)
-        return true
-    }
+    override fun claimStockEvents(clusterId: String, eventIdByCode: Map<String, String>): Set<String> =
+        eventIdByCode.mapNotNullTo(mutableSetOf()) { (code, eventId) ->
+            val key = clusterId to code
+            val link = stockLinkRows[key] ?: return@mapNotNullTo null
+            if (link.streamEventId != null) return@mapNotNullTo null
+            stockLinkRows[key] = link.copy(streamEventId = eventId)
+            code
+        }
 
     @Synchronized
-    override fun upsertSectorLink(clusterId: String, sectorCode: String, sentiment: String, confidence: Double, impact: String) {
-        sectorLinkRows[clusterId to sectorCode] = Triple(sentiment, confidence, impact)
+    override fun upsertSectorLinks(clusterId: String, links: List<SectorLinkWrite>) {
+        links.forEach { sectorLinkRows[clusterId to it.sectorCode] = Triple(it.sentiment, it.confidence, it.impact) }
     }
 
     @Synchronized

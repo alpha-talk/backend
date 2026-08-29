@@ -13,7 +13,10 @@ import com.alphatalk.worker.llm.cluster.ClusterStore
 import com.alphatalk.worker.llm.cluster.FakeEmbeddingClient
 import com.alphatalk.worker.llm.cluster.InMemoryClusterStore
 import com.alphatalk.worker.llm.cluster.NoopClusterLock
+import com.alphatalk.worker.llm.cluster.SectorLinkWrite
+import com.alphatalk.worker.llm.cluster.StockVerdictWrite
 import com.alphatalk.worker.llm.config.LlmProperties
+import com.alphatalk.worker.llm.persist.StreamEventRow
 import com.alphatalk.worker.llm.persist.StreamEventStore
 import com.alphatalk.worker.llm.publish.StreamPublisher
 import com.alphatalk.worker.llm.sector.SectorDirectory
@@ -824,7 +827,7 @@ class NewsProcessorTest {
     }
 
     @Test
-    fun `SECTOR fan-out - 트랜잭션 안 공통 조회는 구성 종목 수와 무관하게 1회다`() {
+    fun `SECTOR fan-out - 트랜잭션 안 쿼리 횟수는 구성 종목 수와 무관하게 상수다`() {
         val members = (1..50).map { "9%05d".format(it) }
         val wide = object : SectorDirectory {
             override fun allSectors() = listOf(SectorInfo("27", "은행"))
@@ -858,9 +861,18 @@ class NewsProcessorTest {
         ).process(entry("w1", "기준금리 인상", codes = emptyList(), macroHint = "금리"))
 
         assertEquals(members.size, publisher.published.size)
-        assertEquals(1, counting.transactionalCalls["articleSources"])
-        assertEquals(1, counting.transactionalCalls["representativeUrl"])
-        assertEquals(1, counting.transactionalCalls["stockLinks"])
+        assertEquals(
+            mapOf(
+                "upsertSectorLinks" to 1,
+                "applyStockVerdicts" to 1,
+                "articleSources" to 1,
+                "representativeUrl" to 1,
+                "stockLinks" to 1,
+                "claimStockEvents" to 1,
+            ),
+            counting.transactionalCalls,
+        )
+        assertEquals(1, events.insertCalls)
         assertEquals(emptyMap(), countingDirectory.transactionalCalls)
     }
 
@@ -902,6 +914,19 @@ class NewsProcessorTest {
         override fun stockLinks(clusterId: String) =
             delegate.stockLinks(clusterId).also { count("stockLinks") }
 
+        override fun applyStockVerdicts(clusterId: String, verdicts: List<StockVerdictWrite>) {
+            count("applyStockVerdicts")
+            delegate.applyStockVerdicts(clusterId, verdicts)
+        }
+
+        override fun claimStockEvents(clusterId: String, eventIdByCode: Map<String, String>) =
+            delegate.claimStockEvents(clusterId, eventIdByCode).also { count("claimStockEvents") }
+
+        override fun upsertSectorLinks(clusterId: String, links: List<SectorLinkWrite>) {
+            count("upsertSectorLinks")
+            delegate.upsertSectorLinks(clusterId, links)
+        }
+
         private fun count(name: String) {
             if (inTransaction()) transactionalCalls.merge(name, 1, Int::plus)
         }
@@ -912,17 +937,20 @@ class NewsProcessorTest {
 
         val inserted = mutableListOf<Inserted>()
         val refreshed = mutableListOf<String>()
+        var insertCalls = 0
+            private set
 
         @Synchronized
-        override fun insertEvent(eventId: String, code: String, type: String, occurredAt: Instant, source: String?, data: StreamData): Boolean {
-            if (inserted.any { it.eventId == eventId }) return false
-            inserted.add(Inserted(eventId, code, type, data))
-            return true
-        }
+        override fun insertEvents(events: List<StreamEventRow>): Set<String> =
+            events.also { insertCalls++ }.mapNotNullTo(mutableSetOf()) { row ->
+                if (inserted.any { it.eventId == row.eventId }) return@mapNotNullTo null
+                inserted.add(Inserted(row.eventId, row.code, row.type, row.data))
+                row.eventId
+            }
 
         @Synchronized
-        override fun refreshSources(eventId: String, sourcesJson: String) {
-            refreshed.add(eventId)
+        override fun refreshSources(eventIds: Collection<String>, sourcesJson: String) {
+            refreshed.addAll(eventIds)
         }
 
         override fun digestExists(code: String, date: String) =

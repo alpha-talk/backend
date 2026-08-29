@@ -11,9 +11,12 @@ import com.alphatalk.worker.llm.cluster.ClusterContendedException
 import com.alphatalk.worker.llm.cluster.ClusterRecord
 import com.alphatalk.worker.llm.cluster.ClusterStatus
 import com.alphatalk.worker.llm.cluster.ClusterStore
+import com.alphatalk.worker.llm.cluster.SectorLinkWrite
 import com.alphatalk.worker.llm.cluster.StockLink
+import com.alphatalk.worker.llm.cluster.StockVerdictWrite
 import com.alphatalk.worker.llm.config.LlmProperties
 import com.alphatalk.worker.llm.persist.EventIdGenerator
+import com.alphatalk.worker.llm.persist.StreamEventRow
 import com.alphatalk.worker.llm.persist.StreamEventStore
 import com.alphatalk.worker.llm.publish.StreamPublisher
 import com.alphatalk.worker.llm.sector.SectorDirectory
@@ -117,7 +120,7 @@ class NewsProcessor(
         }
         val relevantCodes = relevantStocks.map { it.code }.toSet()
         val rejectedCandidates = entry.codes.filter { it !in relevantCodes }.map { code ->
-            StockLinkWrite(
+            StockVerdictWrite(
                 code = code,
                 sentiment = null,
                 confidence = verdict.stocks.firstOrNull { it.code == code }?.confidence,
@@ -164,7 +167,7 @@ class NewsProcessor(
         val linkOnly = if (outcome.plan.includeDiscovered) {
             emptyList()
         } else {
-            discovered.map { StockLinkWrite(it.code, it.sentiment.name, it.confidence, rejected = false) }
+            discovered.map { StockVerdictWrite(it.code, it.sentiment.name, it.confidence, rejected = false) }
         }
         val capExempt = sourced + if (outcome.plan.includeDiscovered) discovered else emptyList()
         val stockEvents = (
@@ -198,21 +201,27 @@ class NewsProcessor(
         token: String,
         publications: MutableList<PendingPublication>,
     ) {
-        plan.sectorVerdicts.forEach {
-            store.upsertSectorLink(cluster.id, it.sectorCode, it.sentiment.name, it.confidence, it.impact.name)
-        }
-        plan.stockLinkWrites.forEach {
-            store.applyStockVerdict(cluster.id, it.code, it.sentiment, it.confidence, it.rejected)
-        }
+        store.upsertSectorLinks(
+            cluster.id,
+            plan.sectorVerdicts.map {
+                SectorLinkWrite(it.sectorCode, it.sentiment.name, it.confidence, it.impact.name)
+            },
+        )
+        store.applyStockVerdicts(
+            cluster.id,
+            plan.stockLinkWrites + plan.stockEvents.map {
+                StockVerdictWrite(it.code, it.sentiment, it.confidence, rejected = false)
+            },
+        )
         if (plan.stockEvents.isNotEmpty()) {
-            val context = EventContext(
+            publications += persistStockEvents(
+                cluster = cluster,
+                summary = summary,
+                plannedEvents = plan.stockEvents,
                 sources = store.articleSources(cluster.id),
                 sourceUrl = store.representativeUrl(cluster.id),
-                eventIdByCode = store.stockLinks(cluster.id).associate { it.code to it.streamEventId },
+                existingEventIds = store.stockLinks(cluster.id).associate { it.code to it.streamEventId },
             )
-            plan.stockEvents.forEach { event ->
-                persistStockEvent(cluster, summary, event, context)?.let(publications::add)
-            }
         }
         if (plan.finalScope == null) {
             if (!store.markIrrelevant(cluster.id, token)) throw ClusterContendedException(cluster.id)
@@ -285,32 +294,57 @@ class NewsProcessor(
     private fun sectorRefOf(code: String): SectorRef? =
         sectors.sectorOf(code)?.let { SectorRef(code = it, name = sectors.sectorName(it) ?: it) }
 
-    private fun persistStockEvent(
+    private fun persistStockEvents(
         cluster: ClusterRecord,
         summary: String,
-        event: PlannedStockEvent,
-        context: EventContext,
-    ): PendingPublication? {
-        store.applyStockVerdict(cluster.id, event.code, event.sentiment, event.confidence, rejected = false)
-        val eventId = context.eventIdByCode[event.code]
-            ?: eventIds.next().takeIf { store.claimStockEvent(cluster.id, event.code, it) }
-            ?: store.stockLinks(cluster.id).firstOrNull { it.code == event.code }?.streamEventId
-            ?: return null
+        plannedEvents: List<PlannedStockEvent>,
+        sources: List<SourceRef>,
+        sourceUrl: String?,
+        existingEventIds: Map<String, String?>,
+    ): List<PendingPublication> {
+        val proposed = plannedEvents
+            .filter { existingEventIds[it.code] == null }
+            .associate { it.code to eventIds.next() }
+        val claimed = store.claimStockEvents(cluster.id, proposed)
+
+        val eventIdByCode = buildMap {
+            plannedEvents.forEach { event ->
+                val eventId = existingEventIds[event.code]
+                    ?: proposed[event.code]?.takeIf { event.code in claimed }
+                if (eventId != null) put(event.code, eventId)
+            }
+            val unresolved = plannedEvents.filterNot { it.code in keys }
+            if (unresolved.isNotEmpty()) {
+                val refreshed = store.stockLinks(cluster.id).associate { it.code to it.streamEventId }
+                unresolved.forEach { event -> refreshed[event.code]?.let { put(event.code, it) } }
+            }
+        }
 
         val category = cluster.category
-        val data = StreamData(
-            category = category.payload,
-            title = cluster.repTitle,
-            summary = summary,
-            sourceUrl = context.sourceUrl,
-            occurredAt = clock.millis(),
-            sentiment = event.sentiment,
-            scope = event.scope?.name,
-            sector = event.sector,
-            sources = context.sources,
-        )
-        return PendingPublication(event.code, eventId, data)
-            .takeIf { events.insertEvent(eventId, event.code, category.eventType, clock.instant(), "worker-llm", data) }
+        val rows = plannedEvents.mapNotNull { event ->
+            val eventId = eventIdByCode[event.code] ?: return@mapNotNull null
+            event to StreamEventRow(
+                eventId = eventId,
+                code = event.code,
+                type = category.eventType,
+                occurredAt = clock.instant(),
+                source = "worker-llm",
+                data = StreamData(
+                    category = category.payload,
+                    title = cluster.repTitle,
+                    summary = summary,
+                    sourceUrl = sourceUrl,
+                    occurredAt = clock.millis(),
+                    sentiment = event.sentiment,
+                    scope = event.scope?.name,
+                    sector = event.sector,
+                    sources = sources,
+                ),
+            )
+        }
+        val inserted = events.insertEvents(rows.map { it.second })
+        return rows.filter { it.second.eventId in inserted }
+            .map { (event, row) -> PendingPublication(event.code, row.eventId, row.data) }
     }
 
     private fun refreshAfterJoin(entry: IngestQueueEntry, cluster: ClusterRecord) {
@@ -320,34 +354,36 @@ class NewsProcessor(
         transactions.run {
             val sources = store.articleSources(cluster.id)
             val links = store.stockLinks(cluster.id)
-            val sourcesJson = mapper.writeValueAsString(sources)
-            links.mapNotNull { it.streamEventId }.forEach { events.refreshSources(it, sourcesJson) }
+            events.refreshSources(links.mapNotNull(StockLink::streamEventId), mapper.writeValueAsString(sources))
 
             val published = links.filter { it.streamEventId != null }.map { it.code }.toSet()
             val rejected = links.filter { it.rejected == true }.map { it.code }.toSet()
             val linkByCode = links.associateBy(StockLink::code)
-            val pending = entry.codes.filter { it !in published && it !in rejected }
-            if (pending.isNotEmpty()) {
-                val context = EventContext(
+            val plannedEvents = entry.codes
+                .filter { it !in published && it !in rejected }
+                .map { code ->
+                    val existing = linkByCode[code]
+                    PlannedStockEvent(
+                        code = code,
+                        sentiment = existing?.sentiment,
+                        confidence = existing?.confidence,
+                        scope = if (sectorScoped) NewsScope.SECTOR else null,
+                        sector = sectorRefs[code],
+                    )
+                }
+            if (plannedEvents.isNotEmpty()) {
+                store.applyStockVerdicts(
+                    cluster.id,
+                    plannedEvents.map { StockVerdictWrite(it.code, it.sentiment, it.confidence, rejected = false) },
+                )
+                publications += persistStockEvents(
+                    cluster = cluster,
+                    summary = cluster.summary.orEmpty(),
+                    plannedEvents = plannedEvents,
                     sources = sources,
                     sourceUrl = store.representativeUrl(cluster.id),
-                    eventIdByCode = links.associate { it.code to it.streamEventId },
+                    existingEventIds = links.associate { it.code to it.streamEventId },
                 )
-                pending.forEach { code ->
-                    val existing = linkByCode[code]
-                    persistStockEvent(
-                        cluster,
-                        cluster.summary.orEmpty(),
-                        PlannedStockEvent(
-                            code = code,
-                            sentiment = existing?.sentiment,
-                            confidence = existing?.confidence,
-                            scope = if (sectorScoped) NewsScope.SECTOR else null,
-                            sector = sectorRefs[code],
-                        ),
-                        context,
-                    )?.let(publications::add)
-                }
             }
         }
         publish(publications)
@@ -380,18 +416,11 @@ class NewsProcessor(
     private data class SummaryPlan(
         val finalScope: NewsScope? = null,
         val sectorVerdicts: List<SectorVerdict> = emptyList(),
-        val stockLinkWrites: List<StockLinkWrite> = emptyList(),
+        val stockLinkWrites: List<StockVerdictWrite> = emptyList(),
         val stockEvents: List<PlannedStockEvent> = emptyList(),
         val evidenceRejected: List<StockVerdict> = emptyList(),
         val fanoutCounters: List<String> = emptyList(),
         val downgradedFromStock: Boolean = false,
-    )
-
-    private data class StockLinkWrite(
-        val code: String,
-        val sentiment: String?,
-        val confidence: Double?,
-        val rejected: Boolean,
     )
 
     private data class PlannedStockEvent(
