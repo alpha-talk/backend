@@ -9,6 +9,7 @@ import com.alphatalk.worker.llm.article.ArticleFetcher
 import com.alphatalk.worker.llm.cluster.ClusterAssigner
 import com.alphatalk.worker.llm.cluster.ClusterContendedException
 import com.alphatalk.worker.llm.cluster.ClusterStatus
+import com.alphatalk.worker.llm.cluster.ClusterStore
 import com.alphatalk.worker.llm.cluster.FakeEmbeddingClient
 import com.alphatalk.worker.llm.cluster.InMemoryClusterStore
 import com.alphatalk.worker.llm.cluster.NoopClusterLock
@@ -26,6 +27,7 @@ import java.time.Instant
 import java.time.ZoneOffset
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.concurrent.thread
 import kotlin.test.assertEquals
@@ -67,23 +69,26 @@ class NewsProcessorTest {
         fanoutHardCap: Int = 500,
         llm: LlmClient = defaultLlm(),
         meters: MeterRegistry = SimpleMeterRegistry(),
+        sectors: SectorDirectory = directory,
+        clusterStore: ClusterStore = store,
+        transactions: TransactionRunner = TransactionRunner { it() },
     ) = NewsProcessor(
-        store = store,
+        store = clusterStore,
         assigner = ClusterAssigner(
-            store, FakeEmbeddingClient(64), NoopClusterLock(),
+            clusterStore, FakeEmbeddingClient(64), NoopClusterLock(),
             LlmProperties(cluster = LlmProperties.Cluster(windowHours = 72, similarityThreshold = 0.85)),
-            { "cl-${ids.incrementAndGet()}".padEnd(26, '0') }, clock,
+            { "cl-" + ids.incrementAndGet().toString().padStart(23, '0') }, clock,
         ),
         fetcher = ArticleFetcher { null },
         summarizer = ClusterSummarizer(llm),
-        stockEvidence = StockEvidenceValidator(directory),
-        sectors = directory,
+        stockEvidence = StockEvidenceValidator(sectors),
+        sectors = sectors,
         events = events,
         publisher = publisher,
-        eventIds = { "ev-${ids.incrementAndGet()}".padEnd(26, '0') },
+        eventIds = { "ev-" + ids.incrementAndGet().toString().padStart(23, '0') },
         mapper = jacksonObjectMapper(),
         meters = meters,
-        transactions = TransactionRunner { it() },
+        transactions = transactions,
         props = LlmProperties(
             sector = LlmProperties.Sector(fanoutCap = fanoutCap, fanoutHardCap = fanoutHardCap),
         ),
@@ -816,6 +821,90 @@ class NewsProcessorTest {
         processor().process(entry("a1", "삼성 라이온즈 우승"))
         assertEquals(0, events.inserted.size)
         assertEquals(ClusterStatus.IRRELEVANT, store.clusters.values.single().status)
+    }
+
+    @Test
+    fun `SECTOR fan-out - 트랜잭션 안 공통 조회는 구성 종목 수와 무관하게 1회다`() {
+        val members = (1..50).map { "9%05d".format(it) }
+        val wide = object : SectorDirectory {
+            override fun allSectors() = listOf(SectorInfo("27", "은행"))
+            override fun sectorName(sectorCode: String) = "은행"
+            override fun memberCodes(sectorCode: String) = members
+            override fun stockName(stockCode: String) = "종목$stockCode".takeIf { stockCode in members }
+            override fun sectorOf(stockCode: String) = "27"
+        }
+        val inTransaction = AtomicBoolean(false)
+        val counting = CountingClusterStore(store, inTransaction::get)
+        val countingDirectory = CountingSectorDirectory(wide, inTransaction::get)
+        verdict = ClusterSummaryOutput(
+            summary = "3줄 요약",
+            marketRelevant = true,
+            scope = NewsScope.SECTOR,
+            stocks = emptyList(),
+            sectors = listOf(SectorVerdict("27", Sentiment.POSITIVE, Impact.HIGH, 0.9, "금리")),
+        )
+
+        processor(
+            sectors = countingDirectory,
+            clusterStore = counting,
+            transactions = TransactionRunner { action ->
+                inTransaction.set(true)
+                try {
+                    action()
+                } finally {
+                    inTransaction.set(false)
+                }
+            },
+        ).process(entry("w1", "기준금리 인상", codes = emptyList(), macroHint = "금리"))
+
+        assertEquals(members.size, publisher.published.size)
+        assertEquals(1, counting.transactionalCalls["articleSources"])
+        assertEquals(1, counting.transactionalCalls["representativeUrl"])
+        assertEquals(1, counting.transactionalCalls["stockLinks"])
+        assertEquals(emptyMap(), countingDirectory.transactionalCalls)
+    }
+
+    class CountingSectorDirectory(
+        private val delegate: SectorDirectory,
+        private val inTransaction: () -> Boolean,
+    ) : SectorDirectory by delegate {
+        val transactionalCalls = mutableMapOf<String, Int>()
+
+        override fun allSectors() = delegate.allSectors().also { count("allSectors") }
+
+        override fun sectorName(sectorCode: String) = delegate.sectorName(sectorCode).also { count("sectorName") }
+
+        override fun memberCodes(sectorCode: String) = delegate.memberCodes(sectorCode).also { count("memberCodes") }
+
+        override fun stockName(stockCode: String) = delegate.stockName(stockCode).also { count("stockName") }
+
+        override fun stockAliases(stockCode: String) = delegate.stockAliases(stockCode).also { count("stockAliases") }
+
+        override fun sectorOf(stockCode: String) = delegate.sectorOf(stockCode).also { count("sectorOf") }
+
+        private fun count(name: String) {
+            if (inTransaction()) transactionalCalls.merge(name, 1, Int::plus)
+        }
+    }
+
+    class CountingClusterStore(
+        private val delegate: ClusterStore,
+        private val inTransaction: () -> Boolean,
+    ) : ClusterStore by delegate {
+        val transactionalCalls = mutableMapOf<String, Int>()
+
+        override fun articleSources(clusterId: String) =
+            delegate.articleSources(clusterId).also { count("articleSources") }
+
+        override fun representativeUrl(clusterId: String) =
+            delegate.representativeUrl(clusterId).also { count("representativeUrl") }
+
+        override fun stockLinks(clusterId: String) =
+            delegate.stockLinks(clusterId).also { count("stockLinks") }
+
+        private fun count(name: String) {
+            if (inTransaction()) transactionalCalls.merge(name, 1, Int::plus)
+        }
     }
 
     class RecordingEventStore : StreamEventStore {
