@@ -28,6 +28,20 @@ data class ArticleRecord(
     val candidateCodesEmpty: Boolean,
 )
 
+data class StockVerdictWrite(
+    val code: String,
+    val sentiment: String?,
+    val confidence: Double?,
+    val rejected: Boolean,
+)
+
+data class SectorLinkWrite(
+    val sectorCode: String,
+    val sentiment: String,
+    val confidence: Double,
+    val impact: String,
+)
+
 data class StockLink(
     val code: String,
     val sentiment: String?,
@@ -67,9 +81,9 @@ interface ClusterStore {
     fun markSummarized(clusterId: String, token: String, summary: String, scope: String): Boolean
     fun markIrrelevant(clusterId: String, token: String): Boolean
     fun stockLinks(clusterId: String): List<StockLink>
-    fun applyStockVerdict(clusterId: String, code: String, sentiment: String?, confidence: Double?, rejected: Boolean)
-    fun claimStockEvent(clusterId: String, code: String, eventId: String): Boolean
-    fun upsertSectorLink(clusterId: String, sectorCode: String, sentiment: String, confidence: Double, impact: String)
+    fun applyStockVerdicts(clusterId: String, verdicts: List<StockVerdictWrite>)
+    fun claimStockEvents(clusterId: String, eventIdByCode: Map<String, String>): Set<String>
+    fun upsertSectorLinks(clusterId: String, links: List<SectorLinkWrite>)
     fun articleSources(clusterId: String): List<SourceRef>
     fun representativeUrl(clusterId: String): String?
     fun stockClustersInWindow(code: String, from: Instant, to: Instant): List<DigestClusterRow>

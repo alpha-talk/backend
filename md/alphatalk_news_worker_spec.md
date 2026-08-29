@@ -494,12 +494,14 @@ worker-llm/
 | 어댑터 | 방식 | 근거 |
 |---|---|---|
 | `JpaSectorDirectory` (`sector`·`stock_master` 조회) | Spring Data JPA 파생 쿼리 | 엔티티 중심 단순 조회 — PostgreSQL 전용 기능 불필요 |
-| `JdbcClusterStore` | native SQL | pgvector 거리 연산자(`<=>`)·`CAST(... AS vector)` 최근접 검색, `ON CONFLICT DO NOTHING/DO UPDATE` 업서트, `GREATEST` 부분 갱신, 상태 전이 CAS(`claimSummarize`·`markSummarized`) 조건부 UPDATE의 갱신 행 수 판정 |
-| `JdbcStreamEventStore` | native SQL | `jsonb` 캐스팅·`jsonb_set` 부분 갱신·`payload -> 'digest' ->> 'date'` 경로 조회, 멱등 삽입 `ON CONFLICT DO NOTHING` |
+| `JdbcClusterStore` | native SQL | pgvector 거리 연산자(`<=>`)·`CAST(... AS vector)` 최근접 검색, `ON CONFLICT DO NOTHING/DO UPDATE` 업서트, `GREATEST` 부분 갱신, 상태 전이 CAS(`claimSummarize`·`markSummarized`) 조건부 UPDATE의 갱신 행 수 판정, SECTOR fan-out 링크·이벤트 클레임의 JDBC 배치 갱신과 **행별 갱신 수로 하는 CAS 판정** |
+| `JdbcStreamEventStore` | native SQL | `jsonb` 캐스팅·`jsonb_set` 부분 갱신·`payload -> 'digest' ->> 'date'` 경로 조회, 멱등 삽입 `ON CONFLICT DO NOTHING`과 **배치 삽입의 행별 갱신 수로 하는 발행 대상 판정** |
 | `JdbcMarketDigestStore` | native SQL | `jsonb` 캐스팅과 조건부 교체 `ON CONFLICT DO UPDATE ... WHERE`(§4.3 교체 규칙 — degraded 완성본 보호를 DB 원자 연산으로 보장) |
 
 - 두 예외 어댑터도 모든 입력값을 named parameter로 바인딩한다 — 문자열 연결로 값을 넣지 않는다. 동적으로 조립하는 부분은 종목 후보 유무에 따른 필터 **절 선택**뿐이고, 값은 항상 파라미터로 간다.
 - JPA는 스키마를 소유하지 않는다. `ddl-auto=validate`로 엔티티 매핑과 `:db-migrations` Liquibase 스키마의 정합성만 검증한다(`stock_master.code`는 `CHAR(6)`이므로 엔티티에서 `@JdbcTypeCode(SqlTypes.CHAR)`로 맞춘다).
+- **fan-out 쓰기는 행 단위 반복이 아니라 JDBC 배치로 보낸다**: SECTOR 클러스터의 발행 종목은 실측 평균 70·최대 499(하드 상한 500)라, 종목마다 왕복하면 트랜잭션이 `news_cluster` 행 락을 잡은 채 종목 수에 비례해 길어진다. 링크 업서트·이벤트 클레임·이벤트 삽입을 `batchUpdate`로 묶어 **트랜잭션 안 왕복을 종목 수와 무관한 상수**로 만든다. SQL 문자열은 단건과 동일하고 값은 그대로 named parameter로 바인딩하므로 §7.1의 "동적 조립은 절 선택뿐" 원칙을 유지한다.
+- **배치가 CAS 의미를 깨지 않는다**: 이벤트 클레임은 `stream_event_id IS NULL` 조건을 그대로 두고 배치의 **행별 갱신 수**로 선점 성공 여부를 판정한다. 갱신 수가 0인 종목만 링크를 한 번 더 조회해 이미 채워진 이벤트 ID를 재사용한다. 이벤트 삽입도 같은 방식으로 실제 삽입된 행만 발행 대상이 된다 — 드라이버가 행 수를 돌려주지 않으면(`SUCCESS_NO_INFO`) 발행 대상을 판정할 수 없으므로 **조용히 넘기지 않고 실패시킨다**(`reWriteBatchedInserts` 등 재작성 옵션과 함께 쓰지 않는다).
 - JPA 트랜잭션 매니저 아래에서 native SQL 어댑터도 같은 커넥션에 참여한다 — §3.2 persist→publish→ack의 롤백 계약은 통합 테스트가 고정한다.
 
 ## 8. 설정 · 메트릭
