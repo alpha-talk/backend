@@ -1,0 +1,207 @@
+{
+  "uid": "alphatalk-news-pipeline",
+  "title": "Alpha Talk News/LLM Pipeline",
+  "tags": ["alphatalk"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "editable": true,
+  "refresh": "10s",
+  "time": { "from": "now-3h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Ingest Queue Pending",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 5, "w": 6, "x": 0, "y": 0 },
+      "targets": [
+        { "refId": "A", "expr": "queue_ingest_pending", "legendFormat": "pending", "instant": true }
+      ],
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 50 },
+              { "color": "red", "value": 200 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Processed (1h)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 5, "w": 6, "x": 6, "y": 0 },
+      "targets": [
+        { "refId": "A", "expr": "sum(increase(llm_processed_total[1h]))", "legendFormat": "processed", "instant": true }
+      ],
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Failed (1h)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 5, "w": 6, "x": 12, "y": 0 },
+      "targets": [
+        { "refId": "A", "expr": "sum(increase(llm_failed_total[1h])) or vector(0)", "legendFormat": "failed", "instant": true }
+      ],
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "DLQ Total",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 5, "w": 6, "x": 18, "y": 0 },
+      "targets": [
+        { "refId": "A", "expr": "sum(llm_dlq_total) or vector(0)", "legendFormat": "dlq", "instant": true }
+      ],
+      "options": { "colorMode": "value", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "LLM Processed Rate (by type)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 5 },
+      "targets": [
+        { "refId": "A", "expr": "sum by (type) (rate(llm_processed_total[5m])) * 60", "legendFormat": "{{type}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "opm" }, "overrides": [] }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "LLM Failures / Contention / DLQ",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 5 },
+      "targets": [
+        { "refId": "A", "expr": "sum by (type) (rate(llm_failed_total[5m])) * 60", "legendFormat": "failed {{type}}" },
+        { "refId": "B", "expr": "sum(rate(llm_contended_total[5m])) * 60", "legendFormat": "contended" },
+        { "refId": "C", "expr": "sum(rate(llm_dlq_total[5m])) * 60", "legendFormat": "dlq" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "opm" }, "overrides": [] }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "LLM Call Duration (avg, by op)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 13 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (op) (rate(llm_call_seconds_sum[5m])) / sum by (op) (rate(llm_call_seconds_count[5m]))",
+          "legendFormat": "avg {{op}}"
+        },
+        { "refId": "B", "expr": "max by (op) (llm_call_seconds_max)", "legendFormat": "max {{op}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "LLM Tokens (by model/kind)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 13 },
+      "targets": [
+        { "refId": "A", "expr": "sum by (model, kind) (rate(llm_tokens_total[5m])) * 60", "legendFormat": "{{model}} {{kind}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "opm" }, "overrides": [] }
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Clustering / Scope Guards",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 21 },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(cluster_merged_total[5m])) * 60", "legendFormat": "cluster merged" },
+        { "refId": "B", "expr": "sum(rate(stock_evidence_rejected_total[5m])) * 60", "legendFormat": "evidence rejected" },
+        { "refId": "C", "expr": "sum(rate(stock_scope_downgraded_total[5m])) * 60", "legendFormat": "scope downgraded" },
+        { "refId": "D", "expr": "sum(rate(sector_fanout_tier2_total[5m])) * 60", "legendFormat": "fanout tier2" },
+        { "refId": "E", "expr": "sum(rate(sector_fanout_degraded_total[5m])) * 60", "legendFormat": "fanout degraded" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "opm" }, "overrides": [] }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Ingest Collection",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 21 },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(ingest_fetched_total[5m])) * 60", "legendFormat": "fetched" },
+        { "refId": "B", "expr": "sum(rate(ingest_enqueued_total[5m])) * 60", "legendFormat": "enqueued" },
+        { "refId": "C", "expr": "sum(rate(ingest_dup_skipped_total[5m])) * 60", "legendFormat": "dup skipped" },
+        { "refId": "D", "expr": "sum(rate(ingest_source_errors_total[5m])) * 60", "legendFormat": "source errors" },
+        { "refId": "E", "expr": "sum(rate(ingest_enqueue_errors_total[5m])) * 60", "legendFormat": "enqueue errors" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "opm" }, "overrides": [] }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Digest Triggers (24h increase)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 29 },
+      "targets": [
+        { "refId": "A", "expr": "sum(increase(ingest_digest_enqueued_total[24h]))", "legendFormat": "stock digest enqueued" },
+        { "refId": "B", "expr": "sum(increase(ingest_digest_market_enqueued_total[24h]))", "legendFormat": "market digest enqueued" },
+        { "refId": "C", "expr": "sum by (degraded) (increase(market_digest_generated_total[24h]))", "legendFormat": "market generated (degraded={{degraded}})" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 0 }, "overrides": [] }
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Ingest Queue Pending",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 29 },
+      "targets": [
+        { "refId": "A", "expr": "queue_ingest_pending", "legendFormat": "pending" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 0 }, "overrides": [] }
+    }
+  ]
+}
