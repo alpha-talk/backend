@@ -1,0 +1,202 @@
+{
+  "uid": "alphatalk-realtime",
+  "title": "Alpha Talk Realtime Price/WS",
+  "tags": ["alphatalk"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "editable": true,
+  "refresh": "10s",
+  "time": { "from": "now-1h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "KIS 구독 종목",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 5, "w": 4, "x": 0, "y": 0 },
+      "targets": [
+        { "refId": "A", "expr": "kis_subscribed_symbols", "legendFormat": "subscribed", "instant": true }
+      ],
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "수요 종목",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 5, "w": 4, "x": 4, "y": 0 },
+      "targets": [
+        { "refId": "A", "expr": "demand_symbols", "legendFormat": "demand", "instant": true }
+      ],
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "호가 구독 종목",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 5, "w": 4, "x": 8, "y": 0 },
+      "targets": [
+        { "refId": "A", "expr": "depth_symbols", "legendFormat": "depth", "instant": true }
+      ],
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "KIS WS 세션",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 5, "w": 4, "x": 12, "y": 0 },
+      "targets": [
+        { "refId": "A", "expr": "kis_ws_sessions != 0", "legendFormat": "{{state}}", "instant": true }
+      ],
+      "options": { "colorMode": "value", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "WS 접속 세션",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 5, "w": 4, "x": 16, "y": 0 },
+      "targets": [
+        { "refId": "A", "expr": "ws_sessions_connected", "legendFormat": "sessions", "instant": true }
+      ],
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "purple", "value": null }] }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "WS 접속 유저",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 5, "w": 4, "x": 20, "y": 0 },
+      "targets": [
+        { "refId": "A", "expr": "ws_users_connected", "legendFormat": "users", "instant": true }
+      ],
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "purple", "value": null }] }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "구독/수요 종목 수 추이",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 5 },
+      "targets": [
+        { "refId": "A", "expr": "kis_subscribed_symbols", "legendFormat": "KIS subscribed" },
+        { "refId": "B", "expr": "demand_symbols", "legendFormat": "demand" },
+        { "refId": "C", "expr": "depth_symbols", "legendFormat": "depth" },
+        { "refId": "D", "expr": "degraded_symbols", "legendFormat": "degraded" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 0 }, "overrides": [] }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "틱 유입 / 시세 발행",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 5 },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(tick_in_total[1m]))", "legendFormat": "tick in" },
+        { "refId": "B", "expr": "sum(rate(quote_published_total[1m]))", "legendFormat": "quote published" },
+        { "refId": "C", "expr": "sum(rate(rest_poll_total[1m]))", "legendFormat": "rest poll" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "수집 열화·이상",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 13 },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(tick_silence_degraded_total[5m])) * 60", "legendFormat": "tick silence degraded" },
+        { "refId": "B", "expr": "depth_symbols_dropped", "legendFormat": "depth dropped" },
+        { "refId": "C", "expr": "sum(rate(kis_unsubscribe_abandoned_total[5m])) * 60", "legendFormat": "unsubscribe abandoned" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "WS Relay 발송 / 오류",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 13 },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(ws_relay_sent_total[1m]))", "legendFormat": "relay sent" },
+        { "refId": "B", "expr": "sum(rate(ws_relay_envelope_dropped_total[1m]))", "legendFormat": "envelope dropped" },
+        { "refId": "C", "expr": "sum(rate(ws_relay_unroutable_total[1m]))", "legendFormat": "unroutable" },
+        { "refId": "D", "expr": "sum(rate(ws_relay_handler_errors_total[1m]))", "legendFormat": "handler errors" },
+        { "refId": "E", "expr": "sum(rate(ws_stomp_errors_total[1m]))", "legendFormat": "stomp errors" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "WS 접속 추이",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 21 },
+      "targets": [
+        { "refId": "A", "expr": "ws_sessions_connected", "legendFormat": "sessions" },
+        { "refId": "B", "expr": "ws_users_connected", "legendFormat": "users" },
+        { "refId": "C", "expr": "ws_redis_channels_subscribed", "legendFormat": "redis channels" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 0 }, "overrides": [] }
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "봉 동기화 / 백필",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 21 },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(candle_sync_total[5m])) * 60", "legendFormat": "candle sync" },
+        { "refId": "B", "expr": "sum(rate(candle_sync_failed_total[5m])) * 60", "legendFormat": "candle sync failed" },
+        { "refId": "C", "expr": "sum(rate(minute_candle_refresh_total[5m])) * 60", "legendFormat": "minute refresh" },
+        { "refId": "D", "expr": "sum(rate(minute_candle_backfill_day_total[5m])) * 60", "legendFormat": "backfill day" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "opm" }, "overrides": [] }
+    }
+  ]
+}

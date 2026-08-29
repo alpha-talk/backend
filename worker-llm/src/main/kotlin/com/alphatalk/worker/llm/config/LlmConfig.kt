@@ -11,6 +11,7 @@ import com.alphatalk.worker.llm.enrich.ClaudeCliLlmClient
 import com.alphatalk.worker.llm.enrich.CodexCliLlmClient
 import com.alphatalk.worker.llm.enrich.FakeLlmClient
 import com.alphatalk.worker.llm.enrich.LlmClient
+import com.alphatalk.worker.llm.enrich.TimedLlmClient
 import io.micrometer.core.instrument.MeterRegistry
 import org.slf4j.LoggerFactory
 import org.springframework.context.annotation.Bean
@@ -43,7 +44,9 @@ class LlmConfig {
     }
 
     @Bean
-    fun llmClient(props: LlmProperties, meters: MeterRegistry): LlmClient = when (props.provider.trim().lowercase()) {
+    fun llmClient(props: LlmProperties, meters: MeterRegistry): LlmClient = TimedLlmClient(buildLlmClient(props, meters), meters)
+
+    private fun buildLlmClient(props: LlmProperties, meters: MeterRegistry): LlmClient = when (props.provider.trim().lowercase()) {
         "anthropic" -> {
             check(props.anthropic.apiKey.isNotBlank()) {
                 "LLM provider=anthropic에는 ANTHROPIC_API_KEY가 필요하다"

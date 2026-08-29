@@ -4,6 +4,8 @@ import com.alphatalk.worker.llm.enrich.AnthropicLlmClient
 import com.alphatalk.worker.llm.enrich.ClaudeCliLlmClient
 import com.alphatalk.worker.llm.enrich.CodexCliLlmClient
 import com.alphatalk.worker.llm.enrich.FakeLlmClient
+import com.alphatalk.worker.llm.enrich.LlmClient
+import com.alphatalk.worker.llm.enrich.TimedLlmClient
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import java.time.Duration
 import kotlin.test.Test
@@ -15,26 +17,30 @@ class LlmConfigTest {
     private val meters = SimpleMeterRegistry()
 
     @Test
-    fun `provider에 따라 LLM 구현체를 선택한다`() {
+    fun `provider에 따라 LLM 구현체를 선택하고 타이머로 감싼다`() {
         assertIs<ClaudeCliLlmClient>(
-            config.llmClient(LlmProperties(provider = "claude-cli", consumerBatch = 1), meters),
+            timedDelegate(config.llmClient(LlmProperties(provider = "claude-cli", consumerBatch = 1), meters)),
         )
         assertIs<CodexCliLlmClient>(
-            config.llmClient(LlmProperties(provider = "codex-cli", consumerBatch = 1), meters),
+            timedDelegate(config.llmClient(LlmProperties(provider = "codex-cli", consumerBatch = 1), meters)),
         )
         assertIs<AnthropicLlmClient>(
-            config.llmClient(
-                LlmProperties(
-                    provider = "anthropic",
-                    anthropic = LlmProperties.Anthropic(apiKey = "test-key"),
+            timedDelegate(
+                config.llmClient(
+                    LlmProperties(
+                        provider = "anthropic",
+                        anthropic = LlmProperties.Anthropic(apiKey = "test-key"),
+                    ),
+                    meters,
                 ),
-                meters,
             ),
         )
         assertIs<FakeLlmClient>(
-            config.llmClient(LlmProperties(provider = "fake", allowFake = true), meters),
+            timedDelegate(config.llmClient(LlmProperties(provider = "fake", allowFake = true), meters)),
         )
     }
+
+    private fun timedDelegate(client: LlmClient): LlmClient = assertIs<TimedLlmClient>(client).delegate
 
     @Test
     fun `fake provider는 명시적 허용 없이는 시작하지 않는다`() {
