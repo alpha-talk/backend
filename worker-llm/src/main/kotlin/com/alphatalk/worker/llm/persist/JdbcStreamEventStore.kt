@@ -4,10 +4,12 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate
 import org.springframework.stereotype.Repository
+import org.springframework.transaction.annotation.Transactional
 import java.sql.Statement
 import java.sql.Timestamp
 
 @Repository
+@Transactional
 class JdbcStreamEventStore(
     private val jdbc: NamedParameterJdbcTemplate,
     private val mapper: ObjectMapper,

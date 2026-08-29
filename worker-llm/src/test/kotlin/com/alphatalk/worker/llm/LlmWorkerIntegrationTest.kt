@@ -32,11 +32,13 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import org.junit.jupiter.api.BeforeEach
+import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection
 import org.springframework.data.redis.connection.stream.StreamRecords
+import org.springframework.dao.DataAccessException
 import org.springframework.data.redis.core.StringRedisTemplate
 import org.springframework.data.redis.listener.ChannelTopic
 import org.springframework.data.redis.listener.RedisMessageListenerContainer
@@ -646,5 +648,40 @@ class LlmWorkerIntegrationTest {
         )
         assertEquals(0, positives)
         assertEquals(1, sectorIssues)
+    }
+
+    @Nested
+    @SpringBootTest(
+        properties = [
+            "alphatalk.llm.consume-enabled=false",
+            "spring.datasource.hikari.data-source-properties.reWriteBatchedInserts=true",
+        ],
+    )
+    inner class BatchCountUnavailable {
+        @Autowired
+        private lateinit var rewritingEventStore: StreamEventStore
+
+        @Autowired
+        private lateinit var rewritingJdbc: NamedParameterJdbcTemplate
+
+        @Test
+        fun `행 수를 알 수 없으면 삽입을 롤백하고 실패시킨다`() {
+            val data = StreamData(category = "news", title = "뉴스", occurredAt = 1)
+            val eventIds = listOf("01ARZ3NDEKTSV4RRFFQ69G5FE1", "01ARZ3NDEKTSV4RRFFQ69G5FE2")
+
+            val failure = assertFailsWith<DataAccessException> {
+                rewritingEventStore.insertEvents(
+                    eventIds.map { StreamEventRow(it, "005930", "NEWS", Instant.now(), "worker-llm", data) },
+                )
+            }
+            assertTrue(failure.message.orEmpty().contains("SUCCESS_NO_INFO"))
+
+            val remaining = rewritingJdbc.queryForObject(
+                "SELECT count(*) FROM stream_event WHERE event_id IN (:eventIds)",
+                mapOf("eventIds" to eventIds),
+                Long::class.java,
+            )
+            assertEquals(0L, remaining)
+        }
     }
 }

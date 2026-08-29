@@ -502,6 +502,7 @@ worker-llm/
 - JPA는 스키마를 소유하지 않는다. `ddl-auto=validate`로 엔티티 매핑과 `:db-migrations` Liquibase 스키마의 정합성만 검증한다(`stock_master.code`는 `CHAR(6)`이므로 엔티티에서 `@JdbcTypeCode(SqlTypes.CHAR)`로 맞춘다).
 - **fan-out 쓰기는 행 단위 반복이 아니라 JDBC 배치로 보낸다**: SECTOR 클러스터의 발행 종목은 실측 평균 70·최대 499(하드 상한 500)라, 종목마다 왕복하면 트랜잭션이 `news_cluster` 행 락을 잡은 채 종목 수에 비례해 길어진다. 링크 업서트·이벤트 클레임·이벤트 삽입을 `batchUpdate`로 묶어 **트랜잭션 안 왕복을 종목 수와 무관한 상수**로 만든다. SQL 문자열은 단건과 동일하고 값은 그대로 named parameter로 바인딩하므로 §7.1의 "동적 조립은 절 선택뿐" 원칙을 유지한다.
 - **배치가 CAS 의미를 깨지 않는다**: 이벤트 클레임은 `stream_event_id IS NULL` 조건을 그대로 두고 배치의 **행별 갱신 수**로 선점 성공 여부를 판정한다. 갱신 수가 0인 종목만 링크를 한 번 더 조회해 이미 채워진 이벤트 ID를 재사용한다. 이벤트 삽입도 같은 방식으로 실제 삽입된 행만 발행 대상이 된다 — 드라이버가 행 수를 돌려주지 않으면(`SUCCESS_NO_INFO`) 발행 대상을 판정할 수 없으므로 **조용히 넘기지 않고 실패시킨다**(`reWriteBatchedInserts` 등 재작성 옵션과 함께 쓰지 않는다).
+- **이 검증은 배치 실행 뒤에 하므로 `JdbcStreamEventStore`도 `JdbcClusterStore`처럼 트랜잭션 경계를 갖는다**: 뉴스 경로는 바깥 `TransactionRunner`에 참여하지만 다이제스트 경로(§4.2)는 트랜잭션 없이 단독 호출한다. 경계가 없으면 삽입이 auto-commit된 뒤 검증이 던져 **이벤트만 남고 발행은 안 되는** 상태가 되고, 재시도는 `digestExists`가 true라 브리핑 없이 ACK해 그 날짜의 실시간 푸시가 영구 누락된다 — fail-closed 의도와 정반대 결과다. 경계를 두면 검증 실패가 삽입을 롤백해 PEL 재시도가 정상 복구한다.
 - JPA 트랜잭션 매니저 아래에서 native SQL 어댑터도 같은 커넥션에 참여한다 — §3.2 persist→publish→ack의 롤백 계약은 통합 테스트가 고정한다.
 
 ## 8. 설정 · 메트릭
