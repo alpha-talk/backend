@@ -2,6 +2,7 @@ package com.alphatalk.worker.llm.cluster
 
 import com.alphatalk.contracts.envelope.SourceRef
 import com.alphatalk.contracts.envelope.StreamCategory
+import org.springframework.jdbc.core.namedparam.MapSqlParameterSource
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate
 import org.springframework.stereotype.Repository
 import org.springframework.transaction.annotation.Transactional
@@ -240,54 +241,61 @@ class JdbcClusterStore(
             )
         }
 
-    override fun applyStockVerdict(
-        clusterId: String,
-        code: String,
-        sentiment: String?,
-        confidence: Double?,
-        rejected: Boolean,
-    ) {
-        jdbc.update(
+    override fun applyStockVerdicts(clusterId: String, verdicts: List<StockVerdictWrite>) {
+        if (verdicts.isEmpty()) return
+        jdbc.batchUpdate(
             """
             INSERT INTO news_cluster_stock (cluster_id, code, sentiment, confidence, rejected)
             VALUES (:clusterId, :code, :sentiment, :confidence, :rejected)
             ON CONFLICT (cluster_id, code)
             DO UPDATE SET sentiment = :sentiment, confidence = :confidence, rejected = :rejected
             """,
-            mapOf(
-                "clusterId" to clusterId,
-                "code" to code,
-                "sentiment" to sentiment,
-                "confidence" to confidence,
-                "rejected" to rejected,
-            ),
+            verdicts.map {
+                MapSqlParameterSource()
+                    .addValue("clusterId", clusterId)
+                    .addValue("code", it.code)
+                    .addValue("sentiment", it.sentiment)
+                    .addValue("confidence", it.confidence)
+                    .addValue("rejected", it.rejected)
+            }.toTypedArray(),
         )
     }
 
-    override fun claimStockEvent(clusterId: String, code: String, eventId: String): Boolean =
-        jdbc.update(
+    override fun claimStockEvents(clusterId: String, eventIdByCode: Map<String, String>): Set<String> {
+        if (eventIdByCode.isEmpty()) return emptySet()
+        val entries = eventIdByCode.entries.toList()
+        val counts = jdbc.batchUpdate(
             """
             UPDATE news_cluster_stock SET stream_event_id = :eventId
             WHERE cluster_id = :clusterId AND code = :code AND stream_event_id IS NULL
             """,
-            mapOf("clusterId" to clusterId, "code" to code, "eventId" to eventId),
-        ) > 0
+            entries.map {
+                MapSqlParameterSource()
+                    .addValue("clusterId", clusterId)
+                    .addValue("code", it.key)
+                    .addValue("eventId", it.value)
+            }.toTypedArray(),
+        )
+        return entries.filterIndexed { index, _ -> counts[index] > 0 }.mapTo(mutableSetOf()) { it.key }
+    }
 
-    override fun upsertSectorLink(clusterId: String, sectorCode: String, sentiment: String, confidence: Double, impact: String) {
-        jdbc.update(
+    override fun upsertSectorLinks(clusterId: String, links: List<SectorLinkWrite>) {
+        if (links.isEmpty()) return
+        jdbc.batchUpdate(
             """
             INSERT INTO news_cluster_sector (cluster_id, sector_code, sentiment, confidence, impact)
             VALUES (:clusterId, :sectorCode, :sentiment, :confidence, :impact)
             ON CONFLICT (cluster_id, sector_code)
             DO UPDATE SET sentiment = :sentiment, confidence = :confidence, impact = :impact
             """,
-            mapOf(
-                "clusterId" to clusterId,
-                "sectorCode" to sectorCode,
-                "sentiment" to sentiment,
-                "confidence" to confidence,
-                "impact" to impact,
-            ),
+            links.map {
+                MapSqlParameterSource()
+                    .addValue("clusterId", clusterId)
+                    .addValue("sectorCode", it.sectorCode)
+                    .addValue("sentiment", it.sentiment)
+                    .addValue("confidence", it.confidence)
+                    .addValue("impact", it.impact)
+            }.toTypedArray(),
         )
     }
 

@@ -10,6 +10,7 @@ import com.alphatalk.worker.llm.cluster.DigestClusterRow
 import com.alphatalk.worker.llm.config.LlmProperties
 import com.alphatalk.worker.llm.persist.EventIdGenerator
 import com.alphatalk.worker.llm.persist.MarketDigestStore
+import com.alphatalk.worker.llm.persist.StreamEventRow
 import com.alphatalk.worker.llm.persist.StreamEventStore
 import com.alphatalk.worker.llm.publish.StreamPublisher
 import com.alphatalk.worker.llm.sector.SectorDirectory
@@ -119,7 +120,8 @@ class DigestProcessor(
             ),
         )
         val eventId = eventIds.next()
-        if (events.insertEvent(eventId, code, StreamCategory.AI.eventType, clock.instant(), "worker-llm", data)) {
+        val row = StreamEventRow(eventId, code, StreamCategory.AI.eventType, clock.instant(), "worker-llm", data)
+        if (eventId in events.insertEvents(listOf(row))) {
             publisher.publish(code, eventId, data)
         }
     }

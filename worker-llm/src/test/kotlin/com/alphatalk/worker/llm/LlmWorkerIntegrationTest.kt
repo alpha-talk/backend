@@ -13,6 +13,7 @@ import com.alphatalk.worker.llm.article.ArticleFetcher
 import com.alphatalk.worker.llm.article.ArticleRequestGate
 import com.alphatalk.worker.llm.cluster.ClusterAssigner
 import com.alphatalk.worker.llm.cluster.ClusterStore
+import com.alphatalk.worker.llm.cluster.StockVerdictWrite
 import com.alphatalk.worker.llm.config.LlmProperties
 import com.alphatalk.worker.llm.consume.IngestConsumer
 import com.alphatalk.worker.llm.enrich.ClusterSummarizer
@@ -23,6 +24,7 @@ import com.alphatalk.worker.llm.enrich.StockEvidenceValidator
 import com.alphatalk.worker.llm.enrich.TransactionRunner
 import com.alphatalk.worker.llm.persist.EventIdGenerator
 import com.alphatalk.worker.llm.persist.JdbcMarketDigestStore
+import com.alphatalk.worker.llm.persist.StreamEventRow
 import com.alphatalk.worker.llm.persist.StreamEventStore
 import com.alphatalk.worker.llm.publish.StreamPublisher
 import com.alphatalk.worker.llm.sector.SectorDirectory
@@ -30,11 +32,13 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import org.junit.jupiter.api.BeforeEach
+import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection
 import org.springframework.data.redis.connection.stream.StreamRecords
+import org.springframework.dao.DataAccessException
 import org.springframework.data.redis.core.StringRedisTemplate
 import org.springframework.data.redis.listener.ChannelTopic
 import org.springframework.data.redis.listener.RedisMessageListenerContainer
@@ -454,7 +458,7 @@ class LlmWorkerIntegrationTest {
             "UPDATE news_cluster SET scope = 'STOCK' WHERE id = :id",
             mapOf("id" to clusterId),
         )
-        clusterStore.applyStockVerdict(clusterId, "005930", "NEUTRAL", 0.9, rejected = false)
+        clusterStore.applyStockVerdicts(clusterId, listOf(StockVerdictWrite("005930", "NEUTRAL", 0.9, rejected = false)))
 
         xadd(newsEntry("maeil:empty2", "[속보] 코스피 정책 발표", source = "maeil", codes = emptyList()))
         drain()
@@ -513,10 +517,62 @@ class LlmWorkerIntegrationTest {
             occurredAt = 1,
             digest = DigestData(date = "2026-07-16"),
         )
-        val first = eventStore.insertEvent("01ARZ3NDEKTSV4RRFFQ69G5FA1", "005930", "AI", Instant.now(), "worker-llm", data)
-        val second = eventStore.insertEvent("01ARZ3NDEKTSV4RRFFQ69G5FA2", "005930", "AI", Instant.now(), "worker-llm", data)
-        assertTrue(first)
-        assertEquals(false, second)
+        val first = eventStore.insertEvents(
+            listOf(StreamEventRow("01ARZ3NDEKTSV4RRFFQ69G5FA1", "005930", "AI", Instant.now(), "worker-llm", data)),
+        )
+        val second = eventStore.insertEvents(
+            listOf(StreamEventRow("01ARZ3NDEKTSV4RRFFQ69G5FA2", "005930", "AI", Instant.now(), "worker-llm", data)),
+        )
+        assertEquals(setOf("01ARZ3NDEKTSV4RRFFQ69G5FA1"), first)
+        assertEquals(emptySet(), second)
+    }
+
+    @Test
+    fun `배치 삽입은 일부만 충돌해도 실제로 삽입된 행만 발행 대상으로 돌려준다`() {
+        val data = StreamData(category = "news", title = "뉴스", occurredAt = 1)
+        val existing = "01ARZ3NDEKTSV4RRFFQ69G5FB0"
+        eventStore.insertEvents(listOf(StreamEventRow(existing, "005930", "NEWS", Instant.now(), "worker-llm", data)))
+
+        val inserted = eventStore.insertEvents(
+            listOf(
+                StreamEventRow(existing, "005930", "NEWS", Instant.now(), "worker-llm", data),
+                StreamEventRow("01ARZ3NDEKTSV4RRFFQ69G5FB1", "000660", "NEWS", Instant.now(), "worker-llm", data),
+                StreamEventRow(existing, "005930", "NEWS", Instant.now(), "worker-llm", data),
+                StreamEventRow("01ARZ3NDEKTSV4RRFFQ69G5FB2", "005380", "NEWS", Instant.now(), "worker-llm", data),
+            ),
+        )
+
+        assertEquals(setOf("01ARZ3NDEKTSV4RRFFQ69G5FB1", "01ARZ3NDEKTSV4RRFFQ69G5FB2"), inserted)
+    }
+
+    @Test
+    fun `배치 이벤트 클레임은 이미 선점된 종목만 빼고 돌려준다`() {
+        val clusterId = "01ARZ3NDEKTSV4RRFFQ69G5FC0"
+        clusterStore.createCluster(clusterId, "배치 클레임", Instant.now())
+        clusterStore.applyStockVerdicts(
+            clusterId,
+            listOf(
+                StockVerdictWrite("005930", "POSITIVE", 0.9, rejected = false),
+                StockVerdictWrite("000660", "POSITIVE", 0.9, rejected = false),
+                StockVerdictWrite("005380", "POSITIVE", 0.9, rejected = false),
+            ),
+        )
+        clusterStore.claimStockEvents(clusterId, mapOf("000660" to "01ARZ3NDEKTSV4RRFFQ69G5FC1"))
+
+        val claimed = clusterStore.claimStockEvents(
+            clusterId,
+            mapOf(
+                "005930" to "01ARZ3NDEKTSV4RRFFQ69G5FC2",
+                "000660" to "01ARZ3NDEKTSV4RRFFQ69G5FC3",
+                "005380" to "01ARZ3NDEKTSV4RRFFQ69G5FC4",
+            ),
+        )
+
+        assertEquals(setOf("005930", "005380"), claimed)
+        assertEquals(
+            "01ARZ3NDEKTSV4RRFFQ69G5FC1",
+            clusterStore.stockLinks(clusterId).single { it.code == "000660" }.streamEventId,
+        )
     }
 
     @Test
@@ -592,5 +648,40 @@ class LlmWorkerIntegrationTest {
         )
         assertEquals(0, positives)
         assertEquals(1, sectorIssues)
+    }
+
+    @Nested
+    @SpringBootTest(
+        properties = [
+            "alphatalk.llm.consume-enabled=false",
+            "spring.datasource.hikari.data-source-properties.reWriteBatchedInserts=true",
+        ],
+    )
+    inner class BatchCountUnavailable {
+        @Autowired
+        private lateinit var rewritingEventStore: StreamEventStore
+
+        @Autowired
+        private lateinit var rewritingJdbc: NamedParameterJdbcTemplate
+
+        @Test
+        fun `행 수를 알 수 없으면 삽입을 롤백하고 실패시킨다`() {
+            val data = StreamData(category = "news", title = "뉴스", occurredAt = 1)
+            val eventIds = listOf("01ARZ3NDEKTSV4RRFFQ69G5FE1", "01ARZ3NDEKTSV4RRFFQ69G5FE2")
+
+            val failure = assertFailsWith<DataAccessException> {
+                rewritingEventStore.insertEvents(
+                    eventIds.map { StreamEventRow(it, "005930", "NEWS", Instant.now(), "worker-llm", data) },
+                )
+            }
+            assertTrue(failure.message.orEmpty().contains("SUCCESS_NO_INFO"))
+
+            val remaining = rewritingJdbc.queryForObject(
+                "SELECT count(*) FROM stream_event WHERE event_id IN (:eventIds)",
+                mapOf("eventIds" to eventIds),
+                Long::class.java,
+            )
+            assertEquals(0L, remaining)
+        }
     }
 }
