@@ -8,10 +8,12 @@ import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
+import java.time.Duration
 
 class KisApprovalClient(
     private val restBaseUrl: String,
-    private val http: HttpClient = HttpClient.newHttpClient(),
+    private val http: HttpClient = HttpClient.newBuilder().connectTimeout(CONNECT_TIMEOUT).build(),
+    private val requestTimeout: Duration = REQUEST_TIMEOUT,
 ) {
     private val mapper: ObjectMapper = jacksonObjectMapper()
 
@@ -25,6 +27,7 @@ class KisApprovalClient(
         )
         val request = HttpRequest.newBuilder()
             .uri(URI.create("$restBaseUrl/oauth2/Approval"))
+            .timeout(requestTimeout)
             .header("content-type", "application/json; charset=utf-8")
             .POST(HttpRequest.BodyPublishers.ofString(body))
             .build()
@@ -37,5 +40,10 @@ class KisApprovalClient(
             throw KisClientException("approval response invalid: keyId=${account.keyId}")
         }
         return approvalKey
+    }
+
+    companion object {
+        val CONNECT_TIMEOUT: Duration = Duration.ofSeconds(3)
+        val REQUEST_TIMEOUT: Duration = Duration.ofSeconds(10)
     }
 }

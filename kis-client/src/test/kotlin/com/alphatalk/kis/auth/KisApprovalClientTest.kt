@@ -3,6 +3,8 @@ package com.alphatalk.kis.auth
 import com.alphatalk.kis.KisClientException
 import com.alphatalk.kis.RecordingKisServer
 import com.alphatalk.kis.model.KisAccount
+import java.net.http.HttpTimeoutException
+import java.time.Duration
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
@@ -45,5 +47,19 @@ class KisApprovalClientTest {
         val client = KisApprovalClient(server.baseUrl)
 
         assertFailsWith<KisClientException> { client.approvalKey(account) }
+    }
+
+    @Test
+    fun `응답이 오지 않으면 요청 타임아웃 안에 실패한다`() {
+        server.enqueue("/oauth2/Approval", 200, """{"approval_key":"AK-123"}""", delayMillis = 5_000)
+        val requestTimeout = Duration.ofMillis(300)
+        val client = KisApprovalClient(server.baseUrl, requestTimeout = requestTimeout)
+
+        val startedAt = System.nanoTime()
+        assertFailsWith<HttpTimeoutException> { client.approvalKey(account) }
+        val elapsed = Duration.ofNanos(System.nanoTime() - startedAt)
+
+        assertTrue(elapsed >= requestTimeout, "elapsed=$elapsed")
+        assertTrue(elapsed < Duration.ofSeconds(3), "elapsed=$elapsed")
     }
 }

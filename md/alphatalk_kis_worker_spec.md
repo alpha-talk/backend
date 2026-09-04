@@ -45,7 +45,7 @@ worker-price·worker-batch와 두 워커가 공유하는 `:kis-client`의 구현
 |---|---|---|
 | 접근토큰 | `POST /oauth2/tokenP` `{grant_type:"client_credentials", appkey, appsecret}` → `access_token` **24h 유효** | Redis `kis:token:{keyId}` 캐시(TTL=만료−5분) |
 | 재발급 제한 | **1분당 1회** (+`tokenP` 자체 유량 1건/초) | 발급은 분산락 `SET kis:token:lock:{keyId} NX PX 5000` 안에서만. 락 실패 시 짧게 대기 후 캐시 재조회 |
-| WS 접속키 | `POST /oauth2/Approval` `{grant_type:"client_credentials", appkey, secretkey}` → `approval_key` | 세션 연결 시 발급, 계정별 보관 |
+| WS 접속키 | `POST /oauth2/Approval` `{grant_type:"client_credentials", appkey, secretkey}` → `approval_key` | 세션 연결 시 발급, 계정별 보관. 연결 3s·요청 10s 타임아웃 — 발급은 세션 정비 루프 안에서 동기 호출되므로 무응답이 리더 락 갱신·종료를 막지 않게 상한을 둔다 |
 | 토큰 만료 응답 | REST 401/토큰 오류 코드 수신 시 | 캐시 무효화 → 재발급(락) → **1회만** 재시도 |
 
 `keyId` = appkey 해시 앞 8자. 로그·키에 appkey 원문을 쓰지 않는다.
