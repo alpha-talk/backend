@@ -8,6 +8,11 @@ import java.time.Clock
 import java.time.Duration
 import java.time.Instant
 import java.time.ZoneOffset
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CyclicBarrier
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -38,33 +43,52 @@ class AuthServiceTest {
             rows.filterKeys(ids::contains).mapValues { (_, user) -> user.nickname }
     }
 
-    private class InMemoryRefreshStore : RefreshTokenStore {
-        val rows = mutableMapOf<String, RefreshTokenRecord>()
+    private open class InMemoryRefreshStore : RefreshTokenStore {
+        val rows = ConcurrentHashMap<String, RefreshTokenRecord>()
         val rotations = mutableListOf<Pair<String, String?>>()
+        val revokeAllCalls = AtomicInteger()
 
         override fun save(userId: Long, tokenHash: String, expiresAt: Instant, rotatedFrom: String?) {
             rows[tokenHash] = RefreshTokenRecord(userId, tokenHash, expiresAt, null)
-            rotations += tokenHash to rotatedFrom
+            synchronized(rotations) { rotations += tokenHash to rotatedFrom }
         }
 
         override fun find(tokenHash: String) = rows[tokenHash]
 
         override fun revoke(tokenHash: String, at: Instant): Boolean {
-            val row = rows[tokenHash] ?: return false
-            if (row.revokedAt != null) return false
-            rows[tokenHash] = row.copy(revokedAt = at)
-            return true
+            var revoked = false
+            rows.computeIfPresent(tokenHash) { _, row ->
+                if (row.revokedAt != null) {
+                    row
+                } else {
+                    revoked = true
+                    row.copy(revokedAt = at)
+                }
+            }
+            return revoked
         }
 
         override fun revokeAllOf(userId: Long, at: Instant): Int {
+            revokeAllCalls.incrementAndGet()
             var count = 0
-            rows.forEach { (hash, row) ->
-                if (row.userId == userId && row.revokedAt == null) {
-                    rows[hash] = row.copy(revokedAt = at)
-                    count++
+            rows.keys.forEach { hash ->
+                rows.computeIfPresent(hash) { _, row ->
+                    if (row.userId == userId && row.revokedAt == null) {
+                        count++
+                        row.copy(revokedAt = at)
+                    } else {
+                        row
+                    }
                 }
             }
             return count
+        }
+    }
+
+    private class LosingRaceRefreshStore : InMemoryRefreshStore() {
+        override fun revoke(tokenHash: String, at: Instant): Boolean {
+            super.revoke(tokenHash, at)
+            return false
         }
     }
 
@@ -172,6 +196,53 @@ class AuthServiceTest {
 
         assertFailsWith<ApiException> { service.refresh(RefreshRequest(second.refreshToken)) }
         assertTrue(refreshTokens.rows.values.all { it.revokedAt != null })
+    }
+
+    @Test
+    fun `조건부 무효화가 0건이면 재사용으로 보고 그 계정의 세션을 전부 끊는다`() {
+        val losingStore = LosingRaceRefreshStore()
+        val racedService = AuthService(
+            users = users,
+            refreshTokens = losingStore,
+            issuer = issuer,
+            passwords = PlainPasswordEncoder(),
+            props = AuthProperties(),
+            clock = Clock.fixed(now, ZoneOffset.UTC),
+        )
+        racedService.signup(SignupRequest("a@b.c", "password1", "민균"))
+        val tokens = racedService.login(LoginRequest("a@b.c", "password1"))
+
+        val e = assertFailsWith<ApiException> { racedService.refresh(RefreshRequest(tokens.refreshToken)) }
+
+        assertEquals(ErrorCode.UNAUTHORIZED, e.code)
+        assertEquals(1, losingStore.revokeAllCalls.get())
+        assertEquals(1, losingStore.rows.size, "실패한 회전이 새 쌍을 발급했다")
+        assertTrue(losingStore.rows.values.all { it.revokedAt != null })
+    }
+
+    @Test
+    fun `같은 리프레시로 동시에 재발급하면 하나만 성공하고 나머지는 재사용으로 거절한다`() {
+        val first = signupAndLogin()
+        val barrier = CyclicBarrier(2)
+        val pool = Executors.newFixedThreadPool(2)
+        try {
+            val attempts = List(2) {
+                pool.submit<Result<TokenPair>> {
+                    barrier.await(10, TimeUnit.SECONDS)
+                    runCatching { service.refresh(RefreshRequest(first.refreshToken)) }
+                }
+            }
+            val outcomes = attempts.map { it.get(30, TimeUnit.SECONDS) }
+
+            assertEquals(1, outcomes.count { it.isSuccess }, "결과: $outcomes")
+            val rejected = outcomes.single { it.isFailure }.exceptionOrNull()
+            assertTrue(rejected is ApiException && rejected.code == ErrorCode.UNAUTHORIZED, "결과: $rejected")
+            assertEquals(1, refreshTokens.revokeAllCalls.get())
+            val presentedHash = refreshTokens.rotations.first().first
+            assertNotEquals(null, refreshTokens.rows.getValue(presentedHash).revokedAt)
+        } finally {
+            pool.shutdownNow()
+        }
     }
 
     @Test

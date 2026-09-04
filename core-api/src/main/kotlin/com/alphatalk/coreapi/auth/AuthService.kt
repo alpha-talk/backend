@@ -6,9 +6,11 @@ import com.alphatalk.coreapi.support.ErrorCode
 import org.slf4j.LoggerFactory
 import org.springframework.security.crypto.password.PasswordEncoder
 import org.springframework.stereotype.Service
+import org.springframework.transaction.annotation.Transactional
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.time.Clock
+import java.time.Instant
 import java.util.Base64
 
 @Service
@@ -45,21 +47,28 @@ class AuthService(
         return issuePair(user.id, rotatedFrom = null)
     }
 
+    @Transactional(noRollbackFor = [ApiException::class])
     fun refresh(request: RefreshRequest): TokenPair {
         val presentedHash = hash(request.refreshToken)
         val stored = refreshTokens.find(presentedHash)
             ?: throw ApiException(ErrorCode.UNAUTHORIZED, "리프레시 토큰이 유효하지 않습니다")
         val now = clock.instant()
         if (stored.revokedAt != null) {
-            refreshTokens.revokeAllOf(stored.userId, now)
-            log.warn("refresh token reuse detected, revoking all sessions: userId={}", stored.userId)
-            throw ApiException(ErrorCode.UNAUTHORIZED, "리프레시 토큰이 재사용되어 모든 세션을 종료했습니다")
+            rejectReuse(stored.userId, now)
         }
         if (!stored.expiresAt.isAfter(now)) {
             throw ApiException(ErrorCode.UNAUTHORIZED, "리프레시 토큰이 만료되었습니다")
         }
-        refreshTokens.revoke(presentedHash, now)
+        if (!refreshTokens.revoke(presentedHash, now)) {
+            rejectReuse(stored.userId, now)
+        }
         return issuePair(stored.userId, rotatedFrom = presentedHash)
+    }
+
+    private fun rejectReuse(userId: Long, now: Instant): Nothing {
+        refreshTokens.revokeAllOf(userId, now)
+        log.warn("refresh token reuse detected, revoking all sessions: userId={}", userId)
+        throw ApiException(ErrorCode.UNAUTHORIZED, "리프레시 토큰이 재사용되어 모든 세션을 종료했습니다")
     }
 
     fun logout(userId: Long) {

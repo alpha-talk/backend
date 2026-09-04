@@ -12,6 +12,7 @@ import org.springframework.http.HttpEntity
 import org.springframework.http.HttpHeaders
 import org.springframework.http.HttpMethod
 import org.springframework.http.MediaType
+import org.springframework.http.ResponseEntity
 import org.springframework.boot.test.web.client.TestRestTemplate
 import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.test.context.ActiveProfiles
@@ -21,6 +22,9 @@ import org.testcontainers.junit.jupiter.Container
 import org.testcontainers.junit.jupiter.Testcontainers
 import org.testcontainers.utility.DockerImageName
 import java.time.Duration
+import java.util.concurrent.CyclicBarrier
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNotEquals
@@ -204,6 +208,32 @@ class AuthEndToEndTest {
 
         val afterBreach = post("/api/v1/auth/refresh", """{"refreshToken":"${second.path("refreshToken").asText()}"}""")
         assertEquals(401, afterBreach.statusCode.value())
+    }
+
+    @Test
+    fun `같은 리프레시로 동시에 재발급하면 하나만 성공하고 그 계정 세션이 전부 끊긴다`() {
+        signup()
+        val refreshToken = login().path("refreshToken").asText()
+        val barrier = CyclicBarrier(2)
+        val pool = Executors.newFixedThreadPool(2)
+        try {
+            val attempts = List(2) {
+                pool.submit<ResponseEntity<String>> {
+                    barrier.await(10, TimeUnit.SECONDS)
+                    post("/api/v1/auth/refresh", """{"refreshToken":"$refreshToken"}""")
+                }
+            }
+            val responses = attempts.map { it.get(30, TimeUnit.SECONDS) }
+            val statuses = responses.map { it.statusCode.value() }
+
+            assertEquals(listOf(200, 401), statuses.sorted(), "결과: $statuses")
+            val issued = json(responses.single { it.statusCode.value() == 200 }.body)
+            val afterBreach = post("/api/v1/auth/refresh", """{"refreshToken":"${issued.path("refreshToken").asText()}"}""")
+            assertEquals(401, afterBreach.statusCode.value())
+            assertEquals(0L, jdbc.queryForObject("SELECT count(*) FROM refresh_tokens WHERE revoked_at IS NULL", Long::class.java))
+        } finally {
+            pool.shutdownNow()
+        }
     }
 
     @Test
