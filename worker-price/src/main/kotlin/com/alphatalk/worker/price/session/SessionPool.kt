@@ -21,6 +21,7 @@ import io.micrometer.core.instrument.MeterRegistry
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.stereotype.Component
+import java.time.Duration
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -51,6 +52,8 @@ class SessionPool(
     private val degradedThreshold: Int = 5,
     private val ackTimeoutMillis: Long = 5_000,
     private val clock: () -> Long = System::currentTimeMillis,
+    private val createSession: (String, String, KisSessionListener) -> KisWebSocketSession =
+        { url, approvalKey, listener -> KisWebSocketSession(url, approvalKey, listener) },
 ) : DegradedSymbolsSource {
     @Autowired
     constructor(
@@ -414,6 +417,7 @@ class SessionPool(
             return now - sentAt < ackTimeoutMillis
         }
 
+        @Volatile
         var session: KisWebSocketSession? = null
         var nextConnectAttemptAt = 0L
         var consecutiveFailures = 0
@@ -437,16 +441,18 @@ class SessionPool(
 
         fun connect() {
             state = SessionState.CONNECTING
+            var created: KisWebSocketSession? = null
             try {
-                val created = KisWebSocketSession(wsUrl, approvalKeys(account), FrameHandler(this))
-                created.connect().get(connectTimeoutSeconds, TimeUnit.SECONDS)
+                val handler = FrameHandler(this)
+                created = createSession(wsUrl, approvalKeys(account), handler).also(handler::bind)
+                created.connect(Duration.ofSeconds(connectTimeoutSeconds)).get(connectTimeoutSeconds, TimeUnit.SECONDS)
                 session = created
                 clearSubscriptions()
                 state = SessionState.CONNECTED
                 consecutiveFailures = 0
                 log.info("kis ws connected: keyId={} assigned={}", account.keyId, assigned.size)
             } catch (e: Exception) {
-                runCatching { session?.close() }
+                runCatching { created?.abort() }
                 session = null
                 registerFailure()
                 log.warn("kis ws connect failed: keyId={} failures={}", account.keyId, consecutiveFailures, e)
@@ -592,7 +598,18 @@ class SessionPool(
     }
 
     private inner class FrameHandler(private val pooled: PooledSession) : KisSessionListener {
+        @Volatile
+        private var source: KisWebSocketSession? = null
+
+        fun bind(session: KisWebSocketSession) {
+            source = session
+        }
+
+        private val fromStaleSession: Boolean
+            get() = source == null || pooled.session !== source
+
         override fun onTicks(trId: String, ticks: List<KisTick>) {
+            if (fromStaleSession) return
             val now = clock()
             ticks.forEach { tick ->
                 buffer.offer(tick)
@@ -602,6 +619,7 @@ class SessionPool(
         }
 
         override fun onDepths(trId: String, depths: List<KisDepth>) {
+            if (fromStaleSession) return
             meters.counter("depth.in").increment(depths.size.toDouble())
             val (accepted, stale) = depths.partition { acceptsDepthFrame(pooled, trId, it.code) }
             accepted.forEach(depthBuffer::offer)
@@ -611,27 +629,33 @@ class SessionPool(
         }
 
         override fun onSubscribeAck(trId: String?, trKey: String?, success: Boolean) {
+            if (fromStaleSession) return
             applyAck(pooled, trId, trKey, success)
         }
 
         override fun onUnsubscribeAck(trId: String?, trKey: String?, success: Boolean) {
+            if (fromStaleSession) return
             applyUnsubscribeAck(pooled, trId, trKey, success)
         }
 
         override fun onEncryptedDropped(trId: String) {
+            if (fromStaleSession) return
             log.warn("encrypted frame dropped: trId={}", trId)
         }
 
         override fun onClosed(reason: String?) {
+            if (fromStaleSession) return
             log.info("kis ws closed: keyId={} {}", pooled.account.keyId, reason)
             pooled.connectionLost.set(true)
         }
 
         override fun onError(t: Throwable) {
+            if (fromStaleSession) return
             log.warn("kis ws frame error: keyId={}", pooled.account.keyId, t)
         }
 
         override fun onTransportError(t: Throwable) {
+            if (fromStaleSession) return
             log.warn("kis ws transport error: keyId={}", pooled.account.keyId, t)
             pooled.connectionLost.set(true)
         }

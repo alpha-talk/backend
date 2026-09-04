@@ -2,6 +2,10 @@ package com.alphatalk.worker.price.session
 
 import com.alphatalk.kis.model.KisAccount
 import com.alphatalk.kis.test.FakeKisServer
+import com.alphatalk.kis.test.StallingHandshakeServer
+import com.alphatalk.kis.ws.KisSessionListener
+import com.alphatalk.kis.ws.KisTick
+import com.alphatalk.kis.ws.KisWebSocketSession
 import com.alphatalk.worker.price.conflation.ConflationBuffer
 import com.alphatalk.worker.price.conflation.DepthConflationBuffer
 import com.alphatalk.worker.price.market.InMemoryMarketDivStore
@@ -9,6 +13,7 @@ import com.alphatalk.worker.price.market.MarketDivStore
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import org.awaitility.Awaitility.await
+import java.io.IOException
 import java.time.Duration
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
@@ -1604,5 +1609,85 @@ class SessionPoolTest {
         val resubscribed = subscribesOf(server.receivedMessages).drop(2)
         assertEquals(1, resubscribed.size)
         assertEquals("H0STOUP0", resubscribed[0].path("body").path("input").path("tr_id").asText())
+    }
+
+    private fun poolSwitchingAfterTimeout(
+        stalling: StallingHandshakeServer,
+        meters: SimpleMeterRegistry,
+        listeners: MutableList<KisSessionListener>,
+    ) = SessionPool(
+        accounts = listOf(KisAccount("key1", "app", "secret")),
+        wsUrl = stalling.url,
+        approvalKeys = { "AK" },
+        buffer = ConflationBuffer(),
+        meters = meters,
+        tickTrIds = listOf("H0UNCNT0"),
+        marketDivs = InMemoryMarketDivStore(),
+        silenceMillis = Long.MAX_VALUE,
+        backoff = BackoffPolicy(initialMillis = 50, jitterRatio = 0.0),
+        connectTimeoutSeconds = 1,
+        clock = { now },
+        createSession = { _, approvalKey, listener ->
+            listeners += listener
+            val url = if (listeners.size == 1) stalling.url else server.url
+            KisWebSocketSession(url, approvalKey, listener)
+        },
+    )
+
+    private fun sessionsInState(meters: SimpleMeterRegistry, state: String) =
+        meters.find("kis.ws.sessions").tag("state", state).gauge()?.value()
+
+    @Test
+    fun `접속 타임아웃은 늦게 열린 세션을 끊고 백오프 뒤 재시도한다`() {
+        StallingHandshakeServer().use { stalling ->
+            val meters = SimpleMeterRegistry()
+            val pool = poolSwitchingAfterTimeout(stalling, meters, mutableListOf())
+
+            pool.maintain(setOf("005930"), emptyList(), subscribeAllowed = true)
+
+            assertEquals(setOf("005930"), pool.degradedSymbols())
+            assertEquals(0.0, sessionsInState(meters, "connected"))
+            assertEquals(1.0, sessionsInState(meters, "disconnected"))
+            stalling.awaitConnections(1)
+            stalling.completeHandshakes()
+            stalling.awaitPeersClosed()
+
+            pool.maintain(setOf("005930"), emptyList(), subscribeAllowed = true)
+            assertEquals(1, stalling.connectionCount)
+            assertEquals(0, server.connectionCount)
+
+            now += 50
+            pool.maintain(setOf("005930"), emptyList(), subscribeAllowed = true)
+
+            server.awaitMessages(1)
+            assertEquals(1.0, sessionsInState(meters, "connected"))
+            assertEquals(1, server.connectionCount)
+        }
+    }
+
+    @Test
+    fun `타임아웃된 이전 세션의 늦은 콜백은 현재 세션을 흔들지 않는다`() {
+        StallingHandshakeServer().use { stalling ->
+            val meters = SimpleMeterRegistry()
+            val listeners = mutableListOf<KisSessionListener>()
+            val pool = poolSwitchingAfterTimeout(stalling, meters, listeners)
+            pool.maintain(setOf("005930"), emptyList(), subscribeAllowed = true)
+            now += 50
+            pool.maintain(setOf("005930"), emptyList(), subscribeAllowed = true)
+            server.awaitMessages(1)
+            val stale = listeners.first()
+
+            stale.onClosed("late")
+            stale.onTransportError(IOException("late"))
+            stale.onTicks("H0UNCNT0", listOf(KisTick("005930", "134058", 16110, 2, 0.06, 16000, 16200, 16000, 4355991)))
+            stale.onSubscribeAck("H0UNCNT0", "005930", success = true)
+            pool.maintain(setOf("005930"), emptyList(), subscribeAllowed = true)
+
+            assertEquals(1.0, sessionsInState(meters, "connected"))
+            assertEquals(1, server.connectionCount)
+            assertEquals(0.0, meters.counter("tick.in").count())
+            assertEquals(0.0, meters.find("kis.subscribed.symbols").gauge()?.value())
+            assertEquals(1, subscribesOf(server.receivedMessages).size)
+        }
     }
 }
