@@ -1,6 +1,7 @@
 package com.alphatalk.worker.batch.industry
 
 import com.alphatalk.worker.batch.job.BatchJobRunStore
+import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import java.time.Duration
 import java.time.Instant
@@ -289,6 +290,129 @@ class IndustrySyncJobTest {
         assertEquals(1, dart.companyCalls)
     }
 
+    @Test
+    fun `데드라인에 도달하면 저장하지 않고 FAILED로 남긴다 - 느린 DART가 락 임차를 넘기지 않게`() {
+        var now = Instant.parse("2026-08-04T21:30:00Z")
+        val store = RecordingStore(active = setOf("000001", "000002", "000003"))
+        val dart = FakeDartClient(
+            corps = listOf(corp("c1", "000001"), corp("c2", "000002"), corp("c3", "000003")),
+            companies = mapOf(
+                "c1" to company("000001", "28121"),
+                "c2" to company("000002", "28121"),
+                "c3" to company("000003", "28121"),
+            ),
+            onCompany = { now = now.plusSeconds(46 * 60) },
+        )
+        val runs = OnceOnlyRunStore()
+        val meters = SimpleMeterRegistry()
+
+        val stored = job(dart, store, runs, meters = meters, deadline = Duration.ofMinutes(90), clock = { now }).syncOnce()
+
+        assertEquals(0, stored)
+        assertEquals(2, dart.companyCalls)
+        assertTrue(store.stockIndustries.isEmpty())
+        assertEquals(1L, runs.failedId)
+        assertEquals(1, runs.failedCount)
+        assertEquals(1.0, meters.counter("batch.industry.deadline").count())
+    }
+
+    @Test
+    fun `HTTP 429·5xx와 DART 900은 종목 실패로 흡수하지 않고 즉시 잡을 실패시킨다`() {
+        listOf("429", "503", "900").forEach { status ->
+            val store = RecordingStore(active = setOf("000001", "000002"))
+            val dart = FakeDartClient(
+                corps = listOf(corp("c1", "000001"), corp("c2", "000002")),
+                companies = mapOf("c2" to company("000002", "28121")),
+                errorFor = mapOf("c1" to status),
+            )
+            val runs = OnceOnlyRunStore()
+
+            assertFailsWith<DartApiException>(status) { job(dart, store, runs, maxFailureRatio = 1.0).syncOnce() }
+            assertEquals(1, dart.companyCalls, status)
+            assertEquals(1L, runs.failedId, status)
+            assertTrue(store.stockIndustries.isEmpty(), status)
+        }
+    }
+
+    @Test
+    fun `연속 실패가 한도에 닿으면 회차를 중단한다 - 전면 장애가 전 종목 호출을 소모하지 않게`() {
+        val codes = (1..8).map { "00000$it" }
+        val store = RecordingStore(active = codes.toSet())
+        val dart = FakeDartClient(
+            corps = codes.map { corp("corp$it", it) },
+            companies = emptyMap(),
+            ioErrorFor = codes.map { "corp$it" }.toSet(),
+        )
+        val runs = OnceOnlyRunStore()
+        val meters = SimpleMeterRegistry()
+
+        val stored = job(dart, store, runs, meters = meters, maxFailureRatio = 1.0, failureStreakLimit = 3).syncOnce()
+
+        assertEquals(0, stored)
+        assertEquals(3, dart.companyCalls)
+        assertTrue(store.stockIndustries.isEmpty())
+        assertEquals(1L, runs.failedId)
+        assertEquals(8, runs.failedCount)
+        assertEquals(1.0, meters.counter("batch.industry.breaker").count())
+    }
+
+    @Test
+    fun `성공이나 데이터 없음이 끼면 스트릭이 리셋된다 - 산발 실패는 브레이커를 열지 않는다`() {
+        val store = RecordingStore(active = setOf("000001", "000002", "000003", "000004"))
+        val dart = FakeDartClient(
+            corps = listOf(corp("c1", "000001"), corp("c2", "000002"), corp("c3", "000003"), corp("c4", "000004")),
+            companies = mapOf("c2" to company("000002", "28121")),
+            noDataFor = setOf("c4"),
+            ioErrorFor = setOf("c1", "c3"),
+        )
+        val runs = OnceOnlyRunStore()
+
+        val stored = job(dart, store, runs, maxFailureRatio = 1.0, failureStreakLimit = 2).syncOnce()
+
+        assertEquals(1, stored)
+        assertEquals(6, dart.companyCalls)
+        assertEquals(1, runs.succeededOk)
+    }
+
+    @Test
+    fun `재시도 순회는 브레이커를 열지 않는다 - 산발 실패를 몰아 재시도해도 연속 실패로 보지 않는다`() {
+        val codes = (1..12).map { "%06d".format(it) }
+        val broken = codes.filterIndexed { index, _ -> index % 2 == 0 }
+        val store = RecordingStore(active = codes.toSet())
+        val dart = FakeDartClient(
+            corps = codes.map { corp("corp$it", it) },
+            companies = codes.filterNot { it in broken }.associate { "corp$it" to company(it, "28121") },
+            ioErrorFor = broken.map { "corp$it" }.toSet(),
+        )
+        val runs = OnceOnlyRunStore()
+        val meters = SimpleMeterRegistry()
+
+        val stored = job(dart, store, runs, meters = meters, maxFailureRatio = 1.0, failureStreakLimit = 5).syncOnce()
+
+        assertEquals(6, stored)
+        assertEquals(18, dart.companyCalls)
+        assertEquals(6, runs.succeededOk)
+        assertEquals(0.0, meters.counter("batch.industry.breaker").count())
+        assertEquals(6.0, meters.counter("batch.industry.failed").count())
+    }
+
+    @Test
+    fun `인터럽트는 종목 실패로 흡수하지 않고 취소로 전파한다`() {
+        val store = RecordingStore(active = setOf("000001", "000002"))
+        val dart = FakeDartClient(
+            corps = listOf(corp("c1", "000001"), corp("c2", "000002")),
+            companies = mapOf("c2" to company("000002", "28121")),
+            interruptFor = setOf("c1"),
+        )
+        val runs = OnceOnlyRunStore()
+
+        assertFailsWith<InterruptedException> { job(dart, store, runs, maxFailureRatio = 1.0).syncOnce() }
+
+        assertTrue(Thread.interrupted())
+        assertEquals(1, dart.companyCalls)
+        assertEquals(1L, runs.failedId)
+    }
+
     private fun job(
         dart: DartClient,
         store: RecordingStore,
@@ -296,16 +420,23 @@ class IndustrySyncJobTest {
         groupMaxSize: Int = 100,
         overrides: Map<String, String> = emptyMap(),
         maxFailureRatio: Double = 0.05,
+        meters: MeterRegistry = SimpleMeterRegistry(),
+        failureStreakLimit: Int = 5,
+        deadline: Duration = Duration.ofMinutes(90),
+        clock: () -> Instant = Instant::now,
     ) = IndustrySyncJob(
         dart = dart,
         ksic = ksic,
         store = store,
         runs = runs,
-        meters = SimpleMeterRegistry(),
+        meters = meters,
         requestInterval = Duration.ZERO,
         groupMaxSize = groupMaxSize,
         groupOverrides = overrides,
         maxFailureRatio = maxFailureRatio,
+        failureStreakLimit = failureStreakLimit,
+        deadline = deadline,
+        clock = clock,
         today = { LocalDate.of(2026, 8, 5) },
         pause = {},
     )
@@ -329,7 +460,9 @@ class IndustrySyncJobTest {
         private val noDataFor: Set<String> = emptySet(),
         private val errorFor: Map<String, String> = emptyMap(),
         private val ioErrorFor: Set<String> = emptySet(),
+        private val interruptFor: Set<String> = emptySet(),
         private val transientFailFirstCall: Boolean = false,
+        private val onCompany: () -> Unit = {},
     ) : DartClient {
         var companyCalls = 0
 
@@ -350,9 +483,11 @@ class IndustrySyncJobTest {
 
         override fun company(corpCode: String): DartCompany? {
             companyCalls += 1
+            onCompany()
             if (transientFailFirstCall && companyCalls == 1) throw DartApiException("013", "일시 실패")
             errorFor[corpCode]?.let { throw DartApiException(it, "운영 오류") }
             if (corpCode in ioErrorFor) throw java.io.IOException("connection reset")
+            if (corpCode in interruptFor) throw InterruptedException("shutdown")
             if (corpCode in noDataFor) return null
             return companies[corpCode]
         }
@@ -398,6 +533,7 @@ class IndustrySyncJobTest {
         private var succeeded = false
         var succeededOk: Int? = null
         var failedId: Long? = null
+        var failedCount: Int? = null
 
         override fun start(job: String, runDate: String, startedAt: Instant): Long? = if (succeeded) null else 1L
 
@@ -410,6 +546,11 @@ class IndustrySyncJobTest {
 
         override fun fail(id: Long, error: String, finishedAt: Instant) {
             failedId = id
+        }
+
+        override fun failCounted(id: Long, okCount: Int, failCount: Int, error: String, finishedAt: Instant) {
+            failedId = id
+            failedCount = failCount
         }
     }
 }

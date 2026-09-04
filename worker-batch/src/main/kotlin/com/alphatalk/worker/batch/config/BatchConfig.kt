@@ -82,6 +82,8 @@ class BatchConfig {
             groupMaxSize = props.dart.groupMaxSize,
             groupOverrides = props.dart.groupOverrides,
             maxFailureRatio = props.dart.maxFailureRatio,
+            failureStreakLimit = props.dart.failureStreakLimit,
+            deadline = props.dart.deadline,
         )
     }
 

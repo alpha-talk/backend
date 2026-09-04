@@ -24,6 +24,10 @@ spring:
         enabled: false
   lifecycle:
     timeout-per-shutdown-phase: 30s
+  task:
+    scheduling:
+      pool:
+        size: 4
 
 server:
   port: 8083          # 모노레포 포트 배치 (기획안 §3.1)
@@ -50,6 +54,8 @@ alphatalk:
       request-interval: 50ms
       group-max-size: 100                       # 초과 그룹은 KSIC 한 단계 아래로 분할 — worker-llm fanout-cap과 맞춘다
       max-failure-ratio: 0.05                   # 조회 실패가 이 비율을 넘으면 부분 결과를 저장하지 않고 잡을 실패시킨다
+      failure-streak-limit: 5
+      deadline: 90m
       group-overrides:                          # DART 신고 업종이 뉴스 맥락과 어긋나는 종목의 수동 보정
         "[005930]": "261"                       # 삼성전자 — DART 신고는 264(통신·방송장비)지만 반도체 뉴스가 본류다
     holidays: []                                # KRX 휴장일(yyyy-MM-dd) — worker-price와 같은 목록을 각자 든다, 함께 갱신 (명세 §2.7)

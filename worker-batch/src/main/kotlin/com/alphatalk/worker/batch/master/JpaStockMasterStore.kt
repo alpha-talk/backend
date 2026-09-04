@@ -6,6 +6,7 @@ import jakarta.persistence.Entity
 import jakarta.persistence.EntityManager
 import jakarta.persistence.Id
 import jakarta.persistence.Table
+import org.hibernate.annotations.DynamicUpdate
 import org.hibernate.annotations.JdbcTypeCode
 import org.hibernate.type.SqlTypes
 import org.springframework.data.jpa.repository.JpaRepository
@@ -20,6 +21,7 @@ import java.time.LocalDate
 
 @Entity
 @Table(name = "stock_master")
+@DynamicUpdate
 class StockMasterEntity(
     @Id
     @JdbcTypeCode(SqlTypes.CHAR)

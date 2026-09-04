@@ -21,11 +21,22 @@ open class IndustrySyncJob(
     private val groupMaxSize: Int = 100,
     private val groupOverrides: Map<String, String> = emptyMap(),
     private val maxFailureRatio: Double = 0.05,
+    private val failureStreakLimit: Int = 5,
+    private val deadline: Duration = Duration.ofMinutes(90),
     private val clock: () -> Instant = Instant::now,
     private val today: () -> LocalDate = { LocalDate.now(SEOUL) },
     private val pause: (Duration) -> Unit = { Thread.sleep(it.toMillis()) },
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
+
+    init {
+        require(failureStreakLimit >= 1) {
+            "alphatalk.batch.dart.failure-streak-limit는 1 이상이어야 한다: $failureStreakLimit"
+        }
+        require(deadline > Duration.ZERO) {
+            "alphatalk.batch.dart.deadline은 양수여야 한다: $deadline"
+        }
+    }
 
     @Scheduled(cron = "\${alphatalk.batch.dart.cron:0 30 6 * * SUN}", zone = "Asia/Seoul")
     @SchedulerLock(name = JOB_NAME, lockAtMostFor = "PT2H", lockAtLeastFor = "PT1M")
@@ -40,13 +51,25 @@ open class IndustrySyncJob(
             return 0
         }
         try {
+            val deadlineAt = clock().plus(deadline)
             val listed = dart.corpCodes().filter { !it.stockCode.isNullOrBlank() }
             check(listed.isNotEmpty()) { "OpenDART corpCode 응답에 상장사가 없다" }
             store.upsertCorpMap(listed)
 
             val active = store.activeStockCodes()
             val targets = listed.filter { it.stockCode in active }
-            val outcome = collectAll(targets)
+            val outcome = CollectOutcome()
+            val abort = collectAll(outcome, targets, deadlineAt)
+            if (abort != null) {
+                meters.counter(abort.metric).increment()
+                runs.failCounted(runId, 0, abort.unresolved, abort.reason, clock())
+                log.error(
+                    "industry sync aborted - marked FAILED, nothing stored: {} fetched={}",
+                    abort.reason,
+                    outcome.profiles.size,
+                )
+                return 0
+            }
             checkFailureBudget(outcome, targets.size)
 
             val retired = active - targets.mapNotNull(DartCorp::stockCode).toSet() + outcome.missing
@@ -149,37 +172,74 @@ open class IndustrySyncJob(
         return ksic.entries() + fallbacks
     }
 
-    private fun collectAll(targets: List<DartCorp>): CollectOutcome {
-        val outcome = CollectOutcome()
-        targets.forEach { collect(it, outcome) }
-        outcome.failed.toList().forEach { corp ->
-            outcome.failed -= corp
-            collect(corp, outcome)
+    private fun collectAll(outcome: CollectOutcome, targets: List<DartCorp>, deadlineAt: Instant): Abort? {
+        val deferred = mutableListOf<DartCorp>()
+        for ((index, corp) in targets.withIndex()) {
+            val unresolved = deferred.size + targets.size - index
+            (deadlineAbort(deadlineAt, unresolved) ?: breakerAbort(outcome, unresolved))?.let { return it }
+            if (collect(corp, outcome) == Lookup.FAILED) deferred += corp
         }
-        return outcome
+        for ((index, corp) in deferred.withIndex()) {
+            deadlineAbort(deadlineAt, outcome.failed.size + deferred.size - index)?.let { return it }
+            if (collect(corp, outcome) == Lookup.FAILED) outcome.failed += corp
+        }
+        return null
     }
 
-    private fun collect(corp: DartCorp, outcome: CollectOutcome) {
-        val code = corp.stockCode ?: return
+    private fun collect(corp: DartCorp, outcome: CollectOutcome): Lookup {
+        val result = lookup(corp, outcome)
+        outcome.streak = if (result == Lookup.FAILED) outcome.streak + 1 else 0
+        return result
+    }
+
+    private fun lookup(corp: DartCorp, outcome: CollectOutcome): Lookup {
+        val code = checkNotNull(corp.stockCode)
         pause(requestInterval)
         val company = try {
             dart.company(corp.corpCode)
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+            throw e
         } catch (e: DartApiException) {
-            if (e.status in FATAL_STATUSES) throw e
+            if (isFatal(e.status)) throw e
             log.warn("company lookup failed: corpCode={} status={}", corp.corpCode, e.status)
-            outcome.failed += corp
-            return
+            return Lookup.FAILED
         } catch (e: Exception) {
             log.warn("company lookup failed: corpCode={}", corp.corpCode, e)
-            outcome.failed += corp
-            return
+            return Lookup.FAILED
         }
         if (company?.indutyCode == null) {
             outcome.missing += code
-            return
+            return Lookup.MISSING
         }
         outcome.profiles[code] = company
+        return Lookup.RESOLVED
     }
+
+    private fun deadlineAbort(deadlineAt: Instant, unresolved: Int): Abort? =
+        if (clock() < deadlineAt) {
+            null
+        } else {
+            Abort(
+                reason = "deadline reached: unresolved=$unresolved",
+                unresolved = unresolved,
+                metric = "batch.industry.deadline",
+            )
+        }
+
+    private fun breakerAbort(outcome: CollectOutcome, unresolved: Int): Abort? =
+        if (outcome.streak < failureStreakLimit) {
+            null
+        } else {
+            Abort(
+                reason = "failure streak=${outcome.streak} - upstream outage suspected: unresolved=$unresolved",
+                unresolved = unresolved,
+                metric = "batch.industry.breaker",
+            )
+        }
+
+    private fun isFatal(status: String): Boolean =
+        status in FATAL_STATUSES || status.toIntOrNull()?.let { it == 429 || it in 500..599 } == true
 
     private fun checkFailureBudget(outcome: CollectOutcome, targetCount: Int) {
         if (targetCount == 0 || outcome.failed.isEmpty()) return
@@ -194,11 +254,20 @@ open class IndustrySyncJob(
         val profiles = mutableMapOf<String, DartCompany>()
         val missing = mutableSetOf<String>()
         val failed = mutableListOf<DartCorp>()
+        var streak = 0
     }
+
+    private data class Abort(
+        val reason: String,
+        val unresolved: Int,
+        val metric: String,
+    )
+
+    private enum class Lookup { RESOLVED, MISSING, FAILED }
 
     companion object {
         const val JOB_NAME = "industry_sync"
         private val SEOUL: ZoneId = ZoneId.of("Asia/Seoul")
-        private val FATAL_STATUSES = setOf("010", "011", "012", "020", "021", "100", "101", "800", "901")
+        private val FATAL_STATUSES = setOf("010", "011", "012", "020", "021", "100", "101", "800", "900", "901")
     }
 }
