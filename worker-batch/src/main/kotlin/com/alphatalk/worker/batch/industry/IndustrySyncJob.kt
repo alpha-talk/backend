@@ -36,10 +36,13 @@ open class IndustrySyncJob(
         require(deadline > Duration.ZERO) {
             "alphatalk.batch.dart.deadline은 양수여야 한다: $deadline"
         }
+        require(deadline <= MAX_DEADLINE) {
+            "alphatalk.batch.dart.deadline은 ShedLock 임대($LOCK_AT_MOST_FOR)에서 여유($DEADLINE_MARGIN)를 뺀 $MAX_DEADLINE 이하여야 한다: $deadline"
+        }
     }
 
     @Scheduled(cron = "\${alphatalk.batch.dart.cron:0 30 6 * * SUN}", zone = "Asia/Seoul")
-    @SchedulerLock(name = JOB_NAME, lockAtMostFor = "PT2H", lockAtLeastFor = "PT1M")
+    @SchedulerLock(name = JOB_NAME, lockAtMostFor = LOCK_AT_MOST_FOR, lockAtLeastFor = "PT1M")
     open fun scheduled() {
         syncOnce()
     }
@@ -179,6 +182,7 @@ open class IndustrySyncJob(
             (deadlineAbort(deadlineAt, unresolved) ?: breakerAbort(outcome, unresolved))?.let { return it }
             if (collect(corp, outcome) == Lookup.FAILED) deferred += corp
         }
+        breakerAbort(outcome, deferred.size)?.let { return it }
         for ((index, corp) in deferred.withIndex()) {
             deadlineAbort(deadlineAt, outcome.failed.size + deferred.size - index)?.let { return it }
             if (collect(corp, outcome) == Lookup.FAILED) outcome.failed += corp
@@ -267,6 +271,9 @@ open class IndustrySyncJob(
 
     companion object {
         const val JOB_NAME = "industry_sync"
+        const val LOCK_AT_MOST_FOR = "PT2H"
+        private val DEADLINE_MARGIN: Duration = Duration.ofMinutes(15)
+        private val MAX_DEADLINE: Duration = Duration.parse(LOCK_AT_MOST_FOR).minus(DEADLINE_MARGIN)
         private val SEOUL: ZoneId = ZoneId.of("Asia/Seoul")
         private val FATAL_STATUSES = setOf("010", "011", "012", "020", "021", "100", "101", "800", "900", "901")
     }

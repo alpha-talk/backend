@@ -357,6 +357,38 @@ class IndustrySyncJobTest {
     }
 
     @Test
+    fun `1차 순회 끝에서 한도를 채운 연속 실패도 회차를 중단한다 - 재시도 순회로 넘어가지 않는다`() {
+        val codes = (1..8).map { "00000$it" }
+        val broken = codes.takeLast(3)
+        val store = RecordingStore(active = codes.toSet())
+        val dart = FakeDartClient(
+            corps = codes.map { corp("corp$it", it) },
+            companies = codes.filterNot { it in broken }.associate { "corp$it" to company(it, "28121") },
+            ioErrorFor = broken.map { "corp$it" }.toSet(),
+        )
+        val runs = OnceOnlyRunStore()
+        val meters = SimpleMeterRegistry()
+
+        val stored = job(dart, store, runs, meters = meters, maxFailureRatio = 1.0, failureStreakLimit = 3).syncOnce()
+
+        assertEquals(0, stored)
+        assertEquals(8, dart.companyCalls)
+        assertTrue(store.stockIndustries.isEmpty())
+        assertEquals(1L, runs.failedId)
+        assertEquals(3, runs.failedCount)
+        assertEquals(1.0, meters.counter("batch.industry.breaker").count())
+    }
+
+    @Test
+    fun `데드라인이 ShedLock 임대 여유를 넘으면 기동을 거부한다 - 락이 먼저 풀려 다중 기동이 겹치지 않게`() {
+        val codes = setOf("000001")
+        assertFailsWith<IllegalArgumentException> {
+            job(FakeDartClient(corps = emptyList(), companies = emptyMap()), RecordingStore(active = codes), OnceOnlyRunStore(), deadline = Duration.ofHours(2))
+        }
+        job(FakeDartClient(corps = emptyList(), companies = emptyMap()), RecordingStore(active = codes), OnceOnlyRunStore(), deadline = Duration.ofMinutes(105))
+    }
+
+    @Test
     fun `성공이나 데이터 없음이 끼면 스트릭이 리셋된다 - 산발 실패는 브레이커를 열지 않는다`() {
         val store = RecordingStore(active = setOf("000001", "000002", "000003", "000004"))
         val dart = FakeDartClient(
