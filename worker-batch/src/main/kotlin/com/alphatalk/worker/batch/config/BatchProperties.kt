@@ -76,5 +76,7 @@ data class BatchProperties(
         val groupMaxSize: Int = 100,
         val groupOverrides: Map<String, String> = emptyMap(),
         val maxFailureRatio: Double = 0.05,
+        val failureStreakLimit: Int = 5,
+        val deadline: Duration = Duration.ofMinutes(90),
     )
 }
