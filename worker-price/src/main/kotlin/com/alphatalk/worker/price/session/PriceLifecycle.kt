@@ -27,8 +27,14 @@ class PriceLifecycle(
         if (!running.compareAndSet(false, true)) return
         worker = thread(name = "price-orchestrator", isDaemon = true) {
             while (running.get()) {
-                runCatching { orchestrator.tick() }
-                    .onFailure { log.warn("orchestrator tick failed", it) }
+                try {
+                    orchestrator.tick()
+                } catch (e: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    return@thread
+                } catch (e: Exception) {
+                    log.warn("orchestrator tick failed", e)
+                }
                 try {
                     Thread.sleep(maintainIntervalMs)
                 } catch (e: InterruptedException) {

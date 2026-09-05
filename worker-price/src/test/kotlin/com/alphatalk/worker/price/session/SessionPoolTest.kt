@@ -1634,6 +1634,55 @@ class SessionPoolTest {
         },
     )
 
+    private fun poolStallingOnFirstAccount(stalling: StallingHandshakeServer) = SessionPool(
+        accounts = listOf(KisAccount("key1", "app1", "secret1"), KisAccount("key2", "app2", "secret2")),
+        wsUrl = stalling.url,
+        approvalKeys = { "AK" },
+        buffer = ConflationBuffer(),
+        meters = SimpleMeterRegistry(),
+        tickTrIds = listOf("H0UNCNT0"),
+        marketDivs = InMemoryMarketDivStore(),
+        silenceMillis = Long.MAX_VALUE,
+        maxRegistrationsPerSession = 1,
+        backoff = BackoffPolicy(initialMillis = 50, jitterRatio = 0.0),
+        connectTimeoutSeconds = 30,
+        clock = { now },
+        createSession = { _, approvalKey, listener ->
+            val url = if (stalling.connectionCount == 0 && server.connectionCount == 0) stalling.url else server.url
+            KisWebSocketSession(url, approvalKey, listener)
+        },
+    )
+
+    @Test
+    fun `핸드셰이크 대기 중 인터럽트는 다음 계정을 시도하지 않고 전파된다`() {
+        StallingHandshakeServer().use { stalling ->
+            val pool = poolStallingOnFirstAccount(stalling)
+            var propagated: Throwable? = null
+            var interruptFlagKept = false
+            val worker = Thread {
+                try {
+                    pool.maintain(setOf("005930", "000660"), emptyList(), subscribeAllowed = true)
+                } catch (e: InterruptedException) {
+                    propagated = e
+                    interruptFlagKept = Thread.currentThread().isInterrupted
+                }
+            }
+            worker.start()
+            stalling.awaitConnections(1)
+
+            worker.interrupt()
+            worker.join(3_000)
+
+            assertTrue(!worker.isAlive)
+            assertTrue(propagated is InterruptedException)
+            assertTrue(interruptFlagKept)
+            assertEquals(0, server.connectionCount)
+            stalling.completeHandshakes()
+            stalling.awaitPeersClosed()
+            pool.disconnectAll()
+        }
+    }
+
     private fun sessionsInState(meters: SimpleMeterRegistry, state: String) =
         meters.find("kis.ws.sessions").tag("state", state).gauge()?.value()
 

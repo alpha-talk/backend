@@ -451,6 +451,12 @@ class SessionPool(
                 state = SessionState.CONNECTED
                 consecutiveFailures = 0
                 log.info("kis ws connected: keyId={} assigned={}", account.keyId, assigned.size)
+            } catch (e: InterruptedException) {
+                runCatching { created?.abort() }
+                session = null
+                state = SessionState.DISCONNECTED
+                Thread.currentThread().interrupt()
+                throw e
             } catch (e: Exception) {
                 runCatching { created?.abort() }
                 session = null
