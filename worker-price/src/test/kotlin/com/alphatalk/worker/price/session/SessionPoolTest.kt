@@ -2,6 +2,7 @@ package com.alphatalk.worker.price.session
 
 import com.alphatalk.kis.model.KisAccount
 import com.alphatalk.kis.test.FakeKisServer
+import com.alphatalk.kis.test.PendingCloseHttpClient
 import com.alphatalk.kis.test.StallingHandshakeServer
 import com.alphatalk.kis.ws.KisSessionListener
 import com.alphatalk.kis.ws.KisTick
@@ -1681,6 +1682,49 @@ class SessionPoolTest {
             stalling.awaitPeersClosed()
             pool.disconnectAll()
         }
+    }
+
+    private fun poolCapturingListeners(meters: SimpleMeterRegistry, listeners: MutableList<KisSessionListener>) = SessionPool(
+        accounts = listOf(KisAccount("key1", "app1", "secret1"), KisAccount("key2", "app2", "secret2")),
+        wsUrl = server.url,
+        approvalKeys = { "AK" },
+        buffer = ConflationBuffer(),
+        meters = meters,
+        tickTrIds = listOf("H0UNCNT0"),
+        marketDivs = InMemoryMarketDivStore(),
+        silenceMillis = Long.MAX_VALUE,
+        maxRegistrationsPerSession = 1,
+        backoff = BackoffPolicy(initialMillis = 50, jitterRatio = 0.0),
+        clock = { now },
+        createSession = { url, approvalKey, listener ->
+            listeners += listener
+            KisWebSocketSession(url, approvalKey, listener, PendingCloseHttpClient())
+        },
+    )
+
+    @Test
+    fun `close 대기 중 인터럽트는 남은 세션을 지연 없이 정리하고 인터럽트 상태를 유지한다`() {
+        val meters = SimpleMeterRegistry()
+        val listeners = mutableListOf<KisSessionListener>()
+        val pool = poolCapturingListeners(meters, listeners)
+        pool.maintain(setOf("005930", "000660"), emptyList(), subscribeAllowed = true)
+        server.awaitConnections(2)
+        assertEquals(2, listeners.size)
+        listeners.forEach { it.onClosed("lost") }
+
+        Thread.currentThread().interrupt()
+        val started = System.nanoTime()
+        try {
+            pool.maintain(setOf("005930", "000660"), emptyList(), subscribeAllowed = true)
+            assertTrue(Thread.currentThread().isInterrupted)
+        } finally {
+            Thread.interrupted()
+        }
+        val elapsedMillis = (System.nanoTime() - started) / 1_000_000
+
+        assertTrue(elapsedMillis < 2_000)
+        assertEquals(0.0, sessionsInState(meters, "connected"))
+        await().atMost(Duration.ofSeconds(5)).until { server.connectionCount == 0 }
     }
 
     private fun sessionsInState(meters: SimpleMeterRegistry, state: String) =

@@ -44,9 +44,14 @@ class KisWebSocketSession(
 
     fun close() {
         val current = detach() ?: return
-        runCatching {
+        try {
             current.sendClose(WebSocket.NORMAL_CLOSURE, "shutdown").get(CLOSE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
-        }.onFailure { runCatching { current.abort() } }
+        } catch (e: InterruptedException) {
+            runCatching { current.abort() }
+            Thread.currentThread().interrupt()
+        } catch (e: Exception) {
+            runCatching { current.abort() }
+        }
     }
 
     fun abort() {

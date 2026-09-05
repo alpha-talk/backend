@@ -1,6 +1,7 @@
 package com.alphatalk.kis.ws
 
 import com.alphatalk.kis.test.FakeKisServer
+import com.alphatalk.kis.test.PendingCloseHttpClient
 import com.alphatalk.kis.test.StallingHandshakeServer
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import java.net.http.HttpTimeoutException
@@ -111,6 +112,24 @@ class KisWebSocketSessionTest {
 
         awaitTrue { server.connectionCount == 0 }
         assertFalse(session.isOpen)
+    }
+
+    @Test
+    fun `close 대기 중 인터럽트는 소켓을 abort하고 인터럽트 상태를 유지한다`() {
+        val pendingClose = KisWebSocketSession(server.url, "AK-123", RecordingListener(), PendingCloseHttpClient())
+        pendingClose.connect().get(5, TimeUnit.SECONDS)
+        server.awaitConnections(2)
+
+        Thread.currentThread().interrupt()
+        try {
+            pendingClose.close()
+            assertTrue(Thread.currentThread().isInterrupted)
+        } finally {
+            Thread.interrupted()
+        }
+
+        awaitTrue { server.connectionCount == 1 }
+        assertFalse(pendingClose.isOpen)
     }
 
     @Test
