@@ -2,6 +2,11 @@ package com.alphatalk.worker.price.session
 
 import com.alphatalk.kis.model.KisAccount
 import com.alphatalk.kis.test.FakeKisServer
+import com.alphatalk.kis.test.PendingCloseHttpClient
+import com.alphatalk.kis.test.StallingHandshakeServer
+import com.alphatalk.kis.ws.KisSessionListener
+import com.alphatalk.kis.ws.KisTick
+import com.alphatalk.kis.ws.KisWebSocketSession
 import com.alphatalk.worker.price.conflation.ConflationBuffer
 import com.alphatalk.worker.price.conflation.DepthConflationBuffer
 import com.alphatalk.worker.price.market.InMemoryMarketDivStore
@@ -9,6 +14,7 @@ import com.alphatalk.worker.price.market.MarketDivStore
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import org.awaitility.Awaitility.await
+import java.io.IOException
 import java.time.Duration
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
@@ -1604,5 +1610,177 @@ class SessionPoolTest {
         val resubscribed = subscribesOf(server.receivedMessages).drop(2)
         assertEquals(1, resubscribed.size)
         assertEquals("H0STOUP0", resubscribed[0].path("body").path("input").path("tr_id").asText())
+    }
+
+    private fun poolSwitchingAfterTimeout(
+        stalling: StallingHandshakeServer,
+        meters: SimpleMeterRegistry,
+        listeners: MutableList<KisSessionListener>,
+    ) = SessionPool(
+        accounts = listOf(KisAccount("key1", "app", "secret")),
+        wsUrl = stalling.url,
+        approvalKeys = { "AK" },
+        buffer = ConflationBuffer(),
+        meters = meters,
+        tickTrIds = listOf("H0UNCNT0"),
+        marketDivs = InMemoryMarketDivStore(),
+        silenceMillis = Long.MAX_VALUE,
+        backoff = BackoffPolicy(initialMillis = 50, jitterRatio = 0.0),
+        connectTimeoutSeconds = 1,
+        clock = { now },
+        createSession = { _, approvalKey, listener ->
+            listeners += listener
+            val url = if (listeners.size == 1) stalling.url else server.url
+            KisWebSocketSession(url, approvalKey, listener)
+        },
+    )
+
+    private fun poolStallingOnFirstAccount(stalling: StallingHandshakeServer) = SessionPool(
+        accounts = listOf(KisAccount("key1", "app1", "secret1"), KisAccount("key2", "app2", "secret2")),
+        wsUrl = stalling.url,
+        approvalKeys = { "AK" },
+        buffer = ConflationBuffer(),
+        meters = SimpleMeterRegistry(),
+        tickTrIds = listOf("H0UNCNT0"),
+        marketDivs = InMemoryMarketDivStore(),
+        silenceMillis = Long.MAX_VALUE,
+        maxRegistrationsPerSession = 1,
+        backoff = BackoffPolicy(initialMillis = 50, jitterRatio = 0.0),
+        connectTimeoutSeconds = 30,
+        clock = { now },
+        createSession = { _, approvalKey, listener ->
+            val url = if (stalling.connectionCount == 0 && server.connectionCount == 0) stalling.url else server.url
+            KisWebSocketSession(url, approvalKey, listener)
+        },
+    )
+
+    @Test
+    fun `핸드셰이크 대기 중 인터럽트는 다음 계정을 시도하지 않고 전파된다`() {
+        StallingHandshakeServer().use { stalling ->
+            val pool = poolStallingOnFirstAccount(stalling)
+            var propagated: Throwable? = null
+            var interruptFlagKept = false
+            val worker = Thread {
+                try {
+                    pool.maintain(setOf("005930", "000660"), emptyList(), subscribeAllowed = true)
+                } catch (e: InterruptedException) {
+                    propagated = e
+                    interruptFlagKept = Thread.currentThread().isInterrupted
+                }
+            }
+            worker.start()
+            stalling.awaitConnections(1)
+
+            worker.interrupt()
+            worker.join(3_000)
+
+            assertTrue(!worker.isAlive)
+            assertTrue(propagated is InterruptedException)
+            assertTrue(interruptFlagKept)
+            assertEquals(0, server.connectionCount)
+            stalling.completeHandshakes()
+            stalling.awaitPeersClosed()
+            pool.disconnectAll()
+        }
+    }
+
+    private fun poolCapturingListeners(meters: SimpleMeterRegistry, listeners: MutableList<KisSessionListener>) = SessionPool(
+        accounts = listOf(KisAccount("key1", "app1", "secret1"), KisAccount("key2", "app2", "secret2")),
+        wsUrl = server.url,
+        approvalKeys = { "AK" },
+        buffer = ConflationBuffer(),
+        meters = meters,
+        tickTrIds = listOf("H0UNCNT0"),
+        marketDivs = InMemoryMarketDivStore(),
+        silenceMillis = Long.MAX_VALUE,
+        maxRegistrationsPerSession = 1,
+        backoff = BackoffPolicy(initialMillis = 50, jitterRatio = 0.0),
+        clock = { now },
+        createSession = { url, approvalKey, listener ->
+            listeners += listener
+            KisWebSocketSession(url, approvalKey, listener, PendingCloseHttpClient())
+        },
+    )
+
+    @Test
+    fun `close 대기 중 인터럽트는 남은 세션을 지연 없이 정리하고 인터럽트 상태를 유지한다`() {
+        val meters = SimpleMeterRegistry()
+        val listeners = mutableListOf<KisSessionListener>()
+        val pool = poolCapturingListeners(meters, listeners)
+        pool.maintain(setOf("005930", "000660"), emptyList(), subscribeAllowed = true)
+        server.awaitConnections(2)
+        assertEquals(2, listeners.size)
+        listeners.forEach { it.onClosed("lost") }
+
+        Thread.currentThread().interrupt()
+        val started = System.nanoTime()
+        try {
+            pool.maintain(setOf("005930", "000660"), emptyList(), subscribeAllowed = true)
+            assertTrue(Thread.currentThread().isInterrupted)
+        } finally {
+            Thread.interrupted()
+        }
+        val elapsedMillis = (System.nanoTime() - started) / 1_000_000
+
+        assertTrue(elapsedMillis < 2_000)
+        assertEquals(0.0, sessionsInState(meters, "connected"))
+        await().atMost(Duration.ofSeconds(5)).until { server.connectionCount == 0 }
+    }
+
+    private fun sessionsInState(meters: SimpleMeterRegistry, state: String) =
+        meters.find("kis.ws.sessions").tag("state", state).gauge()?.value()
+
+    @Test
+    fun `접속 타임아웃은 늦게 열린 세션을 끊고 백오프 뒤 재시도한다`() {
+        StallingHandshakeServer().use { stalling ->
+            val meters = SimpleMeterRegistry()
+            val pool = poolSwitchingAfterTimeout(stalling, meters, mutableListOf())
+
+            pool.maintain(setOf("005930"), emptyList(), subscribeAllowed = true)
+
+            assertEquals(setOf("005930"), pool.degradedSymbols())
+            assertEquals(0.0, sessionsInState(meters, "connected"))
+            assertEquals(1.0, sessionsInState(meters, "disconnected"))
+            stalling.awaitConnections(1)
+            stalling.completeHandshakes()
+            stalling.awaitPeersClosed()
+
+            pool.maintain(setOf("005930"), emptyList(), subscribeAllowed = true)
+            assertEquals(1, stalling.connectionCount)
+            assertEquals(0, server.connectionCount)
+
+            now += 50
+            pool.maintain(setOf("005930"), emptyList(), subscribeAllowed = true)
+
+            server.awaitMessages(1)
+            assertEquals(1.0, sessionsInState(meters, "connected"))
+            assertEquals(1, server.connectionCount)
+        }
+    }
+
+    @Test
+    fun `타임아웃된 이전 세션의 늦은 콜백은 현재 세션을 흔들지 않는다`() {
+        StallingHandshakeServer().use { stalling ->
+            val meters = SimpleMeterRegistry()
+            val listeners = mutableListOf<KisSessionListener>()
+            val pool = poolSwitchingAfterTimeout(stalling, meters, listeners)
+            pool.maintain(setOf("005930"), emptyList(), subscribeAllowed = true)
+            now += 50
+            pool.maintain(setOf("005930"), emptyList(), subscribeAllowed = true)
+            server.awaitMessages(1)
+            val stale = listeners.first()
+
+            stale.onClosed("late")
+            stale.onTransportError(IOException("late"))
+            stale.onTicks("H0UNCNT0", listOf(KisTick("005930", "134058", 16110, 2, 0.06, 16000, 16200, 16000, 4355991)))
+            stale.onSubscribeAck("H0UNCNT0", "005930", success = true)
+            pool.maintain(setOf("005930"), emptyList(), subscribeAllowed = true)
+
+            assertEquals(1.0, sessionsInState(meters, "connected"))
+            assertEquals(1, server.connectionCount)
+            assertEquals(0.0, meters.counter("tick.in").count())
+            assertEquals(0.0, meters.find("kis.subscribed.symbols").gauge()?.value())
+            assertEquals(1, subscribesOf(server.receivedMessages).size)
+        }
     }
 }

@@ -6,8 +6,10 @@ import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.WebSocket
+import java.time.Duration
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CompletionStage
+import java.util.concurrent.TimeUnit
 
 class KisWebSocketSession(
     private val wsUrl: String,
@@ -17,6 +19,8 @@ class KisWebSocketSession(
 ) {
     private val mapper: ObjectMapper = jacksonObjectMapper()
     private val sendLock = Any()
+    private val lifecycle = Any()
+    private var closed = false
 
     @Volatile
     private var webSocket: WebSocket? = null
@@ -24,10 +28,11 @@ class KisWebSocketSession(
     val isOpen: Boolean
         get() = webSocket?.let { !it.isInputClosed && !it.isOutputClosed } == true
 
-    fun connect(): CompletableFuture<Void> =
+    fun connect(handshakeTimeout: Duration = DEFAULT_HANDSHAKE_TIMEOUT): CompletableFuture<Void> =
         http.newWebSocketBuilder()
+            .connectTimeout(handshakeTimeout)
             .buildAsync(URI.create(wsUrl), FrameListener())
-            .thenAccept { webSocket = it }
+            .thenAccept(::adopt)
 
     fun subscribe(trKey: String, trId: String = KisFrameParser.TR_ID_TICK) {
         sendRegistration("1", trId, trKey)
@@ -38,10 +43,35 @@ class KisWebSocketSession(
     }
 
     fun close() {
-        webSocket?.let {
-            runCatching { it.sendClose(WebSocket.NORMAL_CLOSURE, "shutdown").join() }
+        val current = detach() ?: return
+        try {
+            current.sendClose(WebSocket.NORMAL_CLOSURE, "shutdown").get(CLOSE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+        } catch (e: InterruptedException) {
+            runCatching { current.abort() }
+            Thread.currentThread().interrupt()
+        } catch (e: Exception) {
+            runCatching { current.abort() }
         }
-        webSocket = null
+    }
+
+    fun abort() {
+        detach()?.let { runCatching { it.abort() } }
+    }
+
+    private fun adopt(ws: WebSocket) {
+        synchronized(lifecycle) {
+            if (!closed) {
+                webSocket = ws
+                return
+            }
+        }
+        runCatching { ws.abort() }
+        throw KisClientException("session closed before handshake completed")
+    }
+
+    private fun detach(): WebSocket? = synchronized(lifecycle) {
+        closed = true
+        webSocket.also { webSocket = null }
     }
 
     private fun sendRegistration(trType: String, trId: String, trKey: String) {
@@ -114,5 +144,10 @@ class KisWebSocketSession(
                 is KisFrame.Unknown -> Unit
             }
         }
+    }
+
+    private companion object {
+        const val CLOSE_TIMEOUT_SECONDS = 5L
+        val DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration.ofSeconds(10)
     }
 }
