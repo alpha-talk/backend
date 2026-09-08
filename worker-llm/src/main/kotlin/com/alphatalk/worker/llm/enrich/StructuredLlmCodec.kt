@@ -137,6 +137,95 @@ internal object StructuredLlmCodec {
         "required" to listOf("summary", "domestic", "global", "sources"),
     )
 
+    fun validate(node: JsonNode, schema: Map<String, Any>) {
+        validateNode(node, schema, "$")
+    }
+
+    private fun validateNode(node: JsonNode, schema: Map<String, Any>, path: String) {
+        val types = when (val type = schema["type"]) {
+            is String -> listOf(type)
+            is List<*> -> type.filterIsInstance<String>()
+            else -> emptyList()
+        }
+        check(types.isEmpty() || types.any { matchesType(node, it) }) {
+            "$path 타입이 JSON Schema와 일치하지 않는다"
+        }
+        if (node.isNull) return
+        when {
+            node.isObject -> validateObject(node, schema, path)
+            node.isArray -> validateArray(node, schema, path)
+            node.isTextual -> validateString(node, schema, path)
+            node.isNumber -> validateNumber(node, schema, path)
+        }
+    }
+
+    private fun matchesType(node: JsonNode, type: String): Boolean = when (type) {
+        "object" -> node.isObject
+        "array" -> node.isArray
+        "string" -> node.isTextual
+        "number" -> node.isNumber
+        "integer" -> node.isIntegralNumber
+        "boolean" -> node.isBoolean
+        "null" -> node.isNull
+        else -> false
+    }
+
+    private fun validateObject(node: JsonNode, schema: Map<String, Any>, path: String) {
+        val properties = (schema["properties"] as? Map<*, *>)
+            ?.entries
+            ?.associate { it.key.toString() to it.value }
+            .orEmpty()
+        (schema["required"] as? List<*>)
+            ?.filterIsInstance<String>()
+            ?.forEach { name ->
+                check(node.has(name)) { "$path.$name 필수 필드가 없다" }
+            }
+        if (schema["additionalProperties"] == false) {
+            node.fieldNames().forEachRemaining { name ->
+                check(name in properties) { "$path.$name 허용되지 않은 필드가 있다" }
+            }
+        }
+        properties.forEach { (name, propertySchema) ->
+            if (node.has(name) && propertySchema is Map<*, *>) {
+                validateNode(
+                    node.path(name),
+                    propertySchema.entries.associate { it.key.toString() to it.value as Any },
+                    "$path.$name",
+                )
+            }
+        }
+    }
+
+    private fun validateArray(node: JsonNode, schema: Map<String, Any>, path: String) {
+        (schema["minItems"] as? Number)?.let { minimum ->
+            check(node.size() >= minimum.toInt()) { "$path 배열 항목 수가 최소값보다 작다" }
+        }
+        (schema["maxItems"] as? Number)?.let { maximum ->
+            check(node.size() <= maximum.toInt()) { "$path 배열 항목 수가 최대값보다 크다" }
+        }
+        val itemSchema = schema["items"] as? Map<*, *> ?: return
+        val normalized = itemSchema.entries.associate { it.key.toString() to it.value as Any }
+        node.forEachIndexed { index, item -> validateNode(item, normalized, "$path[$index]") }
+    }
+
+    private fun validateString(node: JsonNode, schema: Map<String, Any>, path: String) {
+        (schema["minLength"] as? Number)?.let { minimum ->
+            check(node.asText().length >= minimum.toInt()) { "$path 문자열 길이가 최소값보다 작다" }
+        }
+        (schema["enum"] as? List<*>)?.let { values ->
+            check(node.asText() in values) { "$path 값이 enum에 없다" }
+        }
+    }
+
+    private fun validateNumber(node: JsonNode, schema: Map<String, Any>, path: String) {
+        (schema["minimum"] as? Number)?.let { minimum ->
+            check(node.asDouble() >= minimum.toDouble()) { "$path 값이 최소값보다 작다" }
+        }
+        (schema["maximum"] as? Number)?.let { maximum ->
+            check(node.asDouble() <= maximum.toDouble()) { "$path 값이 최대값보다 크다" }
+        }
+    }
+
     fun summaryPrompt(input: ClusterSummaryInput): String = buildString {
         appendLine("다음 뉴스를 3줄로 요약하고 영향받는 종목·섹터를 판정하라. 투자 조언이 아니라 정보 요약이다.")
         appendLine("대표 제목: ${input.repTitle}")

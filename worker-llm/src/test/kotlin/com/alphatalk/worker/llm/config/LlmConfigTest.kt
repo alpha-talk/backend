@@ -4,6 +4,7 @@ import com.alphatalk.worker.llm.enrich.AnthropicLlmClient
 import com.alphatalk.worker.llm.enrich.ClaudeCliLlmClient
 import com.alphatalk.worker.llm.enrich.CodexCliLlmClient
 import com.alphatalk.worker.llm.enrich.FakeLlmClient
+import com.alphatalk.worker.llm.enrich.GeminiCliLlmClient
 import com.alphatalk.worker.llm.enrich.LlmClient
 import com.alphatalk.worker.llm.enrich.TimedLlmClient
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
@@ -18,6 +19,9 @@ class LlmConfigTest {
 
     @Test
     fun `provider에 따라 LLM 구현체를 선택하고 타이머로 감싼다`() {
+        assertIs<GeminiCliLlmClient>(
+            timedDelegate(config.llmClient(LlmProperties(provider = "gemini-cli", consumerBatch = 1), meters)),
+        )
         assertIs<ClaudeCliLlmClient>(
             timedDelegate(config.llmClient(LlmProperties(provider = "claude-cli", consumerBatch = 1), meters)),
         )
@@ -53,6 +57,20 @@ class LlmConfigTest {
     fun `anthropic provider는 API 키 없이 시작하지 않는다`() {
         assertFailsWith<IllegalStateException> {
             config.llmClient(LlmProperties(provider = "anthropic"), meters)
+        }
+    }
+
+    @Test
+    fun `gemini-cli provider는 필수 설정이 없거나 유효하지 않으면 시작하지 않는다`() {
+        assertFailsWith<IllegalStateException> {
+            config.llmClient(
+                LlmProperties(
+                    provider = "gemini-cli",
+                    consumerBatch = 1,
+                    geminiCli = LlmProperties.GeminiCli(model = ""),
+                ),
+                meters,
+            )
         }
     }
 
