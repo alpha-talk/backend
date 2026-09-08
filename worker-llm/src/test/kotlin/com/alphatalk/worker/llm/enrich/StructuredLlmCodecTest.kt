@@ -169,6 +169,28 @@ class StructuredLlmCodecTest {
         assertTrue(StructuredLlmCodec.marketDigestPrompt(input).contains("조사 컷오프가 아니다"))
     }
 
+    @Test
+    fun `구조화 출력 검증은 필수 필드 누락과 enum 이탈을 거부한다`() {
+        assertFailsWith<IllegalStateException> {
+            StructuredLlmCodec.validate(
+                StructuredLlmCodec.mapper.readTree(
+                    """{"title":"브리핑"}""",
+                ),
+                StructuredLlmCodec.digestSchema,
+            )
+        }
+        assertFailsWith<IllegalStateException> {
+            StructuredLlmCodec.validate(
+                StructuredLlmCodec.mapper.readTree(
+                    """
+                    {"summary":"요약","marketRelevant":true,"scope":"COMPANY","stocks":[],"sectors":[]}
+                    """,
+                ),
+                StructuredLlmCodec.summarySchema,
+            )
+        }
+    }
+
     private fun Map<String, Any>.properties(name: String): Map<*, *> =
         (this["properties"] as Map<*, *>)[name] as Map<*, *>
 }

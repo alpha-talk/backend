@@ -4,16 +4,16 @@
 
 ## 1. 권장 구성
 
-로컬에서는 요약·판정을 CLI 구독이 맡고 임베딩은 로컬 Ollama가 맡는다. 로컬 프로파일의 기본 구성은 다음과 같다.
+로컬에서는 요약·판정을 로그인된 Gemini CLI 구독이 맡고 임베딩은 로컬 Ollama가 맡는다. 로컬 프로파일의 기본 구성은 다음과 같다.
 
 | 역할 | 구현 |
 |---|---|
-| 뉴스 요약·관련성 판정 | 로그인된 Claude CLI 구독 |
+| 뉴스 요약·관련성 판정 | Gemini CLI 구독의 `gemini-3.1-flash-lite` |
 | 임베딩 | 같은 PC나 내부 서버에서 실행하는 Ollama |
 | 임베딩 모델 | `bge-m3` |
 | 벡터 저장 | PostgreSQL pgvector `vector(1024)` |
 
-역할을 나눈 이유는 Claude CLI와 Codex CLI가 임베딩 API를 제공하지 않기 때문이다. 임베딩은 별도 로컬 서버가 담당한다. `LLM_PROVIDER=codex-cli`로 요약·판정을 Codex CLI 구독으로 전환할 수 있다.
+요약은 Gemini CLI에서 Gemini 3.1 Flash-Lite를 쓰고, 임베딩은 현재 DB의 1024차원 벡터 계약과 로컬 비용 절감을 위해 BGE-M3가 별도로 담당한다. `LLM_PROVIDER=claude-cli|codex-cli`로 요약·판정을 다른 CLI 구독으로 전환할 수 있다.
 
 임베딩 호출은 `EmbeddingClient` 포트의 `rest` 구현이 같은 호스트 또는 내부망의 Ollama로 보낸다. `worker-llm` 안에서 모델을 직접 로딩하는 방식은 현재 구현하지 않는다. Ollama를 같은 서버에서 실행하면 기사 텍스트가 외부 임베딩 API로 나가지 않는다.
 
@@ -41,7 +41,8 @@ worker-llm을 기동하기 전에 다음이 준비되어 있어야 한다.
 - JDK 21
 - Redis와 PostgreSQL 실행
 - `db-migrations` changelog가 뉴스 파이프라인 스키마와 pgvector 확장을 적용한 DB (worker-llm 기동 시 자동 적용)
-- Claude CLI 또는 Codex CLI 로그인
+- Gemini CLI 설치 후 Google 계정 로그인
+- 다른 CLI provider로 전환한다면 Claude CLI 또는 Codex CLI 로그인
 - [Ollama 설치](https://ollama.com/download)
 
 로컬 DB의 `news_article.embedding` 컬럼은 1024차원이다. 다른 차원의 모델을 쓰려면 뉴스 워커 명세를 먼저 변경하고 `db-migrations` changeset과 worker-llm 테스트 스키마를 함께 변경해야 한다.
@@ -94,7 +95,7 @@ curl http://localhost:11434/v1/embeddings \
 
 Ollama의 네이티브 엔드포인트는 `/api/embed`지만 Alpha Talk은 제공자 교체가 가능한 OpenAI 호환 `/v1/embeddings`를 사용한다.
 
-## 6. Claude CLI와 함께 worker-llm 실행
+## 6. Gemini CLI와 함께 worker-llm 실행
 
 Redis·PostgreSQL·Ollama가 모두 준비됐으면 로컬 프로파일로 worker-llm을 기동한다.
 
@@ -104,33 +105,32 @@ SPRING_PROFILES_ACTIVE=local ./gradlew :worker-llm:bootRun
 
 `application-local.yml`의 기본값은 다음과 같다.
 
-- LLM provider: `claude-cli`
+- LLM provider: `gemini-cli`
+- LLM model: `gemini-3.1-flash-lite`
 - 임베딩 provider: `rest`
 - 임베딩 서버: `http://localhost:11434`
 - 임베딩 모델: `bge-m3`
 - 임베딩 차원: 1024
 
-Claude CLI가 기본 실행 경로에 없다면 `CLAUDE_CLI_EXECUTABLE`에 실행 파일의 절대 경로를 지정한다.
-
-```bash
-SPRING_PROFILES_ACTIVE=local \
-CLAUDE_CLI_EXECUTABLE=/absolute/path/to/claude \
-./gradlew :worker-llm:bootRun
-```
+먼저 터미널에서 `gemini`를 실행해 Google 계정으로 로그인한다. worker는 API 키·ADC/Vertex 전환 환경변수를 자식 프로세스에서 제거하고 캐시된 CLI 로그인만 사용한다. Gemini CLI가 기본 실행 경로에 없다면 `GEMINI_CLI_EXECUTABLE`에 실행 파일의 절대 경로를 지정한다.
 
 `EMBEDDING_API_KEY=ollama`는 실제 비밀키가 아니다. 애플리케이션이 `provider=rest`에서 빈 키를 허용하지 않아 넣는 더미 값이다. 로컬 Ollama는 이 값을 인증에 쓰지 않는다.
 
-## 7. Codex CLI와 함께 worker-llm 실행
+## 7. Claude/Codex CLI로 전환
 
-LLM provider만 `codex-cli`로 바꾼다. 나머지 절차는 §6과 같다.
+기존 구독 CLI를 쓸 때만 LLM provider를 명시해서 바꾼다. 나머지 절차는 §6과 같다.
 
 ```bash
+SPRING_PROFILES_ACTIVE=local \
+LLM_PROVIDER=claude-cli \
+./gradlew :worker-llm:bootRun
+
 SPRING_PROFILES_ACTIVE=local \
 LLM_PROVIDER=codex-cli \
 ./gradlew :worker-llm:bootRun
 ```
 
-Codex CLI가 기본 실행 경로에 없다면 `CODEX_CLI_EXECUTABLE`에 실행 파일의 절대 경로를 지정한다.
+CLI가 기본 실행 경로에 없다면 `CLAUDE_CLI_EXECUTABLE` 또는 `CODEX_CLI_EXECUTABLE`에 실행 파일의 절대 경로를 지정한다.
 
 ## 8. 설정값
 
@@ -139,7 +139,9 @@ Codex CLI가 기본 실행 경로에 없다면 `CODEX_CLI_EXECUTABLE`에 실행 
 | 환경변수 | 로컬 기본값 | 설명 |
 |---|---|---|
 | `SPRING_PROFILES_ACTIVE` | 없음 | `local`로 지정해야 로컬 설정 활성화 |
-| `LLM_PROVIDER` | `claude-cli` | `codex-cli`로 전환 가능 |
+| `LLM_PROVIDER` | `gemini-cli` | `claude-cli`, `codex-cli`, `fake`로 전환 가능 |
+| `GEMINI_CLI_EXECUTABLE` | `gemini` | Gemini CLI 실행 파일 경로 |
+| `GEMINI_CLI_MODEL` | `gemini-3.1-flash-lite` | 요약·관련성 판정·다이제스트 모델 |
 | `EMBEDDING_PROVIDER` | `rest` | `fake`로 전환 가능 |
 | `EMBEDDING_BASE_URL` | `http://localhost:11434` | `/v1`을 붙이지 않은 서버 루트 |
 | `EMBEDDING_API_KEY` | `ollama` | 로컬용 비밀이 아닌 더미 값 |

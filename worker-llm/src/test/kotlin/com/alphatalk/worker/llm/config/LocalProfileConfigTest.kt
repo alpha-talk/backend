@@ -10,11 +10,11 @@ import kotlin.test.assertEquals
 
 class LocalProfileConfigTest {
     @Test
-    fun `local 프로파일은 Claude CLI와 Ollama BGE-M3를 기본 사용하고 명시 설정을 허용한다`() {
+    fun `local 프로파일은 Gemini Flash-Lite와 Ollama BGE-M3를 기본 사용하고 명시 설정을 허용한다`() {
         val defaults = localProperties()
 
-        assertEquals("claude-cli", defaults.provider)
-        assertEquals("haiku", defaults.claudeCli.model)
+        assertEquals("gemini-cli", defaults.provider)
+        assertEquals("gemini-3.1-flash-lite", defaults.geminiCli.model)
         assertEquals(1, defaults.consumerBatch)
         assertEquals("rest", defaults.embedding.provider)
         assertEquals("http://localhost:11434", defaults.embedding.baseUrl)
@@ -23,12 +23,12 @@ class LocalProfileConfigTest {
         assertEquals(1024, defaults.embedding.dimension)
 
         val overrides = localEnvironment().withProperty("LLM_PROVIDER", "codex-cli")
-            .withProperty("alphatalk.llm.claude-cli.model", "opus")
+            .withProperty("alphatalk.llm.gemini-cli.model", "gemini-test")
             .withProperty("EMBEDDING_PROVIDER", "fake")
             .let(::bind)
 
         assertEquals("codex-cli", overrides.provider)
-        assertEquals("opus", overrides.claudeCli.model)
+        assertEquals("gemini-test", overrides.geminiCli.model)
         assertEquals("fake", overrides.embedding.provider)
     }
 

@@ -10,6 +10,7 @@ import com.alphatalk.worker.llm.enrich.AnthropicLlmClient
 import com.alphatalk.worker.llm.enrich.ClaudeCliLlmClient
 import com.alphatalk.worker.llm.enrich.CodexCliLlmClient
 import com.alphatalk.worker.llm.enrich.FakeLlmClient
+import com.alphatalk.worker.llm.enrich.GeminiCliLlmClient
 import com.alphatalk.worker.llm.enrich.LlmClient
 import com.alphatalk.worker.llm.enrich.TimedLlmClient
 import io.micrometer.core.instrument.MeterRegistry
@@ -47,6 +48,14 @@ class LlmConfig {
     fun llmClient(props: LlmProperties, meters: MeterRegistry): LlmClient = TimedLlmClient(buildLlmClient(props, meters), meters)
 
     private fun buildLlmClient(props: LlmProperties, meters: MeterRegistry): LlmClient = when (props.provider.trim().lowercase()) {
+        "gemini-cli" -> {
+            check(props.geminiCli.executable.isNotBlank() && props.geminiCli.model.isNotBlank()) {
+                "LLM provider=gemini-cli에는 실행 파일 경로와 model이 필요하다"
+            }
+            validateCliConsumer(props, props.geminiCli.timeout)
+            log.info("using Gemini CLI LLM client (subscription auth)")
+            GeminiCliLlmClient(props)
+        }
         "anthropic" -> {
             check(props.anthropic.apiKey.isNotBlank()) {
                 "LLM provider=anthropic에는 ANTHROPIC_API_KEY가 필요하다"
@@ -84,7 +93,7 @@ class LlmConfig {
             FakeLlmClient()
         }
         else -> throw IllegalStateException(
-            "지원하지 않는 LLM provider=${props.provider}. anthropic|claude-cli|codex-cli|fake 중 하나여야 한다",
+            "지원하지 않는 LLM provider=${props.provider}. anthropic|gemini-cli|claude-cli|codex-cli|fake 중 하나여야 한다",
         )
     }
 

@@ -188,9 +188,9 @@ worker-llm은 큐 엔트리를 방에 뜨는 이벤트로 바꾼다. 인스턴�
 - **(v0.9 변경)** `relevant=false`와 `relation=INDIRECT`인 종목은 개별 종목 연결에서 제외한다. 소스가 부여한 후보는 `DIRECT` 판정이면 채택하고, 후보 밖 발견 종목은 `evidence`가 실제 입력 문자열이며 정식명 또는 `stock_alias`를 포함하는지 결정론적으로 재검증한다. confidence만으로 직접 관련성을 승인하지 않는다.
 - LLM이 `scope=STOCK`을 반환해도 검증을 통과한 `DIRECT` 종목이 없고 유효 섹터만 있으면 `SECTOR`로 강등한다. 종목·섹터가 모두 없으면 방어적으로 `IRRELEVANT` 처리한다.
 - confidence < 0.6이면 sentiment를 NEUTRAL로 강등한다 — 애매한 건을 호재/악재로 단정하지 않는다.
-- 운영 `anthropic` provider의 기본 모델은 클러스터 요약 **claude-haiku-4-5**(건수 많음·단순), 일일 다이제스트 **claude-sonnet-5**(하루 종목당 1회·종합 판단)다. `LlmClient` 포트 뒤라 교체는 자유롭다.
-- 로컬은 `claude-cli`(기본) 또는 `codex-cli` provider로 로그인된 개인 구독을 쓰며 **단일 worker-llm 인스턴스 운용만 지원**한다. 대량 기사 처리 비용을 억제하기 위해 `claude-cli`는 기본적으로 `haiku` 별칭을 명시하며 `CLAUDE_CLI_MODEL`로 바꿀 수 있다. 두 CLI 모두 단발성 비대화형 실행·JSON Schema 강제·세션 비영속·2분 타임아웃이고, 자식 프로세스에서 API 키 환경변수를 제거해 구독 인증과 API 과금이 섞이지 않게 한다. Claude는 도구를 전부 끄고 safe mode로, Codex는 빈 임시 작업공간과 read-only sandbox에서 실행한다. local 프로파일은 `consumer-batch=1`로 한 번에 PEL에 한 건만 선점하고, 기동 시 CLI timeout이 `claim-idle`보다 짧은지 검증한다. worker-llm ×N 운용은 운영 `anthropic` provider에만 적용한다.
-- 비용 추정: watchlist 41종목 규모 기준 일 ~500기사 → ~150클러스터 × ~2K tokens(Haiku) + 41다이제스트 × ~3K tokens(Sonnet) — 월 수 달러 수준. 다이제스트 수는 watchlist distinct 종목 수(§2.2)에 선형 비례하므로 구독 종목이 늘면 함께 재추정한다.
+- 운영 `anthropic` provider의 기본 모델은 클러스터 요약 **claude-haiku-4-5**, 일일 다이제스트 **claude-sonnet-5**다. 로컬 기본 `gemini-cli` provider는 두 작업 모두 **gemini-3.1-flash-lite**를 쓰며 `GEMINI_CLI_MODEL`로 재정의할 수 있다. `LlmClient` 포트 뒤라 provider 교체는 자유롭다.
+- 로컬의 `gemini-cli`·`claude-cli`·`codex-cli` provider는 로그인된 개인 구독을 쓰며 **단일 worker-llm 인스턴스 운용만 지원**한다. 모두 단발성 비대화형 실행·2분 타임아웃이고 API 키 환경변수를 자식 프로세스에서 제거해 구독 인증과 API 과금이 섞이지 않게 한다. Gemini는 빈 임시 작업공간에서 확장과 모든 도구를 policy로 끄고 JSON 출력 봉투의 `response`를 재귀 스키마 검증하며, Claude는 JSON Schema 강제·도구 봉인·safe mode·세션 비영속, Codex는 빈 임시 작업공간·출력 스키마·read-only sandbox를 쓴다. CLI provider는 local 프로파일의 `consumer-batch=1`로 한 번에 PEL에 한 건만 선점하고, 기동 시 CLI timeout이 `claim-idle`보다 짧은지 검증한다. worker-llm ×N 운용은 운영 `anthropic` provider에만 적용한다.
+- 비용 추정: watchlist 41종목 규모 기준 일 ~500기사 → ~150클러스터 × ~2K tokens + 41다이제스트 × ~3K tokens. 다이제스트 수는 watchlist distinct 종목 수(§2.2)에 선형 비례하므로 구독 종목이 늘면 CLI quota와 함께 재추정한다.
 - 워커 내 재시도는 백오프 1회까지다. 그 이상은 PEL 재처리에 맡긴다(이중 재시도 루프 금지).
 
 ### 3.5 발행 정책
@@ -337,7 +337,7 @@ stream payload (ws_api_spec §4.3 확장 — ⚠️ §6 증보):
 
 - **순환매·수급은 검색이 아니라 ①에서 나온다.** 남의 해석 기사를 찾는 것보다 자기 데이터가 정확하고 빠르다 — LLM에는 집계된 팩트만 주고 "순환매"라는 해석을 시킨다. 두 테이블 모두 거래일 17:40 전에 확정되므로 타이밍이 맞고, worker-llm의 읽기 전용 조회는 DB 계약 원칙(서버 간 통신은 Redis/DB 계약) 안이다.
 - **①층의 기준일은 두 테이블이 함께 완결된 공통 최근 거래일이다.** 두 테이블은 거래일에만, 서로 다른 잡이(16:30·17:10) 쌓는다. 각자의 최신 일자를 따로 쓰면 봉과 수급의 날짜가 어긋나고, 적재 잡이 도중 실패한 날짜를 쓰면 일부 종목만 반영된 편향 통계가 조용히 들어간다. 그래서 기준일은 **잡 날짜 이하에서 두 테이블 모두 행이 있는 최근 일자**로 잡고, 그 일자의 행 수가 활성 종목 수 대비 임계(설정, 예 90%) 미만이면 부분 적재로 보고 **①층을 제외·`degraded`** 한다. 사용한 기준일은 `factDate`로 팩트시트와 출력에 표기한다(§ 출력 스키마) — 주말·휴장일 잡은 지난 거래일 팩트가 표기된 채 들어가는 것이 정상이다.
-- **③만 검색을 연다.** 기존 LLM 호출은 도구 봉인(`--tools ""`·1턴)이 원칙이고 그대로 유지한다 — 시장 다이제스트 호출만 별도 프로파일(검색 도구 허용·멀티턴)을 쓴다. 폭주 방지의 **최종 방어선은 전체 타임아웃(프로세스 강제 종료)**이고 모든 provider에 필수다(하루 1회라 비용이 아니라 무한 루프가 위험이다). 턴 상한은 그걸 노출하는 provider(claude-cli `--max-turns`)에 추가로 적용한다. `LlmClient`에 `marketDigest(input)`을 추가하고, 검색을 지원하지 않는 provider는 ③을 건너뛰고 `degraded`로 생성한다 — **codex-cli는 검색을 켜면 로컬 파일 읽기 도구까지 함께 열려**(검색 결과 프롬프트 인젝션 → 로컬 자격증명 유출 경로) 도구 봉인이 가능해질 때까지 리서치 미지원으로 둔다(fake도 미지원). 리서치 호출 자체가 실패(검색 타임아웃·권한·출력 검증 거부)하면 잡을 실패시키지 않고 **리서치 없이 한 번 재호출해 ①·②층만으로 `degraded` 생성**한다 — 그 재호출도 실패하면 LLM 실패로서 PEL 재시도다. **리서치 없이 얻은 출력의 `global`·`sources`는 버린다**(검색이 없었으니 근거가 검증 불가능한 환각이다 — 이걸 남기면 스키마만 통과한 환각이 "리서치 성공"으로 집계되어 `degraded=false`로 굳는다). claim-idle 기동 검증도 이 재호출을 포함한다 — `(consumer-batch−1)×레코드 상한 + 리서치 타임아웃 + 무리서치 재호출 상한 < claim-idle`.
+- **③만 검색을 연다.** 기존 LLM 호출은 도구 봉인(`--tools ""`·1턴)이 원칙이고 그대로 유지한다 — 시장 다이제스트 호출만 별도 프로파일(검색 도구 허용·멀티턴)을 쓴다. 폭주 방지의 **최종 방어선은 전체 타임아웃(프로세스 강제 종료)**이고 모든 provider에 필수다(하루 1회라 비용이 아니라 무한 루프가 위험이다). 턴 상한은 그걸 노출하는 provider(claude-cli `--max-turns`)에 추가로 적용한다. `LlmClient`에 `marketDigest(input)`을 추가하고, 검색을 지원하지 않는 provider는 ③을 건너뛰고 `degraded`로 생성한다 — **gemini-cli는 현재 모든 도구를 deny하는 요약 전용 policy만 사용하고, codex-cli는 검색을 켜면 로컬 파일 읽기 도구까지 함께 열려**(검색 결과 프롬프트 인젝션 → 로컬 자격증명 유출 경로) 도구 봉인이 가능한 검색 전용 프로파일이 확정될 때까지 둘 다 리서치 미지원으로 둔다(fake도 미지원). 리서치 호출 자체가 실패(검색 타임아웃·권한·출력 검증 거부)하면 잡을 실패시키지 않고 **리서치 없이 한 번 재호출해 ①·②층만으로 `degraded` 생성**한다 — 그 재호출도 실패하면 LLM 실패로서 PEL 재시도다. **리서치 없이 얻은 출력의 `global`·`sources`는 버린다**(검색이 없었으니 근거가 검증 불가능한 환각이다 — 이걸 남기면 스키마만 통과한 환각이 "리서치 성공"으로 집계되어 `degraded=false`로 굳는다). claim-idle 기동 검증도 이 재호출을 포함한다 — `(consumer-batch−1)×레코드 상한 + 리서치 타임아웃 + 무리서치 재호출 상한 < claim-idle`.
 - 윈도는 종목 다이제스트와 같은 규칙 — 잡의 날짜에서 `windowTo = {date} 17:40 KST`, `windowFrom = -24h`. 크론을 옮기면 윈도도 함께 옮겨야 한다(§4.2의 경고와 동일).
 
 **리서치 가드레일** — 검색을 여는 순간 생기는 위험을 출력 계약으로 막는다:
@@ -509,11 +509,11 @@ worker-llm/
 
 provider는 명시 설정이고 자동 fallback이 없다. 엉뚱한 경로로 조용히 돌아가느니 기동에 실패하는 쪽을 택한다.
 
-- LLM provider는 `anthropic|claude-cli|codex-cli|fake` 중 하나를 명시한다. 기본 프로파일은 `anthropic`, local 프로파일은 `claude-cli`이며 `LLM_PROVIDER=codex-cli`로 전환한다. `claude-cli`의 기본 모델은 최신 Haiku를 가리키는 `haiku` 별칭이고 `CLAUDE_CLI_MODEL`로 재정의한다. provider 사이 자동 fallback은 없다.
+- LLM provider는 `anthropic|gemini-cli|claude-cli|codex-cli|fake` 중 하나를 명시한다. 기본 프로파일은 `anthropic`, local 프로파일은 `gemini-cli`이며 Gemini 기본 모델은 `gemini-3.1-flash-lite`다. `GEMINI_CLI_MODEL`로 모델을 재정의하거나 `LLM_PROVIDER=claude-cli|codex-cli`로 CLI provider를 전환할 수 있다. provider 사이 자동 fallback은 없다.
 - 로컬 무료 임베딩은 Ollama+BGE-M3를 기본으로 쓴다. 설치·환경변수·Docker 연결·문제 해결은 [로컬 임베딩 설정](local_embedding_setup.md)을 따른다.
 - `anthropic`은 `ANTHROPIC_API_KEY`가 없으면 기동에 실패한다. LLM·임베딩(rest)의 HTTP connect/read 타임아웃은 양수 필수(0=무한 대기 거부)이고, **배치 최악 지연 `consumer-batch × (LLM + 임베딩 + 원문 fetch 상한)`이 `claim-idle`보다 짧아야 기동한다** — 배치는 PEL에 먼저 들어가 순차 처리되므로 마지막 레코드의 선점 임계 초과가 중복 처리·조기 DLQ를 만든다. 원문 fetch는 요청 단위 타임아웃(8s)만으로는 리다이렉트×robots×게이트 대기가 합산돼 무계가 되므로, **fetcher가 종단 데드라인(20s)을, 호스트 게이트가 벽시계 기준 총 대기 상한(10s — 다중 레플리카 경합에서 획득 경쟁을 계속 지면 무한 대기이며, 잔여 예산을 넘는 sleep은 예산까지로 자른다)을 런타임에 강제**하고, 검증은 `데드라인 + 최장 블로킹 구간`을 상한으로 쓴다 — 최장 블로킹 구간은 robots 콜드 미스(게이트 10s + robots HTTP 8s, 중간에 데드라인 확인 없이 직렬 실행)다. 상한 초과 fetch는 본문 없이 진행한다(발췌 폴백 — best-effort). 원문 fetch 비활성 구성(`allowed-host-suffixes` 공란)은 이 항을 0으로 친다. 같은 검증을 CLI provider에도 적용한다(batch=1이라 레코드 1건 상한 검사). 레코드 상한에는 클러스터 락 대기(2×lock-ttl — `RedisClusterLock`의 유계 대기)도 포함한다. 기본값: batch 2 × (LLM 30s + 임베딩 25s + fetch 38s + 락 6s) = 198s < 5m. **수용 한계**: HTTP read timeout은 블로킹 read 단위 상한이라 응답을 계속 흘려보내는(드립피드) 서버는 이론상 회피할 수 있다 — 호출 대상이 신뢰된 엔드포인트(Anthropic·설정된 임베딩 제공자)이고, 스레드 격리로 완전한 종단 데드라인을 강제하는 비용 대비 이득이 없어 수용한다. claim-idle 초과의 결말은 중복 처리이고 파이프라인 전체가 sourceId 멱등·DB 유니크로 이를 흡수하도록 설계되어 있다(§2.2·§4.1) — 이 검증은 실시간 보장이 아니라 구성 오류를 기동에서 잡는 안전장치다. `claude-cli`·`codex-cli`는 각각 로그인된 로컬 CLI가 필요하고, 실행 실패·타임아웃은 PEL 재처리 경로로 전파한다. `fake`는 `alphatalk.llm.allow-fake=true`일 때만 허용한다.
 - CLI provider는 개인 구독 로컬 단일 인스턴스 전용이다. `consumer-batch=1`이 아니거나 CLI timeout이 `claim-idle` 이상이면 기동에 실패해, 긴 CLI 호출 중 다른 consumer가 아직 처리하지 않은 배치 레코드를 회수하는 구성을 막는다.
-- 시크릿(환경변수): `ANTHROPIC_API_KEY` · 임베딩 API 키. 로그 출력 금지. 임베딩 키는 `provider=rest`에서 fail-closed한다.
+- 시크릿(환경변수): `ANTHROPIC_API_KEY` · 임베딩 API 키. 로그 출력 금지. 운영 LLM과 임베딩 `provider=rest`는 각 키가 없으면 fail-closed한다. `gemini-cli`는 `GEMINI_API_KEY`·`GOOGLE_API_KEY`·ADC/Vertex 전환 환경변수를 제거하고 CLI에 캐시된 로그인만 사용한다.
 - 설정: 소스별 폴링 주기, 유사도 임계값(0.85), 클러스터 창(72h), 원문 허용 호스트·호스트별 요청 간격(기본 1초), digest 시각(18:00)·적재 동시성(기본 1), 다이제스트 입력 상한(호재 5·악재 5·중립 3·섹터 5·시장 3) — 임계값 튜닝에 대비해 전부 프로퍼티로 외부화한다. 다이제스트 대상 종목은 설정이 아니라 watchlist가 소유한다(§2.2).
 - 시장 다이제스트(§4.3) 설정: market digest 시각(17:40) · 리서치 사용 여부(끄면 항상 ①·②층만) · 리서치 턴 상한·타임아웃 · 팩트시트 커버리지 임계(기본 90%) — 검색을 여는 호출이므로 상한 없는 기본값을 두지 않는다. **시장 다이제스트의 전체 처리 데드라인(리서치 타임아웃 포함)은 배치 선행 대기까지 합쳐 `claim-idle`보다 작아야 하며 기동 시 검증한다** — 소비는 배치로 PEL에 들어와 순차 처리되므로 MARKET 레코드는 자기 데드라인이 시작되기 전에 앞 레코드들(`consumer-batch − 1`건)의 처리 시간만큼 PEL에서 대기할 수 있다. 검증식은 `(consumer-batch − 1) × 레코드 처리 상한 + 리서치 타임아웃 + 무리서치 재호출 상한 < claim-idle`(재호출은 §4.3 리서치 실패 폴백)이고, 만족하지 못하면 기동에 실패한다(기존 CLI timeout 검증과 같은 이유 — 넘으면 진행 중인 리서치를 다른 consumer가 XCLAIM해 동시 검색·delivery count 인플레·조기 DLQ가 생긴다).
 - 메트릭: `ingest_fetched_total{source}` · `ingest_dup_skipped_total` · `queue_ingest_pending`(PEL, 기획안 §10 알람 항목) · `llm_processed_total{type}` · `llm_failed_total` · `cluster_merged_total` · `stock_evidence_rejected_total`·`stock_scope_downgraded_total`(§3.4 — 전자는 `DIRECT` 판정이 근거 검증에 실패한 건만 계수하고 `INDIRECT` 제외는 설계된 정상 동작이라 세지 않는다. 후자는 STOCK 판정 강등 — 유효 섹터가 있으면 SECTOR, 없으면 IRRELEVANT. 둘 다 트랜잭션 커밋 후 계수해 재시도 중복 계수를 막는다. 프롬프트·스키마 회귀로 종목 직접 배달이 조용히 멎는 것을 감시) · `dlq_total` · `llm_tokens_total{model}`(비용 감시, NFR-09) · `llm_call_seconds{op,outcome}`(LLM 호출 지연 타이머 — provider 무관하게 `LlmClient` 데코레이터가 기록, op=summarize|digest|market_digest, outcome=success|error) · `market_digest_generated_total{degraded}` · `market_digest_layer_failed_total{layer}`(§4.3 층별 실패).
@@ -521,13 +521,14 @@ provider는 명시 설정이고 자동 fallback이 없다. 엉뚱한 경로로 �
 
 ```bash
 SPRING_PROFILES_ACTIVE=local ./gradlew :worker-llm:bootRun
+SPRING_PROFILES_ACTIVE=local LLM_PROVIDER=claude-cli ./gradlew :worker-llm:bootRun
 SPRING_PROFILES_ACTIVE=local LLM_PROVIDER=codex-cli ./gradlew :worker-llm:bootRun
 SPRING_PROFILES_ACTIVE=local LLM_PROVIDER=fake ./gradlew :worker-llm:bootRun
 ```
 
 ## 9. 구현 단계 & DoD
 
-> **상태(2026-08-07): N0~N7 전 단계 구현 완료.** LLM·임베딩은 포트 뒤에 있고 기본 프로파일은 API 키 미설정 시 fail-closed한다. local은 Claude/Codex CLI 구독을 고르고 test는 명시적 fake를 쓴다. N7 시장 잡 트리거는 게이트 기본 on(`alphatalk.ingest.digest.market-enabled`)이며, 첫 배포에서만 llm-worker를 먼저 올린다(§4.3). 실서비스 투입 전 남은 것: 키 주입, RSS 소스 목록 설정(§10-5), 임베딩 제공자 확정(§10-1), CLI 검색 권한 확정(§10-11). 다이제스트 대상 종목은 watchlist 기반으로 전환 완료(§2.2).
+> **상태(2026-09-08): N0~N7 전 단계 구현 완료.** LLM·임베딩은 포트 뒤에 있고 local은 Gemini CLI의 Gemini 3.1 Flash-Lite 구독을 기본으로 쓴다. 운영 기본은 API 키 미설정 시 fail-closed하는 Anthropic이며 Claude/Codex CLI 구독도 명시 전환으로 유지하고 test는 명시적 fake를 쓴다. N7 시장 잡 트리거는 게이트 기본 on(`alphatalk.ingest.digest.market-enabled`)이며, 첫 배포에서만 llm-worker를 먼저 올린다(§4.3). 실서비스 투입 전 남은 것: 키 주입, RSS 소스 목록 설정(§10-5), 임베딩 제공자 확정(§10-1), CLI 검색 권한 확정(§10-11). 다이제스트 대상 종목은 watchlist 기반으로 전환 완료(§2.2).
 
 | 단계 | 범위 | DoD |
 |---|---|---|
@@ -558,6 +559,6 @@ SPRING_PROFILES_ACTIVE=local LLM_PROVIDER=fake ./gradlew :worker-llm:bootRun
 | 8 | SECTOR fan-out 파라미터 | v0.8에서 2단 상한(100/500)으로 확정 — LOW 제외 정책은 폐기(§3.6). 상한값은 실데이터로 계속 튜닝 |
 | 9 | MARKET 뉴스 실시간 노출면 | MVP는 다이제스트만. 홈 피드/시장 브리핑 방(종목 방 밖 노출면)은 별도 기획 필요 — P3. 노출면이 생기면 `market_digest`(§4.3)를 core-api 조회 API로 여는 것부터 |
 | 10 | 시장 리서치의 매크로 지표 수집 전환 | §4.3 ③층은 웹 검색으로 시작한다(열린 주제 대응·수집기 구축 비용 회피). 운영해 보고 매일 반복되는 핵심 지표(환율·미 국채 금리)는 한은 ECOS 등 자체 수집으로 옮기는 하이브리드 검토 — 판단 기준은 검색 실패율과 수치 정확도 |
-| 11 | 시장 리서치 provider 커버리지 | 현재 리서치 지원은 claude-cli(WebSearch)뿐이다. codex-cli는 검색 시 파일 읽기 도구 봉인이 불가능해 보류(§4.3), anthropic API는 web search tool 연동 미구현, fake는 미지원 — 셋 다 ③층 생략·degraded로 동작. API 경로 도구 파라미터와 CLI 검색 권한 부여 방식(--tools가 --safe-mode와 공존하는지)은 실호출로 확정 |
+| 11 | 시장 리서치 provider 커버리지 | 현재 리서치 지원은 claude-cli(WebSearch)뿐이다. gemini-cli는 요약 경로에서 모든 도구를 봉인하고 검색 전용 policy가 아직 없으며, codex-cli는 검색 시 파일 읽기 도구 봉인이 불가능해 보류(§4.3), anthropic API는 web search tool 연동 미구현, fake는 미지원 — 넷 다 ③층 생략·degraded로 동작. API 경로 도구 파라미터와 CLI 검색 권한 부여 방식은 실호출로 확정 |
 | 12 | `stock_alias` 적재 경로 | 시드·적재 잡이 아직 없어 사실상 빈 테이블 — 근거 검증(§3.4)은 `stock_master` 정식명만으로 동작하고, 약칭만 쓰는 기사("삼전" 등)의 후보 밖 발견은 기각된다(의도된 정밀도 우선). `stock_evidence_rejected_total` 추이로 필요성을 확인한 뒤 수동 시드 vs 배치 잡을 결정 |
 | 13 | 소스 부여 후보의 DIRECT 요건 | 소스가 준 후보도 LLM `DIRECT` 판정이 있어야 채택한다(§3.4). RSS뿐인 현재는 후보 0건이라 무해하나, 소스가 종목을 확정하는 DART 공시 소스가 붙으면 LLM 오판 한 번으로 공시 이벤트가 기각될 수 있다 — DART 착수 시 소스 신뢰 기반 우회를 재검토 |

@@ -17,6 +17,7 @@ data class LlmProperties(
     val sector: Sector = Sector(),
     val models: Models = Models(),
     val anthropic: Anthropic = Anthropic(),
+    val geminiCli: GeminiCli = GeminiCli(),
     val claudeCli: ClaudeCli = ClaudeCli(),
     val codexCli: CodexCli = CodexCli(),
     val embedding: Embedding = Embedding(),
@@ -67,6 +68,12 @@ data class LlmProperties(
         val maxTokens: Int = 1024,
         val connectTimeout: Duration = Duration.ofSeconds(5),
         val readTimeout: Duration = Duration.ofSeconds(25),
+    )
+
+    data class GeminiCli(
+        val executable: String = "gemini",
+        val model: String = "gemini-3.1-flash-lite",
+        val timeout: Duration = Duration.ofMinutes(2),
     )
 
     data class ClaudeCli(

@@ -6,7 +6,7 @@ spring:
 
 alphatalk:
   llm:
-    provider: ${LLM_PROVIDER:claude-cli}
+    provider: ${LLM_PROVIDER:gemini-cli}
     consumer-batch: 1
     embedding:
       provider: ${EMBEDDING_PROVIDER:rest}

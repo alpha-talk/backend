@@ -23,7 +23,7 @@ server:
 
 alphatalk:
   llm:
-    provider: ${LLM_PROVIDER:anthropic} # anthropic | claude-cli | codex-cli | fake
+    provider: ${LLM_PROVIDER:anthropic} # anthropic | gemini-cli | claude-cli | codex-cli | fake
     consume-enabled: true
     allow-fake: false
     consumer-block: 5s
@@ -64,6 +64,10 @@ alphatalk:
       api-key: ${ANTHROPIC_API_KEY:}
       version: "2023-06-01"
       max-tokens: 1024
+    gemini-cli:
+      executable: ${GEMINI_CLI_EXECUTABLE:gemini}
+      model: ${GEMINI_CLI_MODEL:gemini-3.1-flash-lite}
+      timeout: ${LLM_CLI_TIMEOUT:2m}
     claude-cli:
       executable: ${CLAUDE_CLI_EXECUTABLE:claude}
       model: ${CLAUDE_CLI_MODEL:haiku}
