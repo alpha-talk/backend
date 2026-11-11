@@ -3,6 +3,7 @@ package com.alphatalk.ws.subscription
 import com.alphatalk.contracts.ChannelKind
 import com.alphatalk.contracts.envelope.WatchlistUpdated
 import com.alphatalk.ws.relay.ChannelSubscriber
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
@@ -26,7 +27,8 @@ class DemandRegistryTest {
 
     private val subscriber = FakeSubscriber()
     private val syncTrigger = DemandSyncTrigger()
-    private val registry = DemandRegistry(subscriber, syncTrigger)
+    private val meterRegistry = SimpleMeterRegistry()
+    private val registry = DemandRegistry(subscriber, syncTrigger, DemandLockMetrics(meterRegistry))
 
     private fun syncRequested(): Boolean = syncTrigger.await(0)
 

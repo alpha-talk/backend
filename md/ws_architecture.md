@@ -159,7 +159,7 @@ SOLID는 이음새가 있는 곳의 도구다. 이음새가 없는데 인터페�
 |---|---|---|
 | `DemandQuery` | **포트(읽기)** | `usersWatching(code): Set<userId>`(불변 스냅샷)·`roomHasQuoteViewers(code): Boolean` 등. relay 핸들러가 의존 — 둘 다 틱 경로에서 락 없이 읽는다 |
 | `DemandMutator` | **포트(쓰기)** | `registerSession`/`startWatchlist`/`removeSession`/`subscribeRoom`/`unsubscribeById`/`applyWatchlist`. 세션 리스너가 의존 |
-| `DemandRegistry` | 구현(셋 다) | §5 인덱스 단일 소유. 수요 전이(0↔1) 감지 시 `ChannelSubscriber`에 목표 상태 기록 + `DemandSyncTrigger.request()`로 동기화 요청. **상태 변경은 락 안에서 직렬화 — 락 안에서 Redis I/O 금지** |
+| `DemandRegistry` | 구현(셋 다) | §5 인덱스 단일 소유. 수요 전이(0↔1) 감지 시 `ChannelSubscriber`에 목표 상태 기록 + `DemandSyncTrigger.request()`로 동기화 요청. **상태 변경은 락 안에서 직렬화 — 락 안에서 Redis I/O 금지**. `DemandLockMetrics`로 획득 대기·보유 시간을 분리 계측한다 |
 | `DemandSnapshotSource` | **포트(읽기)** | `demandSnapshot(): {quote: code→유저 수, room: code→구독 수}`. 락 안 순수 메모리 복사. `DemandRegistry`가 구현 |
 | `DemandSyncTrigger` | 구현(공유 신호) | 세마포어 기반 코얼레싱 신호. 레지스트리(요청)와 동기화 스레드(대기)가 공유 — 빈 의존 순환 없이 트리거 채널 제공 |
 | `RedisDemandSynchronizer` | 구현 | 단일 스레드가 주기(5s)·트리거마다 스냅샷을 Redis 해시에 **전체 재기록**(Lua DEL+HSET 원자, TTL 연장) 후 직전 기록과 비교해 0↔1 전이가 있었던 sync만 `demand:updated` 1건 발행(payload `{gwId, ts}`, v0.21) — 유실·드리프트는 다음 주기에 자가 치유. gwId(부팅마다 발급)·`gw:alive` 갱신·`gw:registry` 자기 등록(멱등 SADD)·stop 시 키 DEL + SREM 소유. 주기·TTL은 서비스 설정이 아니라 `:contracts`의 `DemandTiming`이 소유한다(worker-price의 복구 시간 검증식과 어긋나지 않도록) |
@@ -231,7 +231,8 @@ roomQuoteCodes:  Set<code>                            // 방 quote 구독이 살
 - 세션 이벤트 스레드와 `watchlist:updated`(Redis 리스너 스레드)가 동시에 인덱스를 만질 수 있다.
 - `DemandRegistry`의 변경 메서드는 단일 락으로 직렬화한다. 같은 락 안에서 채널의 목표 상태를 기록하고 세마포어 신호를 보낸다. Redis 구독·해지는 전용 작업 스레드에서 처리한다.
 - 읽기(`DemandQuery.usersWatching` — 틱마다 호출)는 **락 없이** 읽는다. `watchlistIndex`를 `ConcurrentHashMap<code, 불변 Set>`으로 두고, 변경 시 Set을 통째로 교체(copy-on-write)한다.
-- 락 최적화는 S7 스모크에서 병목으로 확인될 때만 한다. CHM 대신 락을 고른 자세한 근거는 §11.3.
+- 모든 락 경로는 `ws.demand.lock.wait`·`ws.demand.lock.hold` 타이머로 분리 계측하고, `ws.demand.lock.over.threshold{phase,operation}`가 100ms 초과를 센다. 현재 대기 스레드는 `ws.demand.lock.queued` 게이지로 본다. operation 태그는 메서드별 고정 집합이라 카디널리티가 유계다.
+- 단일 인스턴스 500세션·41종목 동시 SUBSCRIBE/UNSUBSCRIBE 스모크에서 락 대기 p99 < 100ms이고 100ms 초과 카운터가 0이어야 한다. 락 최적화는 이 S7 계측에서 병목으로 확인될 때만 한다. CHM 대신 락을 고른 자세한 근거는 §11.3.
 
 ### 5.4 스레딩 모델
 
