@@ -37,6 +37,8 @@ Docker가 실행 중이면 Testcontainers가 Redis와 포트가 임의 배정된
 
 합격 기준은 락 대기 p99 100ms 미만, 락 대기·보유 100ms 초과 0건, quote 수신율 99% 이상, quote 종단 지연 p95 1초 이하, 종료 시 outbound 큐 0이다. 생성기와 서버가 한 JVM의 CPU를 공유하므로 CPU 포화나 transport error가 발생하면 서버 한계로 단정하지 않고 생성기를 별도 머신으로 옮겨 재검증한다.
 
+같은 작업은 네트워크 부하 외에 `DemandRegistryLockContentionTest`를 함께 실행한다. 10,000개 가상 스레드를 한 시작선에서 동시에 풀어 `subscribeRoom`과 `unsubscribeById`가 같은 `ReentrantLock`을 직접 경합하게 한다. 이 테스트는 STOMP·Redis·네트워크 비용을 제외한 락 스파이크 최악 조건이다.
+
 Prometheus 이름은 다음과 같다.
 
 - `ws_demand_lock_wait_seconds`

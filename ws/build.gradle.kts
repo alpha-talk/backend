@@ -59,4 +59,5 @@ tasks.register<Test>("loadTest") {
     systemProperty("ws.load.connect.batch", providers.gradleProperty("wsLoadConnectBatch").getOrElse("50"))
     systemProperty("ws.load.connect.pause.millis", providers.gradleProperty("wsLoadConnectPauseMillis").getOrElse("0"))
     systemProperty("ws.load.connect.timeout.seconds", providers.gradleProperty("wsLoadConnectTimeoutSeconds").getOrElse("30"))
+    systemProperty("ws.load.lock.contenders", providers.gradleProperty("wsLoadLockContenders").getOrElse("10000"))
 }
