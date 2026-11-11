@@ -1,5 +1,7 @@
-# Alpha Talk — core-api REST API 명세 v0.5
+# Alpha Talk — core-api REST API 명세 v0.6
 **메인서버(core-api) · 동기 API 전용 · 담당: 민균**
+
+> **v0.6 (2026-11-11)**: WS 전용 관심목록 스냅샷 조회와 버전이 포함된 변경 발행을 추가한다(§4).
 
 > **v0.5 (2026-08-14)**: **quote 스냅샷에 신선도 검사 추가(§5)** — `price:{code}` 캐시는 TTL이 없어(Redis 계약 §3) 수요가 사라진 종목의 마지막 튜플이 무기한 남는데, 지금까지는 값이 있기만 하면 `delayed:false`로 반환해 **이전 거래일의 등락률이 실시간으로 위장**됐다(방 입장 화면이 낡은 값으로 굳는 실증 버그). `ts`의 KST 날짜가 오늘보다 과거인 캐시는 미스와 동일하게 일봉 폴백(`delayed:true`)으로 강등한다. 판정을 나이(초)가 아니라 거래일로 하는 이유: KIS 실시간은 체결 시에만 틱을 주고 worker-price의 틱 침묵 강등은 최초 무틱 종목에만 적용되므로, 유동성 낮은 종목은 장중에도 캐시가 오래 조용한 것이 정상이다 — 같은 날 안에서는 마지막 체결가가 곧 현재가다. 응답 스키마 불변.
 
@@ -169,16 +171,9 @@ ULID 사전순이 곧 시간순이라는 성질을 이용한 **양방향 커서*
 
 **한도 검사는 사용자 단위로 직렬화한다.** 99개를 가진 사용자가 서로 다른 두 종목을 동시에 PUT하면, 두 요청 모두 "99개"를 읽고 통과해 101개가 된다. `(user_id, code)` 기본키는 같은 종목의 중복만 막을 뿐 서로 다른 종목끼리의 경쟁은 막지 못한다. 그래서 구독·해지 트랜잭션은 auth 모듈의 `UserAccountLock` 포트로 사용자 엔티티를 `PESSIMISTIC_WRITE` 잠근 뒤 상태 확인과 변경을 끝낸다. subscription은 `users` 테이블이나 auth의 JPA 엔티티를 직접 알지 않는다. 잠글 사용자가 이미 사라졌으면 유효하지 않은 인증 주체이므로 401을 반환한다. 수락된 요청은 멱등 재요청이라도 커밋 전에 사용자별 `watchlist_rev`를 1 올리고 변경 후 전체 스냅샷을 함께 돌려준다 — 잠금이 트랜잭션을 직렬화하므로 **rev 순서가 곧 커밋 순서**다.
 
-**부수효과 (Redis 계약 §1.1·§3)**: 관심목록의 진실은 core-api의 DB지만, 게이트웨이는 CONNECT 때 Redis Set `watchlist:{userId}`만 읽는다. DB 변경과 rev 증가는 서비스 트랜잭션에서 끝내고, **Redis는 트랜잭션과 잠금 밖(커밋 후)에서만 호출한다**(코딩 컨벤션 §6 — DB 트랜잭션 안에서 느린 외부 I/O 금지. Redis 지연이 DB 커넥션·잠금 점유로 전이되지 않는다). 커밋 후 동기화는 (rev, 전체 스냅샷, 이 요청의 변경)을 Lua 스크립트 하나로 원자 반영한다.
+**변경 발행**은 DB 커밋 뒤 `watchlist:updated`에 `{userId, rev, codes}`를 best-effort로 발행한다. 발행 실패는 로그·메트릭에 남기며 커밋된 변경은 성공으로 응답한다.
 
-1. 미러의 `watchlist:rev:{userId}`보다 새 rev일 때만 Set `watchlist:{userId}`를 스냅샷으로 통째 교체한다 — 오래된 동기화는 폐기되어 최신 상태를 과거로 덮지 못한다
-2. 같은 스크립트 안에서 미러 전이 diff에 이 요청의 변경을 합쳐 `PUBLISH watchlist:updated` `{ "userId": 123, "added": ["005930"], "removed": [], "ts": ... }`한다 — 반영과 발행이 원자적이고 스크립트는 Redis에서 직렬화되므로 **발행 순서도 rev 순서와 일치**한다. 폐기된 동기화는 발행도 생략한다(더 새로운 동기화가 그 상태 전이를 이미 발행했다)
-
-이미 접속한 세션은 발행된 diff를 멱등 적용해 구독과 **수요 카운트**를 조정하고, 발행 직후 재접속한 세션도 같은 상태의 Set을 해소한다.
-
-**동기화는 멱등 재요청에도 매번 반복한다.** 멱등 재요청도 rev를 올리므로 동기화가 폐기되지 않고, 미러가 이미 맞아도 이 요청의 diff를 재발행해 접속 중인 게이트웨이까지 복구한다. DB 커밋 뒤 동기화에서 실패하면 요청은 500을 반환하지만 DB 변경은 유지된다 — 클라는 같은 PUT/DELETE를 재요청한다. 최초 PUT이 500 뒤 재요청되면 DB에는 이미 행이 있으므로 재요청의 정상 응답은 200이다.
-
-미러가 통째로 사라져도(Redis 초기화 등) 동기화가 전체 스냅샷을 반영하므로 **그 사용자의 다음 요청 한 번으로 미러 전체가 복구된다**. 사용자 활동 없이 전 사용자를 일괄 재구축하는 경로는 여전히 없다.
+**WS 전용 조회**는 `POST /internal/watchlists/snapshots`에 `{"userIds":[123]}`를 보내고 `[{"userId":123,"rev":14,"codes":["005930"]}]`를 받는다. 요청당 양수 ID를 최대 100개 허용하고 중복은 한 번만 조회한다. DB의 동일한 읽기 스냅샷에서 버전과 목록을 읽는다. 목록을 변경한 이력이 없는 ID의 상태는 rev 0과 빈 목록이다. `X-AlphaTalk-Watchlist-Key` 헤더는 환경변수 `ALPHATALK_WATCHLIST_INTERNAL_KEY`와 일치해야 한다. 서버에 키가 없거나 일치하지 않으면 401이다.
 
 ---
 
@@ -391,7 +386,7 @@ ULID 사전순이 곧 시간순이라는 성질을 이용한 **양방향 커서*
 
 ```
 community ──(StreamEventAppender 포트)──► stream   # POST 이벤트 기록
-subscription ──(WatchlistBroadcaster 포트)──► watchlist:{userId} 미러 + watchlist:updated
+subscription ──(WatchlistBroadcaster 포트)──► watchlist:updated 전체 스냅샷
 subscription/stream ──(StockCatalog 포트)──► search   # 종목 존재 확인·이름 조회
 notification ──(읽기)──► stream(이벤트 조회) + subscription(관심목록) + invest_opinion 읽기 매핑(§6.1)
 stream/stockinfo ──(읽기)──► Redis price:{code} / 워커 적재 테이블

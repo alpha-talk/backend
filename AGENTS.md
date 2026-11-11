@@ -1,7 +1,7 @@
 # Alpha Talk — backend (Gradle 멀티모듈 모노레포)
 
 "종목 하나 = 방 하나" 주식 커뮤니티 **Alpha Talk**의 백엔드 저장소.
-**한 저장소에 여러 서버(Spring Boot 앱)를 Gradle 서브모듈로 담는다.** 서버끼리는 코드로 의존하지 않고 Redis/DB 계약으로만 통신한다. 전체 모듈 목록·의존 규칙·포트 배치는 [md/기획안.md](md/기획안.md) §3.1이 단일 진실.
+**한 저장소에 여러 서버(Spring Boot 앱)를 Gradle 서브모듈로 담는다.** 서버끼리는 코드로 의존하지 않고 Redis/DB 계약과 명시된 내부 HTTP 예외로 통신한다. 전체 모듈 목록·의존 규칙·포트 배치는 [md/기획안.md](md/기획안.md) §3.1이 단일 진실.
 
 - **서버(앱)**: `core-api`(메인 REST) · `ws`(WS 게이트웨이) · `worker-price/batch/ingest/llm`
 - **라이브러리(공유)**: `contracts`(채널·키·봉투 DTO) · `auth-jwt`(JWT 발급·검증) · `kis-client`(KIS 연동) · `kis-redis`(kis-client 포트의 Redis 어댑터 — 토큰 공유·합산 유량 게이트) · `db-migrations`(Liquibase changelog — DB 스키마 단일 소유)
@@ -17,8 +17,8 @@
 | [md/ws_architecture.md](md/ws_architecture.md) | **코드 레벨 설계 기준** — 컴포넌트 책임, 인덱스/동시성, 시퀀스, 에러 정책 |
 | [md/ws_module_plan.md](md/ws_module_plan.md) | 구현 계획 — 단계(S0~S7)별 범위·DoD, 열린 합의 안건 |
 | [md/ws_api_spec.md](md/ws_api_spec.md) | 클라 ↔ 게이트웨이 STOMP 프로토콜 계약 (v0.9) |
-| [md/redis_contract.md](md/redis_contract.md) | 게이트웨이 ↔ 워커 ↔ 메인서버 Redis 계약 — **서비스 간 단일 진실** (v0.23) |
-| [md/alphatalk_core_api_spec.md](md/alphatalk_core_api_spec.md) | 클라 ↔ 메인서버 REST 계약 (v0.5) — core-api 구현 기준 |
+| [md/redis_contract.md](md/redis_contract.md) | 게이트웨이 ↔ 워커 ↔ 메인서버 Redis 계약 — **서비스 간 단일 진실** (v0.24) |
+| [md/alphatalk_core_api_spec.md](md/alphatalk_core_api_spec.md) | 클라 ↔ 메인서버 REST 계약 (v0.6) — core-api 구현 기준 |
 | [md/alphatalk_kis_worker_spec.md](md/alphatalk_kis_worker_spec.md) | KIS/OpenDART 수집 워커 명세 — 워커 적재 테이블 스키마(§4)의 원천 |
 | [md/alphatalk_news_worker_spec.md](md/alphatalk_news_worker_spec.md) | 뉴스 파이프라인 명세 — worker-ingest·worker-llm (수집·클러스터링·일일 호재/악재 브리핑) |
 | [md/local_embedding_setup.md](md/local_embedding_setup.md) | 로컬 무료 임베딩 실행 가이드 — Ollama+BGE-M3 설정·검증·문제 해결 |
@@ -54,7 +54,7 @@ backend/
 └─ worker-llm/   [서버]       LLM 요약
 ```
 
-**의존 규칙**: 서버는 라이브러리에만 의존한다 — **서버 → 서버 의존 금지**. `contracts`·`auth-jwt`는 순수(무의존). `ws → contracts·auth-jwt` 단방향. 상세는 [md/기획안.md](md/기획안.md) §3.1. **유일한 서버 간 HTTP 예외**: core-api → worker-price 분봉 신선화 내부 API — 멱등 트리거·응답에 데이터 없음·best-effort(실패해도 조회는 저장분으로 동작)로 한정하며, 데이터 전달 채널로 확장하지 않는다([md/alphatalk_kis_worker_spec.md](md/alphatalk_kis_worker_spec.md) §2.6).
+**의존 규칙**: 서버는 라이브러리에만 의존한다 — **서버 → 서버 의존 금지**. `contracts`·`auth-jwt`는 순수(무의존). `ws → contracts·auth-jwt` 단방향. 상세는 [md/기획안.md](md/기획안.md) §3.1. **서버 간 HTTP 예외**는 core-api → worker-price 분봉 신선화 멱등 트리거([KIS 워커 명세](md/alphatalk_kis_worker_spec.md) §2.6)와 WS → core-api 읽기 전용 관심목록 스냅샷 조회([core-api 명세](md/alphatalk_core_api_spec.md) §4)로 제한한다.
 **인증 규칙**: JWT 발급·검증 코드는 반드시 `:auth-jwt`를 쓴다 — 서버마다 따로 구현하면 클레임 스키마가 어긋난다. Boot 자동구성이라 **의존성 추가 + `alphatalk.auth.jwt.secret` 프로퍼티만으로 빈이 등록**된다(결선 코드 작성 금지). ws는 `TokenVerifier` 타입으로만 주입(검증 전용, 발급 금지).
 지금 존재하는 모듈만 `settings.gradle.kts`에 include하고, 나머지 서버는 착수 시점에 등록한다 (M0 스캐폴딩: `contracts → ws → core-api`).
 
@@ -63,7 +63,7 @@ backend/
 ## 불변 규칙 (어기면 설계 위반)
 
 1. **푸시 전용 엣지**: 클라 SEND 프레임은 무조건 거부. 콘텐츠를 받는 코드를 만들지 않는다.
-2. **게이트웨이는 Redis Pub/Sub SUBSCRIBE + 프레즌스·수요(demand) 쓰기만**: 수요 쓰기는 `demand:*:{gwId}` refcount·`demand:updated` 전이 발행·`gw:alive:{gwId}` 하트비트·`gw:registry` 자기 gwId 등록/철수([redis_contract.md](md/redis_contract.md) §1.3·§3 v0.20)로 한정. DB 접근, `queue:ingest`(Streams), `price:{code}` 캐시 읽기 코드 금지.
+2. **게이트웨이의 Redis 사용은 Pub/Sub SUBSCRIBE + 프레즌스·수요(demand) 쓰기만**: 수요 쓰기는 `demand:*:{gwId}` refcount·`demand:updated` 전이 발행·`gw:alive:{gwId}` 하트비트·`gw:registry` 자기 gwId 등록/철수([redis_contract.md](md/redis_contract.md) §1.3·§3 v0.20)로 한정. DB 접근, `queue:ingest`(Streams), `price:{code}` 캐시 읽기 코드 금지.
 3. **채널명·키·목적지 문자열 하드코딩 금지**: 반드시 `:contracts`의 `Channels`/`Keys`/`Destinations` 상수 사용.
 4. **best-effort 푸시**: 재전송·전달 보장 로직을 만들지 않는다. 유실 복구는 클라의 REST 몫.
 5. **보안**: JWT는 STOMP CONNECT 헤더로만 받는다 (URL 쿼리파라미터 금지). 토큰 원문·시크릿 로그 금지. 시크릿은 환경변수 주입.
@@ -106,7 +106,7 @@ backend/
 - **S0~S5 구현 완료**: `:contracts` + `:auth-jwt` + `:ws` — 인증(JWT CONNECT)·수요 인덱스(DemandRegistry)·Redis relay·관심목록 해소·watchlist:updated·프레즌스·메트릭·방 quote 토픽(WS 명세 v0.9 — 관심목록 없이 방만 열람해도 시세 수신). 테스트 77개(E2E 5개 포함) 통과.
 - 버전: Spring Boot 3.5.16 · Kotlin 2.2.21 · JDK 21(toolchain 자동 다운로드) · jjwt 0.12.7.
 - 남은 단계: **S6**(graceful shutdown 시나리오 검증, quote 샘플러 여부 판단) · **S7**(41종목×500세션 부하 스모크). 계획서 §5 참조.
-- 미해결 합의 안건은 [md/ws_module_plan.md](md/ws_module_plan.md) §7 (RS256 전환 여부, 관심목록 조회 경로 등). 해당 코드는 포트로 격리된 구현(`:auth-jwt`의 `JwtTokenProvider` HS256, `RedisWatchlistResolver`)을 쓴다.
+- 미해결 합의 안건은 [md/ws_module_plan.md](md/ws_module_plan.md) §7 (RS256 전환 여부 등). JWT는 `:auth-jwt`의 `JwtTokenProvider` HS256을 쓴다. 관심목록은 내부 API 조회와 버전이 있는 Pub/Sub 스냅샷으로 동기화한다.
 - **core-api 7모듈 구현 완료 (M1~M5)**: auth·search·subscription·stream·notification·community·stockinfo — REST 33개 엔드포인트 + 쓰기 레이트리밋·멱등키(명세 §1.5·§1.6). 알림은 fan-out-on-read(ADR A4)이며 증권사 투자의견 전역 알림 포함(명세 v0.4 §6.1), 글은 더블라이트(ADR A6), 주/월봉은 일봉 파생(ADR A8). 테스트 259개(동시성·E2E 포함) 통과. 남은 것: M6 경화(CORS 화이트리스트·메트릭·배포)와 springdoc OpenAPI 상호 검증(§0).
 - **worker-price·worker-batch 수집 잡**: price는 실시간(세션풀·conflation·수요 리컨실)과 일봉·분봉(신선화 API·일 배치·퍼지) 구현. batch는 잡 카탈로그(KIS 워커 명세 §3.1) 중 `stock_master_sync`·`industry_sync`(+`dart_corp_map`)·`invest_opinion_sync`·`valuation_daily`·`investor_flow_daily`·`financials_sync` 구현 — `valuation_daily`는 기본 on이라 KIS 계정이 없으면 worker-batch가 기동하지 않고(fail-closed), 나머지 KIS 잡(opinion·investor)과 financials는 기본 off로 켤 때 각각 KIS 계정·DART 키가 필수다. `minute_candle_backfill`도 구현(§9-9 계측 종결, 조회 트리거 비동기 백필 — 명세 v0.8 §2.6).
 - **뉴스 파이프라인 N0~N7 구현 완료**: `:worker-ingest`(RSS 수집→정규화→XADD + 다이제스트 트리거(종목 18:00·시장 17:40) — 텍스트 사전 매핑은 v0.6에서, 네이버 검색 API 소스는 2026-08-11에 제거, 종목 후보는 소스 부여만. 테스트 48개) + `:worker-llm`(소비→클러스터링(pgvector)→LLM 요약·감성→scope 사다리 fan-out→persist·publish·ack + 일일 브리핑·시장 다이제스트(3층 입력·웹 리서치)·DLQ). 운영 LLM·임베딩은 미구성 시 fail-closed한다. 로컬 LLM은 Gemini CLI 구독의 Gemini 3.1 Flash-Lite가 기본이고 Claude/Codex CLI 구독을 선택할 수 있으며, fake LLM은 `provider=fake` 명시 opt-in이다(테스트는 fake 사용). 상세·잔여 설정은 [md/alphatalk_news_worker_spec.md](md/alphatalk_news_worker_spec.md) §9.

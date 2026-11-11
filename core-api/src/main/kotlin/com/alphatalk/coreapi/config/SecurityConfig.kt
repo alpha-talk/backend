@@ -1,6 +1,7 @@
 package com.alphatalk.coreapi.config
 
 import com.alphatalk.auth.TokenVerifier
+import com.alphatalk.contracts.WatchlistSnapshots
 import com.alphatalk.coreapi.auth.JwtAuthenticationFilter
 import com.alphatalk.coreapi.support.ApiErrorBody
 import com.alphatalk.coreapi.support.ApiErrorResponse
@@ -10,6 +11,7 @@ import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import org.springframework.core.env.Environment
 import org.springframework.core.env.Profiles
+import org.springframework.http.HttpMethod
 import org.springframework.http.MediaType
 import org.springframework.security.config.annotation.web.builders.HttpSecurity
 import org.springframework.security.config.annotation.web.configurers.AbstractHttpConfigurer
@@ -37,6 +39,7 @@ class SecurityConfig {
         .sessionManagement { it.sessionCreationPolicy(SessionCreationPolicy.STATELESS) }
         .authorizeHttpRequests {
             it.requestMatchers(*PUBLIC_PATHS).permitAll()
+            it.requestMatchers(HttpMethod.POST, WatchlistSnapshots.PATH).permitAll()
             if (environment.acceptsProfiles(Profiles.of("local"))) {
                 it.requestMatchers("/actuator/prometheus").permitAll()
             }

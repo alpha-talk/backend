@@ -3,7 +3,18 @@ package com.alphatalk.ws
 import com.alphatalk.auth.JwtTokenProvider
 import com.alphatalk.contracts.Channels
 import com.alphatalk.contracts.Destinations
-import com.alphatalk.contracts.Keys
+import com.alphatalk.contracts.WatchlistSnapshotRequest
+import com.alphatalk.contracts.WatchlistSnapshots
+import com.alphatalk.contracts.envelope.WatchlistUpdated
+import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
+import com.fasterxml.jackson.module.kotlin.readValue
+import com.sun.net.httpserver.HttpServer
+import org.junit.jupiter.api.AfterAll
+import org.springframework.test.context.DynamicPropertyRegistry
+import org.springframework.test.context.DynamicPropertySource
+import org.springframework.data.redis.listener.RedisMessageListenerContainer
+import java.net.InetSocketAddress
+import java.util.concurrent.ConcurrentHashMap
 import org.assertj.core.api.Assertions.assertThat
 import org.awaitility.Awaitility.await
 import org.junit.jupiter.api.AfterEach
@@ -36,11 +47,45 @@ import java.util.concurrent.TimeUnit
 
 @SpringBootTest(
     webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
-    properties = ["alphatalk.auth.jwt.secret=$TEST_SECRET"],
+    properties = ["alphatalk.auth.jwt.secret=$TEST_SECRET", "ws.watchlist.reconcile-interval=1h"],
 )
 @Testcontainers(disabledWithoutDocker = true)
 class WsIntegrationTest {
     companion object {
+        private val snapshots = ConcurrentHashMap<Long, WatchlistUpdated>()
+        private val mapper = jacksonObjectMapper()
+        private val api = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {
+            createContext(WatchlistSnapshots.PATH) { request ->
+                request.use {
+                    if (request.requestMethod != "POST" ||
+                        request.requestHeaders.getFirst(WatchlistSnapshots.KEY_HEADER) != "test-key"
+                    ) {
+                        request.sendResponseHeaders(401, -1)
+                        return@createContext
+                    }
+                    val body = mapper.readValue<WatchlistSnapshotRequest>(request.requestBody)
+                    val response = mapper.writeValueAsBytes(
+                        body.userIds.filterNotNull().map { snapshots[it] ?: WatchlistUpdated(it, 0, emptyList()) },
+                    )
+                    request.responseHeaders.set("Content-Type", "application/json")
+                    request.sendResponseHeaders(200, response.size.toLong())
+                    request.responseBody.write(response)
+                }
+            }
+            start()
+        }
+
+        @DynamicPropertySource
+        @JvmStatic
+        fun apiProperties(registry: DynamicPropertyRegistry) {
+            registry.add("ALPHATALK_WATCHLIST_CORE_API_URL") { "http://127.0.0.1:${api.address.port}" }
+            registry.add("ALPHATALK_WATCHLIST_INTERNAL_KEY") { "test-key" }
+        }
+
+        @AfterAll
+        @JvmStatic
+        fun stopApi() = api.stop(0)
+
         @Container
         @ServiceConnection
         @JvmStatic
@@ -52,6 +97,9 @@ class WsIntegrationTest {
 
     @Autowired
     private lateinit var redisTemplate: StringRedisTemplate
+
+    @Autowired
+    private lateinit var redisListener: RedisMessageListenerContainer
 
     @Autowired
     private lateinit var subProtocolWebSocketHandler: SubProtocolWebSocketHandler
@@ -66,6 +114,7 @@ class WsIntegrationTest {
     fun cleanup() {
         sessions.forEach { runCatching { it.disconnect() } }
         sessions.clear()
+        snapshots.clear()
         redisTemplate.execute { connection -> connection.serverCommands().flushAll() }
     }
 
@@ -112,7 +161,7 @@ class WsIntegrationTest {
 
     @Test
     fun `관심목록 quote relay - 접속하면 관심 종목 틱이 user queue로 온다`() {
-        redisTemplate.opsForSet().add(Keys.watchlist(1L), "005930")
+        snapshots[1L] = WatchlistUpdated(1, 1, listOf("005930"))
 
         val session = connect(1L)
         val received = subscribeQueue(session, Destinations.USER_QUEUE_QUOTE)
@@ -148,7 +197,7 @@ class WsIntegrationTest {
 
     @Test
     fun `watchlist updated - 재접속 없이 새 종목 틱이 흐른다 (FR-03)`() {
-        redisTemplate.opsForSet().add(Keys.watchlist(3L), "005930")
+        snapshots[3L] = WatchlistUpdated(3, 1, listOf("005930"))
         val session = connect(3L)
         val received = subscribeQueue(session, Destinations.USER_QUEUE_QUOTE)
 
@@ -160,7 +209,7 @@ class WsIntegrationTest {
 
         redisTemplate.convertAndSend(
             Channels.WATCHLIST_UPDATED,
-            """{"userId":3,"added":["000660"],"removed":[],"ts":1}""",
+            """{"userId":3,"rev":3,"codes":["000660"]}""",
         )
 
         val message = publishUntilReceived(
@@ -169,6 +218,54 @@ class WsIntegrationTest {
             received,
         )
         assertThat(message).contains(""""code":"000660"""")
+    }
+
+    @Test
+    fun `Redis resubscription reloads a missed snapshot without client reconnect`() {
+        snapshots[7L] = WatchlistUpdated(7, 1, listOf("005930"))
+        val session = connect(7L)
+        val received = subscribeQueue(session, Destinations.USER_QUEUE_QUOTE)
+        publishUntilReceived(Channels.quote("005930"), """{"type":"quote","code":"005930","ts":1,"data":{}}""", received)
+        received.clear()
+
+        redisListener.stop()
+        try {
+            val updated = WatchlistUpdated(7, 2, listOf("000660"))
+            snapshots[7L] = updated
+            redisTemplate.convertAndSend(Channels.WATCHLIST_UPDATED, mapper.writeValueAsString(updated))
+        } finally {
+            redisListener.start()
+        }
+
+        val message = publishUntilReceived(
+            Channels.quote("000660"),
+            """{"type":"quote","code":"000660","ts":2,"data":{}}""",
+            received,
+        )
+        assertThat(message).contains("000660")
+        assertThat(session.isConnected).isTrue()
+    }
+
+    @Test
+    fun `Lettuce reconnect reloads the active watchlist`() {
+        snapshots[8L] = WatchlistUpdated(8, 1, listOf("005930"))
+        val session = connect(8L)
+        val received = subscribeQueue(session, Destinations.USER_QUEUE_QUOTE)
+        publishUntilReceived(Channels.quote("005930"), """{"type":"quote","code":"005930","ts":1,"data":{}}""", received)
+        received.clear()
+
+        snapshots[8L] = WatchlistUpdated(8, 2, listOf("000660"))
+        val disconnected = redis.execInContainer("redis-cli", "CLIENT", "KILL", "TYPE", "pubsub")
+        assertThat(disconnected.exitCode).isZero()
+        assertThat(disconnected.stdout.trim().toInt()).isPositive()
+
+        val message = publishUntilReceived(
+            Channels.quote("000660"),
+            """{"type":"quote","code":"000660","ts":2,"data":{}}""",
+            received,
+        )
+        assertThat(message).contains("000660")
+        assertThat(session.isConnected).isTrue()
     }
 
     @Test

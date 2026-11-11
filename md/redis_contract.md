@@ -1,4 +1,6 @@
-# Alpha Talk — Redis 계약 (`:contracts`) v0.23
+# Alpha Talk — Redis 계약 (`:contracts`) v0.24
+
+> v0.24 (2026-11-11): `watchlist:updated`는 DB 커밋 후 발행하는 전체 관심목록 스냅샷이다. 기존 diff 이벤트와 미러 키를 폐기한다. 배포 시 core-api와 WS를 함께 전환한다.
 
 > v0.23 (2026-08-18): **기사 적재도 다이제스트와 같은 단일 실행 규약으로 통일한다(§2.1).** 기사 경로는 `SETNX seen:ingest` 마커를 먼저 기록하고 XADD 실패 시 마커를 지우는 보상 방식이었는데, 마커 기록과 보상이 같은 Redis라 보상이 필요한 순간(마커 성공 직후의 과도기 장애)에는 보상도 함께 실패하기 쉽다 — 그 순서로 죽으면 기사가 마커 TTL 7일 동안 유실된다. 이제 모든 `queue:ingest` 적재(기사·다이제스트)가 마커 확인 → `XADD` → 마커 기록의 Redis 단일 실행 하나를 공유한다. 실패는 "마커 없음(다음 폴링이 재시도)" 또는 "중복 XADD(소비 측 `sourceId` 멱등이 흡수)"로만 떨어지고, 마커만 남고 엔트리가 유실되는 순서는 사라진다. 와이어 스키마·키 추가 없음.
 
@@ -72,7 +74,7 @@ Redis를 세 가지 용도로 쓴다. **이름이 비슷해도 메커니즘이 �
 - `{code}` = 종목코드(예: `005930`). **유저로 키하지 않는다** — 채널 수는 종목 수(~2,600)로 고정되고 유저 수와 무관하다.
 - 같은 종목을 N명이 봐도 게이트웨이는 채널을 **한 번만 구독**하고 N명에게 fan-out한다(중복 제거).
 - 유저별 채널을 만들면 채널이 폭증하므로 `watchlist:updated`만 **단일 전역 채널 + broadcast-and-filter**다. 발행 빈도가 낮아 전원 수신·필터로 충분하다.
-- 게이트웨이는 `watchlist:updated`의 diff를 멱등 적용한다. 이미 들어 있는 코드의 `added`와 들어 있지 않은 코드의 `removed`를 허용하며, 이런 중복 diff는 세션 구독이나 수요 refcount를 중복 변경하지 않는다.
+- 게이트웨이는 `watchlist:updated`의 전체 목록을 현재 목록과 비교하여 수요를 조정한다. 이미 적용한 rev 이하인 이벤트는 무시한다.
 
 ### 1.2 메시지 스키마 (Pub/Sub payload)
 
@@ -86,7 +88,7 @@ Redis를 세 가지 용도로 쓴다. **이름이 비슷해도 메커니즘이 �
 - 타입별 `data`는 WS API 명세 §4.2~4.5와 동일.
   `watchlist:updated` payload (예외 — 봉투 아님):
 ```json
-{ "userId": 123, "added": ["005930"], "removed": ["000660"], "ts": 1719600000000 }
+{ "userId": 123, "rev": 14, "codes": ["005930"] }
 ```
 
 ### 1.3 수요 신호 채널 `demand:updated` — 게이트웨이 → worker-price (v0.21)
@@ -183,8 +185,6 @@ ingest-worker 스케줄러(싱글턴)가 매일 적재하고 — 종목 잡은 1
 | `price:{code}` | Hash/String | 현재가 last-value 캐시(스냅샷) | price-worker | 메인서버(REST 현재가) | 갱신/없음 |
 | `presence:{userId}` | Set(+멤버 TTL) | 접속 세션 집합(멀티디바이스) | 게이트웨이 | 게이트웨이 | 하트비트로 갱신 |
 | `cursor:{userId}:{code}` | String | 마지막 읽은 `eventId`(읽음 위치) — **fast path 미러**, 진실은 DB `read_cursor` | 메인서버(REST) | 메인서버 | **1일** — 쓰기·재적재 시 갱신. 미러 SET 실패로 stale해져도 TTL 만료 후 DB에서 재적재되어 자가 치유 |
-| `watchlist:{userId}` | Set | 관심목록 미러 — 게이트웨이 CONNECT 시 해소용 (진실은 메인서버 DB) | 메인서버 | 게이트웨이 | 없음 |
-| `watchlist:rev:{userId}` | String | 미러 최신성 판정 rev — 이보다 새 rev의 동기화만 미러를 교체·발행 (메인서버 전용) | 메인서버 | 메인서버 | 없음 |
 | `seen:ingest:{sourceId}` | String | 적재 중복 제거 마커 — 기사 sourceId뿐 아니라 일일 다이제스트 잡(`digest:{code}:{date}`)도 같은 마커로 하루 1회를 고정한다(뉴스 워커 명세 §4.1) | ingest/llm-worker | ingest/llm-worker | 며칠 |
 | `lock:cluster:{code}` | String (`SET NX PX 3000`) | 뉴스 클러스터 판정 직렬화 락(뉴스 워커 명세 §3.3) | llm-worker | llm-worker | 3초 |
 | `rate:article-fetch:{host}` | String (`SET PX`) | robots.txt·원문 fetch의 호스트별 다음 요청 간격을 llm-worker 인스턴스 간 직렬화 | llm-worker | llm-worker | 요청 간격(기본 1초) |
@@ -224,8 +224,6 @@ ingest-worker 스케줄러(싱글턴)가 매일 적재하고 — 종목 잡은 1
 | `price:{code}` (자료구조) | **WRITE** | — | — | — | READ | — |
 | `presence:{userId}` (자료구조) | — | — | — | — | — | **WRITE/READ** |
 | `cursor:{userId}:{code}` | — | — | — | — | **WRITE/READ** | — |
-| `watchlist:{userId}` (자료구조) | — | — | — | — | **WRITE** | **READ** |
-| `watchlist:rev:{userId}` (자료구조) | — | — | — | — | **WRITE/READ** | — |
 | `seen:ingest:{sourceId}` | — | — | WRITE | WRITE/READ | — | — |
 | `lock:cluster:{code}` | — | — | — | **WRITE/READ** | — | — |
 | `rate:article-fetch:{host}` | — | — | — | **WRITE/READ** | — | — |

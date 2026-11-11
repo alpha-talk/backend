@@ -5,12 +5,6 @@ import kotlin.test.assertEquals
 
 class KeysQueuesTest {
     @Test
-    fun `관심목록 미러 키 생성 - Redis 계약 §3`() {
-        assertEquals("watchlist:123", Keys.watchlist(123))
-        assertEquals("watchlist:rev:123", Keys.watchlistRev(123))
-    }
-
-    @Test
     fun `게이트웨이 수요 키 생성 - Redis 계약 §3`() {
         assertEquals("gw:alive:a3f9c2b1d4e6", Keys.gwAlive("a3f9c2b1d4e6"))
         assertEquals("gw:alive:", Keys.GW_ALIVE_PREFIX)

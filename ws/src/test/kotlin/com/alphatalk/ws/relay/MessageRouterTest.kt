@@ -1,6 +1,9 @@
 package com.alphatalk.ws.relay
 
 import com.alphatalk.contracts.ChannelKind
+import com.alphatalk.contracts.envelope.WatchlistUpdated
+import com.alphatalk.ws.subscription.WatchlistTarget
+import com.alphatalk.ws.watchlist.WatchlistRefresh
 import com.alphatalk.ws.client.ClientMessageSink
 import com.alphatalk.ws.subscription.DemandMutator
 import com.alphatalk.ws.subscription.DemandQuery
@@ -35,20 +38,20 @@ class MessageRouterTest {
         override fun usersWatching(code: String) = watchers[code] ?: emptySet()
         override fun roomHasQuoteViewers(code: String) = code in roomQuoteCodes
         override fun isUserConnected(userId: Long) = watchers.values.any { userId in it }
-        override fun needsWatchlist(sessionId: String) = false
+        override fun watchlistTargets() = emptyList<WatchlistTarget>()
         override fun connectedUserIds() = watchers.values.flatten().toSet()
         override fun connectedSessionCount() = 0
     }
 
     private class RecordingMutator : DemandMutator {
-        val diffs = mutableListOf<Triple<Long, Collection<String>, Collection<String>>>()
+        val snapshots = mutableListOf<WatchlistUpdated>()
         override fun registerSession(sessionId: String, userId: Long) = Unit
-        override fun attachWatchlist(sessionId: String, watchlist: Set<String>) = Unit
+        override fun startWatchlist(sessionId: String): WatchlistTarget? = null
         override fun removeSession(sessionId: String) = Unit
         override fun subscribeRoom(sessionId: String, subscriptionId: String, kind: ChannelKind, code: String) = Unit
         override fun unsubscribeById(sessionId: String, subscriptionId: String) = Unit
-        override fun applyWatchlistDiff(userId: Long, added: Collection<String>, removed: Collection<String>) {
-            diffs += Triple(userId, added, removed)
+        override fun applyWatchlist(snapshot: WatchlistUpdated, target: WatchlistTarget?) {
+            snapshots += snapshot
         }
     }
 
@@ -63,7 +66,8 @@ class MessageRouterTest {
             PostRelayHandler(sink, objectMapper, meterRegistry),
             WatchlistUpdateHandler(mutator, objectMapper, meterRegistry),
         )
-        return MessageRouter(handlers, meterRegistry)
+        val refresh = WatchlistRefresh(demand, mutator, { emptyList() }, { it.run() }, meterRegistry)
+        return MessageRouter(handlers, meterRegistry, refresh)
     }
 
     private fun redisMessage(channel: String, body: String) =
@@ -127,11 +131,11 @@ class MessageRouterTest {
     }
 
     @Test
-    fun `watchlist updated - diff 적용 위임`() {
-        val body = """{"userId":1,"added":["000660"],"removed":["005930"],"ts":1}"""
+    fun `watchlist updated - 스냅샷 적용 위임`() {
+        val body = """{"userId":1,"rev":14,"codes":["000660"]}"""
         router().onMessage(redisMessage("watchlist:updated", body), null)
 
-        assertThat(mutator.diffs).containsExactly(Triple(1L, listOf("000660"), listOf("005930")))
+        assertThat(mutator.snapshots).containsExactly(WatchlistUpdated(1, 14, listOf("000660")))
     }
 
     @Test
