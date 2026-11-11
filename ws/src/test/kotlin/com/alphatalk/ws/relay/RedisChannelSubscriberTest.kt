@@ -1,41 +1,69 @@
 package com.alphatalk.ws.relay
 
-import com.alphatalk.contracts.envelope.WatchlistUpdated
+import com.alphatalk.contracts.ChannelKind
+import com.alphatalk.contracts.Channels
 import com.alphatalk.ws.subscription.DemandRegistry
 import com.alphatalk.ws.subscription.DemandSyncTrigger
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import org.assertj.core.api.Assertions.assertThat
+import org.awaitility.Awaitility.await
 import org.junit.jupiter.api.Test
 import org.mockito.Mockito
-import org.springframework.beans.factory.ObjectProvider
+import org.springframework.beans.factory.support.DefaultListableBeanFactory
 import org.springframework.data.redis.listener.ChannelTopic
 import org.springframework.data.redis.listener.RedisMessageListenerContainer
+import java.time.Duration
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 class RedisChannelSubscriberTest {
     @Test
-    fun `a failed subscription is retried while the remaining snapshot is applied`() {
+    fun `blocked Redis subscribe does not delay other demand changes and latest state wins`() {
         val container = Mockito.mock(RedisMessageListenerContainer::class.java)
         val router = Mockito.mock(MessageRouter::class.java)
-        @Suppress("UNCHECKED_CAST")
-        val provider = Mockito.mock(ObjectProvider::class.java) as ObjectProvider<MessageRouter>
-        Mockito.`when`(provider.getObject()).thenReturn(router)
-        val meters = SimpleMeterRegistry()
-        val subscriber = RedisChannelSubscriber(container, provider, meters) { it.run() }
+        val beans = DefaultListableBeanFactory().apply { registerSingleton("router", router) }
+        val subscriber = RedisChannelSubscriber(container, beans.getBeanProvider(MessageRouter::class.java), SimpleMeterRegistry())
         val registry = DemandRegistry(subscriber, DemandSyncTrigger())
-        val failedTopic = ChannelTopic("quote:005930")
-        Mockito.doThrow(IllegalStateException("offline")).doNothing()
-            .`when`(container).addMessageListener(router, failedTopic)
-        registry.registerSession("s1", 1L)
-        registry.startWatchlist("s1")
+        val enteredRedis = CountDownLatch(1)
+        val releaseRedis = CountDownLatch(1)
+        val firstChannel = ChannelTopic(Channels.quote("005930"))
+        val secondChannel = ChannelTopic(Channels.quote("000660"))
+        Mockito.`when`(container.isListening).thenReturn(true)
+        Mockito.doAnswer {
+            enteredRedis.countDown()
+            check(releaseRedis.await(5, TimeUnit.SECONDS))
+            null
+        }.`when`(container).addMessageListener(router, listOf(firstChannel))
 
-        registry.applyWatchlist(WatchlistUpdated(1, 1, listOf("005930", "000660")))
-        subscriber.retryFailedSubscriptions()
+        subscriber.start()
+        try {
+            registry.registerSession("first", 1L)
+            registry.registerSession("second", 2L)
+            registry.subscribeRoom("first", "quote", ChannelKind.QUOTE, "005930")
+            assertThat(enteredRedis.await(3, TimeUnit.SECONDS)).isTrue()
 
-        Mockito.verify(container, Mockito.times(2)).addMessageListener(router, failedTopic)
-        Mockito.verify(container).addMessageListener(router, ChannelTopic("stream:005930"))
-        Mockito.verify(container).addMessageListener(router, ChannelTopic("quote:000660"))
-        Mockito.verify(container).addMessageListener(router, ChannelTopic("stream:000660"))
-        assertThat(registry.usersWatching("000660")).containsExactly(1L)
-        assertThat(meters.counter("ws.relay.subscription.failures").count()).isEqualTo(1.0)
+            Executors.newSingleThreadExecutor().use { client ->
+                val update = client.submit {
+                    registry.subscribeRoom("second", "quote", ChannelKind.QUOTE, "000660")
+                    registry.removeSession("first")
+                }
+                try {
+                    update.get(1, TimeUnit.SECONDS)
+                    assertThat(registry.isUserConnected(1L)).isFalse()
+                } finally {
+                    releaseRedis.countDown()
+                }
+            }
+
+            await().atMost(Duration.ofSeconds(3)).untilAsserted {
+                Mockito.verify(container).addMessageListener(router, listOf(secondChannel))
+                Mockito.verify(container).removeMessageListener(router, listOf(firstChannel))
+                assertThat(subscriber.subscribedCount()).isEqualTo(1)
+            }
+        } finally {
+            releaseRedis.countDown()
+            subscriber.stop()
+        }
     }
 }

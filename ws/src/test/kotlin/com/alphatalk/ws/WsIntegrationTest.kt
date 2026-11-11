@@ -6,11 +6,13 @@ import com.alphatalk.contracts.Destinations
 import com.alphatalk.contracts.WatchlistSnapshotRequest
 import com.alphatalk.contracts.WatchlistSnapshots
 import com.alphatalk.contracts.envelope.WatchlistUpdated
+import com.alphatalk.ws.relay.ChannelSubscriber
 import com.alphatalk.ws.watchlist.WatchlistResolver
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.fasterxml.jackson.module.kotlin.readValue
 import com.sun.net.httpserver.HttpServer
 import feign.RetryableException
+import io.micrometer.core.instrument.MeterRegistry
 import org.junit.jupiter.api.AfterAll
 import org.springframework.test.context.DynamicPropertyRegistry
 import org.springframework.test.context.DynamicPropertySource
@@ -114,6 +116,12 @@ class WsIntegrationTest {
 
     @Autowired
     private lateinit var redisListener: RedisMessageListenerContainer
+
+    @Autowired
+    private lateinit var channelSubscriber: ChannelSubscriber
+
+    @Autowired
+    private lateinit var meters: MeterRegistry
 
     @Autowired
     private lateinit var watchlistResolver: WatchlistResolver
@@ -276,6 +284,41 @@ class WsIntegrationTest {
         )
         assertThat(message).contains("000660")
         assertThat(session.isConnected).isTrue()
+    }
+
+    @Test
+    fun `failed Redis unsubscribe rebuilds the connection and clears the remote subscription`() {
+        val channel = Channels.quote("123456")
+        val failures = meters.counter("ws.relay.subscription.failures")
+        val before = failures.count()
+
+        fun subscriptions(name: String): Int {
+            val result = redis.execInContainer("redis-cli", "--raw", "PUBSUB", "NUMSUB", name)
+            assertThat(result.exitCode).isZero()
+            return result.stdout.trim().lineSequence().last().toInt()
+        }
+
+        fun allowUnsubscribe(allowed: Boolean) {
+            val command = if (allowed) "+unsubscribe" else "-unsubscribe"
+            val result = redis.execInContainer("redis-cli", "ACL", "SETUSER", "default", command)
+            assertThat(result.stdout.trim()).isEqualTo("OK")
+        }
+
+        channelSubscriber.subscribe(channel)
+        await().atMost(Duration.ofSeconds(5)).until { subscriptions(channel) == 1 }
+        try {
+            allowUnsubscribe(false)
+            channelSubscriber.unsubscribe(channel)
+            await().atMost(Duration.ofSeconds(4)).until { failures.count() > before }
+            assertThat(subscriptions(channel)).isEqualTo(1)
+        } finally {
+            allowUnsubscribe(true)
+            channelSubscriber.unsubscribe(channel)
+        }
+
+        await().atMost(Duration.ofSeconds(10)).until {
+            subscriptions(channel) == 0 && subscriptions(Channels.WATCHLIST_UPDATED) == 1
+        }
     }
 
     @Test
