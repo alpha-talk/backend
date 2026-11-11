@@ -14,10 +14,17 @@ kotlin {
 
 extra["kotlin.version"] = libs.versions.kotlin.get()
 
+dependencyManagement {
+    imports {
+        mavenBom(libs.spring.cloud.bom.get().toString())
+    }
+}
+
 dependencies {
     implementation(project(":contracts"))
     implementation(project(":auth-jwt"))
 
+    implementation(libs.spring.cloud.openfeign)
     implementation("org.springframework.boot:spring-boot-starter-websocket")
     implementation("org.springframework.boot:spring-boot-starter-data-redis")
     implementation("org.springframework.boot:spring-boot-starter-actuator")

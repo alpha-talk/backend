@@ -6,20 +6,26 @@ import com.alphatalk.contracts.Destinations
 import com.alphatalk.contracts.WatchlistSnapshotRequest
 import com.alphatalk.contracts.WatchlistSnapshots
 import com.alphatalk.contracts.envelope.WatchlistUpdated
+import com.alphatalk.ws.watchlist.WatchlistResolver
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.fasterxml.jackson.module.kotlin.readValue
 import com.sun.net.httpserver.HttpServer
+import feign.RetryableException
 import org.junit.jupiter.api.AfterAll
 import org.springframework.test.context.DynamicPropertyRegistry
 import org.springframework.test.context.DynamicPropertySource
 import org.springframework.data.redis.listener.RedisMessageListenerContainer
 import java.net.InetSocketAddress
+import java.net.SocketTimeoutException
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.atomic.AtomicInteger
 import org.assertj.core.api.Assertions.assertThat
 import org.awaitility.Awaitility.await
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
+import org.junit.jupiter.api.assertTimeoutPreemptively
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.beans.factory.annotation.Qualifier
 import org.springframework.boot.test.context.SpringBootTest
@@ -52,6 +58,9 @@ import java.util.concurrent.TimeUnit
 @Testcontainers(disabledWithoutDocker = true)
 class WsIntegrationTest {
     companion object {
+        private const val SLOW_API_USER_ID = 100L
+        private val slowRequestCount = AtomicInteger()
+        private val releaseSlowResponse = CountDownLatch(1)
         private val snapshots = ConcurrentHashMap<Long, WatchlistUpdated>()
         private val mapper = jacksonObjectMapper()
         private val api = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {
@@ -64,6 +73,11 @@ class WsIntegrationTest {
                         return@createContext
                     }
                     val body = mapper.readValue<WatchlistSnapshotRequest>(request.requestBody)
+                    if (body.userIds == listOf(SLOW_API_USER_ID)) {
+                        slowRequestCount.incrementAndGet()
+                        releaseSlowResponse.await(5, TimeUnit.SECONDS)
+                        return@createContext
+                    }
                     val response = mapper.writeValueAsBytes(
                         body.userIds.filterNotNull().map { snapshots[it] ?: WatchlistUpdated(it, 0, emptyList()) },
                     )
@@ -100,6 +114,9 @@ class WsIntegrationTest {
 
     @Autowired
     private lateinit var redisListener: RedisMessageListenerContainer
+
+    @Autowired
+    private lateinit var watchlistResolver: WatchlistResolver
 
     @Autowired
     private lateinit var subProtocolWebSocketHandler: SubProtocolWebSocketHandler
@@ -157,6 +174,21 @@ class WsIntegrationTest {
             message != null
         }
         return message!!
+    }
+
+    @Test
+    fun `watchlist HTTP read times out without retrying the request`() {
+        try {
+            assertTimeoutPreemptively(Duration.ofSeconds(4)) {
+                val failure = assertThrows<RetryableException> {
+                    watchlistResolver.resolve(listOf(SLOW_API_USER_ID))
+                }
+                assertThat(failure).hasCauseInstanceOf(SocketTimeoutException::class.java)
+                assertThat(slowRequestCount.get()).isEqualTo(1)
+            }
+        } finally {
+            releaseSlowResponse.countDown()
+        }
     }
 
     @Test

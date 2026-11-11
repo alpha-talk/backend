@@ -184,7 +184,7 @@ SOLID는 이음새가 있는 곳의 도구다. 이음새가 없는데 인터페�
 | 타입 | 종류 | 계약 (구현이 반드시 지킬 것) |
 |---|---|---|
 | `WatchlistResolver` | **포트** | `resolve(userIds): List<WatchlistUpdated>`. 성공 시 요청 유저별 스냅샷 하나, 미변경 유저 rev 0과 빈 목록. I/O 실패는 예외 |
-| `HttpWatchlistResolver` | 구현 | 내부 조회 API. 연결·응답 타임아웃 설정 |
+| `HttpWatchlistResolver` | 구현 | `WatchlistSnapshotClient`(Spring Cloud OpenFeign)로 내부 API를 호출한다. 연결·읽기 타임아웃은 각각 1초이며 조회 실패는 기존 재검증 경로에서 복구한다. |
 | `PresenceRegistry` | **포트** | `add(userId, sessionId)`/`remove(...)`/`refresh(...)`. 멱등 |
 | `RedisPresenceService` | 구현 | `SADD/SREM presence:{userId}` + TTL. 주기 스케줄러가 활성 세션 TTL 연장 |
 | `WsMetrics` | 구현 | Micrometer 게이지/카운터 (계획서 §4.9) |

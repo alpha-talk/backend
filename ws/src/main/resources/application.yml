@@ -6,6 +6,14 @@ spring:
       host: ${REDIS_HOST:localhost}
       port: ${REDIS_PORT:6379}
       timeout: 1s
+  cloud:
+    openfeign:
+      client:
+        config:
+          watchlist-snapshots:
+            connect-timeout: 1000
+            read-timeout: 1000
+            follow-redirects: false
   lifecycle:
     timeout-per-shutdown-phase: 10s
 
