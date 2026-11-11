@@ -2,6 +2,7 @@ package com.alphatalk.ws.subscription
 
 import com.alphatalk.contracts.ChannelKind
 import com.alphatalk.contracts.Channels
+import com.alphatalk.contracts.envelope.WatchlistUpdated
 import com.alphatalk.ws.relay.ChannelSubscriber
 import org.springframework.stereotype.Component
 import java.util.concurrent.ConcurrentHashMap
@@ -21,24 +22,16 @@ class DemandRegistry(
 
     private data class RoomSub(val kind: ChannelKind, val code: String)
 
-    private class PendingDiff {
-        val added = HashSet<String>()
-        val removed = HashSet<String>()
-
-        fun apply(add: Collection<String>, remove: Collection<String>) {
-            added -= remove
-            removed -= add
-            added += add
-            removed += remove
-        }
+    private class ActiveWatchlist(val target: WatchlistTarget) {
+        var rev = -1L
+        var codes: Set<String> = emptySet()
     }
 
     private val lock = ReentrantLock()
 
     private val sessions = HashMap<String, SessionInfo>()
     private val userSessions = HashMap<Long, MutableSet<String>>()
-    private val userWatchlists = HashMap<Long, MutableSet<String>>()
-    private val pendingDiffs = HashMap<Long, PendingDiff>()
+    private val userWatchlists = HashMap<Long, ActiveWatchlist>()
     private val roomIndex = HashMap<Pair<ChannelKind, String>, Int>()
 
     private val watchlistIndex = ConcurrentHashMap<String, Set<Long>>()
@@ -57,9 +50,8 @@ class DemandRegistry(
 
     override fun isUserConnected(userId: Long): Boolean = lock.withLock { userId in userSessions }
 
-    override fun needsWatchlist(sessionId: String): Boolean = lock.withLock {
-        val info = sessions[sessionId] ?: return false
-        info.userId !in userWatchlists
+    override fun watchlistTargets(): List<WatchlistTarget> = lock.withLock {
+        userWatchlists.values.map { it.target }
     }
 
     override fun connectedUserIds(): Set<Long> = lock.withLock { userSessions.keys.toSet() }
@@ -74,18 +66,12 @@ class DemandRegistry(
         }
     }
 
-    override fun attachWatchlist(sessionId: String, watchlist: Set<String>) {
-        lock.withLock {
-            val info = sessions[sessionId] ?: return
-            if (info.userId in userWatchlists) return
-            val merged = watchlist.toMutableSet()
-            pendingDiffs.remove(info.userId)?.let { pending ->
-                merged += pending.added
-                merged -= pending.removed
-            }
-            userWatchlists[info.userId] = merged
-            merged.forEach { addUserToCode(it, info.userId) }
-        }
+    override fun startWatchlist(sessionId: String): WatchlistTarget? = lock.withLock {
+        val info = sessions[sessionId] ?: return null
+        if (info.userId in userWatchlists) return null
+        val target = WatchlistTarget(info.userId, sessionId)
+        userWatchlists[info.userId] = ActiveWatchlist(target)
+        target
     }
 
     override fun removeSession(sessionId: String) {
@@ -95,8 +81,7 @@ class DemandRegistry(
             val remaining = userSessions[info.userId]?.apply { remove(sessionId) }
             if (remaining.isNullOrEmpty()) {
                 userSessions.remove(info.userId)
-                pendingDiffs.remove(info.userId)
-                userWatchlists.remove(info.userId)?.forEach { removeUserFromCode(it, info.userId) }
+                userWatchlists.remove(info.userId)?.codes?.forEach { removeUserFromCode(it, info.userId) }
             }
         }
     }
@@ -135,19 +120,17 @@ class DemandRegistry(
         }
     }
 
-    override fun applyWatchlistDiff(userId: Long, added: Collection<String>, removed: Collection<String>) {
+    override fun applyWatchlist(snapshot: WatchlistUpdated, target: WatchlistTarget?) {
         lock.withLock {
-            if (userId !in userSessions) return
-            val watchlist = userWatchlists[userId] ?: run {
-                pendingDiffs.getOrPut(userId) { PendingDiff() }.apply(added, removed)
-                return
-            }
-            added.forEach { code ->
-                if (watchlist.add(code)) addUserToCode(code, userId)
-            }
-            removed.forEach { code ->
-                if (watchlist.remove(code)) removeUserFromCode(code, userId)
-            }
+            val watchlist = userWatchlists[snapshot.userId] ?: return
+            if (target != null && target != watchlist.target) return
+            if (snapshot.rev <= watchlist.rev) return
+
+            val codes = snapshot.codes.toSet()
+            (codes - watchlist.codes).forEach { addUserToCode(it, snapshot.userId) }
+            (watchlist.codes - codes).forEach { removeUserFromCode(it, snapshot.userId) }
+            watchlist.codes = codes
+            watchlist.rev = snapshot.rev
         }
     }
 
@@ -194,4 +177,5 @@ class DemandRegistry(
             roomIndex[key] = count - 1
         }
     }
+
 }

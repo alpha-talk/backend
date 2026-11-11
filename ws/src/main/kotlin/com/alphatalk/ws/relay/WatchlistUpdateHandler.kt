@@ -27,6 +27,6 @@ class WatchlistUpdateHandler(
             log.warn("watchlist:updated parse failed, dropped")
             return
         }
-        demand.applyWatchlistDiff(update.userId, update.added, update.removed)
+        demand.applyWatchlist(update)
     }
 }

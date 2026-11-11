@@ -2,6 +2,9 @@ package com.alphatalk.ws.subscription
 
 import com.alphatalk.contracts.ChannelKind
 import com.alphatalk.contracts.Destinations
+import com.alphatalk.contracts.envelope.WatchlistUpdated
+import com.alphatalk.ws.watchlist.WatchlistRefresh
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import com.alphatalk.ws.auth.StompPrincipal
 import com.alphatalk.ws.presence.PresenceRegistry
 import com.alphatalk.ws.watchlist.WatchlistResolver
@@ -28,15 +31,12 @@ class SessionEventListenerTest {
             sessionUsers[sessionId] = userId
         }
 
-        override fun attachWatchlist(sessionId: String, watchlist: Set<String>) {
-            attachCalls += sessionId to watchlist
-            sessionUsers[sessionId]?.let { attachedUsers += it }
+        override fun startWatchlist(sessionId: String): WatchlistTarget? {
+            val userId = sessionUsers[sessionId] ?: return null
+            return if (attachedUsers.add(userId)) WatchlistTarget(userId, sessionId) else null
         }
 
-        override fun needsWatchlist(sessionId: String): Boolean {
-            val userId = sessionUsers[sessionId] ?: return false
-            return userId !in attachedUsers
-        }
+        override fun watchlistTargets() = emptyList<WatchlistTarget>()
 
         override fun subscribeRoom(sessionId: String, subscriptionId: String, kind: ChannelKind, code: String) {
             roomCalls += sessionId to kind
@@ -44,7 +44,9 @@ class SessionEventListenerTest {
 
         override fun removeSession(sessionId: String) = Unit
         override fun unsubscribeById(sessionId: String, subscriptionId: String) = Unit
-        override fun applyWatchlistDiff(userId: Long, added: Collection<String>, removed: Collection<String>) = Unit
+        override fun applyWatchlist(snapshot: WatchlistUpdated, target: WatchlistTarget?) {
+            attachCalls += requireNotNull(target).generation to snapshot.codes.toSet()
+        }
         override fun usersWatching(code: String) = emptySet<Long>()
         override fun roomHasQuoteViewers(code: String) = false
         override fun isUserConnected(userId: Long) = false
@@ -62,11 +64,11 @@ class SessionEventListenerTest {
         override fun refresh(userIds: Collection<Long>) = Unit
     }
 
-    private class CountingResolver(private val delegate: WatchlistResolver) : WatchlistResolver {
+    private class CountingResolver(private val codes: () -> Set<String>) : WatchlistResolver {
         var invocations = 0
-        override fun resolve(userId: Long): Set<String> {
+        override fun resolve(userIds: List<Long>): List<WatchlistUpdated> {
             invocations++
-            return delegate.resolve(userId)
+            return userIds.map { WatchlistUpdated(it, 1, codes().toList()) }
         }
     }
 
@@ -74,7 +76,7 @@ class SessionEventListenerTest {
     private val presence = RecordingPresence()
 
     private fun listener(resolver: WatchlistResolver) =
-        SessionEventListener(demand, demand, resolver, presence)
+        SessionEventListener(demand, WatchlistRefresh(demand, demand, resolver, { it.run() }, SimpleMeterRegistry()), presence)
 
     private fun stompMessage(command: StompCommand, sessionId: String, destination: String? = null): Message<ByteArray> {
         val accessor = StompHeaderAccessor.create(command)
@@ -156,14 +158,14 @@ class SessionEventListenerTest {
     }
 
     @Test
-    fun `resolve 실패 - 빈 관심목록으로 attach하고 세션은 계속`() {
+    fun `resolve 실패 - 목록은 적용하지 않고 세션은 계속`() {
         val resolver = CountingResolver { throw IllegalStateException("redis down") }
         val target = listener(resolver)
 
         target.onConnected(connectedEvent("s1", 1L))
         target.onSubscribe(subscribeEvent("s1", 1L, Destinations.USER_QUEUE_QUOTE))
 
-        assertThat(demand.attachCalls).containsExactly("s1" to emptySet<String>())
+        assertThat(demand.attachCalls).isEmpty()
     }
 
     @Test

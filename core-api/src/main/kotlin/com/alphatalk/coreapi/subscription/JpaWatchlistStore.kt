@@ -1,6 +1,7 @@
 package com.alphatalk.coreapi.subscription
 
 import com.alphatalk.coreapi.search.StockCatalog
+import com.alphatalk.contracts.envelope.WatchlistUpdated
 import jakarta.persistence.Column
 import jakarta.persistence.Entity
 import jakarta.persistence.Id
@@ -13,6 +14,8 @@ import org.hibernate.type.SqlTypes
 import org.springframework.data.jpa.repository.JpaRepository
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Repository
+import org.springframework.transaction.annotation.Isolation
+import org.springframework.transaction.annotation.Transactional
 import java.io.Serializable
 import java.time.Instant
 
@@ -49,6 +52,8 @@ class WatchlistRevisionEntity(
 
 interface WatchlistJpaRepository : JpaRepository<WatchlistEntity, WatchlistId> {
     fun findByUserIdOrderByCreatedAtDescCodeAsc(userId: Long): List<WatchlistEntity>
+
+    fun findByUserIdIn(userIds: Collection<Long>): List<WatchlistEntity>
 
     fun existsByUserIdAndCode(userId: Long, code: String): Boolean
 
@@ -109,5 +114,20 @@ class JpaWatchlistStore(
         revision.rev += 1
         revisions.save(revision)
         return revision.rev
+    }
+}
+
+@Repository
+class WatchlistSnapshotReader(
+    private val watchlist: WatchlistJpaRepository,
+    private val revisions: WatchlistRevisionJpaRepository,
+) {
+    @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
+    fun read(userIds: List<Long>): List<WatchlistUpdated> {
+        val revisionsByUser = revisions.findAllById(userIds).associate { it.userId to it.rev }
+        val codesByUser = watchlist.findByUserIdIn(userIds).groupBy({ it.userId }, { it.code.trim() })
+        return userIds.map { userId ->
+            WatchlistUpdated(userId, revisionsByUser[userId] ?: 0, codesByUser[userId].orEmpty())
+        }
     }
 }

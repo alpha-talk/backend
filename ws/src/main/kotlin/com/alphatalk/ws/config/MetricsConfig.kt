@@ -20,7 +20,7 @@ class MetricsConfig(
             .description("현재 연결된 유저 수")
             .register(meterRegistry)
         Gauge.builder("ws.redis.channels.subscribed") { subscriber.subscribedCount().toDouble() }
-            .description("구독 중인 Redis 채널 수")
+            .description("마지막으로 적용된 Redis 채널 등록 수")
             .register(meterRegistry)
     }
 }

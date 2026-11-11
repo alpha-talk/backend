@@ -136,10 +136,10 @@ class EnvelopeJsonTest {
     }
 
     @Test
-    fun `watchlist updated 왕복 - 기본값 처리`() {
-        val json = """{"userId":123,"added":["005930"],"ts":1719600000000}"""
+    fun `watchlist updated preserves an empty snapshot`() {
+        val json = """{"userId":123,"rev":14,"codes":[]}"""
         val parsed = mapper.readValue<WatchlistUpdated>(json)
-        assertEquals(WatchlistUpdated(userId = 123, added = listOf("005930"), ts = 1719600000000), parsed)
-        assertEquals(emptyList(), parsed.removed)
+        assertEquals(WatchlistUpdated(123, 14, emptyList()), parsed)
+        assertEquals(parsed, mapper.readValue<WatchlistUpdated>(mapper.writeValueAsString(parsed)))
     }
 }

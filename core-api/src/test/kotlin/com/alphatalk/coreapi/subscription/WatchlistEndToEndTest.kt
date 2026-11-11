@@ -1,7 +1,7 @@
 package com.alphatalk.coreapi.subscription
 
 import com.alphatalk.contracts.Channels
-import com.alphatalk.contracts.Keys
+import com.alphatalk.contracts.WatchlistSnapshots
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
 import org.junit.jupiter.api.AfterEach
@@ -34,7 +34,10 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import org.springframework.test.context.ActiveProfiles
 
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@SpringBootTest(
+    webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
+    properties = ["ALPHATALK_WATCHLIST_INTERNAL_KEY=watchlist-test-key"],
+)
 @Testcontainers(disabledWithoutDocker = true)
 @ActiveProfiles("test")
 class WatchlistEndToEndTest {
@@ -86,7 +89,6 @@ class WatchlistEndToEndTest {
             ('001234', '폐지된종목', 'KOSPI',   10000000, false)
             """.trimIndent(),
         )
-        redisTemplate.keys("watchlist:*").orEmpty().takeIf { it.isNotEmpty() }?.let(redisTemplate::delete)
 
         post("/api/v1/auth/signup", """{"email":"a@b.c","password":"password1","nickname":"민균"}""")
         val login = post("/api/v1/auth/login", """{"email":"a@b.c","password":"password1"}""")
@@ -144,10 +146,18 @@ class WatchlistEndToEndTest {
         String::class.java,
     )
 
-    private fun mirroredCodes(): Set<String> = redisTemplate.opsForSet().members(Keys.watchlist(userId)).orEmpty()
+    private fun snapshots(key: String? = "watchlist-test-key", ids: String = "$userId") = rest.exchange(
+        WatchlistSnapshots.PATH,
+        HttpMethod.POST,
+        HttpEntity("""{"userIds":[$ids]}""", HttpHeaders().apply {
+            contentType = MediaType.APPLICATION_JSON
+            key?.let { set(WatchlistSnapshots.KEY_HEADER, it) }
+        }),
+        String::class.java,
+    )
 
     @Test
-    fun `FR-03 - 종목을 담으면 목록과 게이트웨이 미러에 함께 반영된다`() {
+    fun `FR-03 - 종목을 담으면 목록과 발행된 스냅샷에 반영된다`() {
         val subscribe = call(HttpMethod.PUT, "/api/v1/watchlist/005930")
         assertEquals(201, subscribe.statusCode.value())
 
@@ -159,13 +169,12 @@ class WatchlistEndToEndTest {
         assertEquals("KOSPI", item.path("market").asText())
         assertTrue(item.path("subscribedAt").asLong() > 0)
 
-        assertEquals(setOf("005930"), mirroredCodes())
 
         val event = assertNotNull(nextEvent(), "watchlist:updated가 발행되지 않았다")
         assertEquals(userId, event.path("userId").asLong())
-        assertEquals(listOf("005930"), event.path("added").map { it.asText() })
-        assertTrue(event.path("removed").isEmpty)
-        assertTrue(event.path("ts").asLong() > 0)
+        assertEquals(listOf("005930"), event.path("codes").map { it.asText() })
+        assertEquals(1L, event.path("rev").asLong())
+        assertEquals(event, json(snapshots().body).single())
     }
 
     @Test
@@ -177,26 +186,23 @@ class WatchlistEndToEndTest {
 
         assertEquals(200, again.statusCode.value())
         val event = assertNotNull(nextEvent(), "재요청 복구 이벤트가 발행되지 않았다")
-        assertEquals(listOf("005930"), event.path("added").map { it.asText() })
+        assertEquals(listOf("005930"), event.path("codes").map { it.asText() })
         assertEquals(1, json(call(HttpMethod.GET, "/api/v1/watchlist").body).path("items").size())
     }
 
     @Test
-    fun `미러만 어긋나면 재요청 한 번으로 맞춰진다`() {
-        call(HttpMethod.PUT, "/api/v1/watchlist/005930")
-        redisTemplate.delete(Keys.watchlist(userId))
-        published.clear()
-
-        val again = call(HttpMethod.PUT, "/api/v1/watchlist/005930")
-
-        assertEquals(200, again.statusCode.value())
-        assertEquals(setOf("005930"), mirroredCodes(), "미러가 복구되지 않았다")
-        val event = assertNotNull(nextEvent(), "접속 중인 게이트웨이의 복구 이벤트가 발행되지 않았다")
-        assertEquals(listOf("005930"), event.path("added").map { it.asText() })
+    fun `내부 조회는 인증과 배치 한도를 확인하고 빈 목록을 반환한다`() {
+        assertEquals(401, snapshots(key = null).statusCode.value())
+        assertEquals(401, snapshots(key = "wrong").statusCode.value())
+        assertEquals(400, snapshots(ids = "0").statusCode.value())
+        assertEquals(400, snapshots(ids = (1..101).joinToString(",")).statusCode.value())
+        val result = json(snapshots(ids = "$userId,$userId").body).single()
+        assertEquals(0L, result.path("rev").asLong())
+        assertTrue(result.path("codes").isArray && result.path("codes").isEmpty)
     }
 
     @Test
-    fun `해지하면 미러에서도 빠지고 removed로 알린다`() {
+    fun `해지하면 남은 종목 전체를 발행한다`() {
         call(HttpMethod.PUT, "/api/v1/watchlist/005930")
         call(HttpMethod.PUT, "/api/v1/watchlist/000660")
         published.clear()
@@ -204,10 +210,8 @@ class WatchlistEndToEndTest {
         val delete = call(HttpMethod.DELETE, "/api/v1/watchlist/005930")
 
         assertEquals(204, delete.statusCode.value())
-        assertEquals(setOf("000660"), mirroredCodes())
         val event = assertNotNull(nextEvent(), "watchlist:updated가 발행되지 않았다")
-        assertEquals(listOf("005930"), event.path("removed").map { it.asText() })
-        assertTrue(event.path("added").isEmpty)
+        assertEquals(listOf("000660"), event.path("codes").map { it.asText() })
     }
 
     @Test
@@ -216,14 +220,15 @@ class WatchlistEndToEndTest {
 
         assertEquals(204, delete.statusCode.value())
         val event = assertNotNull(nextEvent(), "해지 재요청 복구 이벤트가 발행되지 않았다")
-        assertEquals(listOf("000660"), event.path("removed").map { it.asText() })
+        assertTrue(event.path("codes").isEmpty)
     }
 
     @Test
-    fun `같은 종목의 구독과 해지가 겹쳐도 DB와 미러가 같은 상태로 끝난다`() {
+    fun `같은 종목의 구독과 해지가 겹쳐도 DB와 최신 이벤트가 같은 상태로 끝난다`() {
         val pool = Executors.newFixedThreadPool(2)
         try {
-            repeat(10) { attempt ->
+            repeat(10) {
+                published.clear()
                 call(HttpMethod.DELETE, "/api/v1/watchlist/005930")
                 val barrier = CyclicBarrier(2)
                 val requests = listOf(HttpMethod.PUT, HttpMethod.DELETE).map { method ->
@@ -239,7 +244,9 @@ class WatchlistEndToEndTest {
                     Boolean::class.java,
                     userId,
                 )!!
-                assertEquals(stored, "005930" in mirroredCodes(), "시도 ${attempt + 1}에서 상태가 어긋났다")
+                val latest = List(3) { assertNotNull(nextEvent()) }.maxBy { it.path("rev").asLong() }
+                assertEquals(stored, latest.path("codes").any { it.asText() == "005930" })
+                assertEquals(latest, json(snapshots().body).single())
             }
         } finally {
             pool.shutdownNow()

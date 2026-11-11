@@ -1,5 +1,6 @@
 package com.alphatalk.coreapi.subscription
 
+import com.alphatalk.contracts.envelope.WatchlistUpdated
 import com.alphatalk.coreapi.support.ApiException
 import com.alphatalk.coreapi.support.ErrorCode
 import kotlin.test.Test
@@ -42,28 +43,19 @@ class WatchlistServiceTest {
         }
     }
 
-    private class RecordingMirror : WatchlistMirrorSync {
-        val synced = mutableListOf<Pair<Long, MirrorChange>>()
-
-        override fun sync(userId: Long, change: MirrorChange): Boolean {
-            synced += userId to change
-            return true
-        }
-    }
-
     private val command = FakeCommand()
-    private val mirror = RecordingMirror()
-    private val service = WatchlistService(FakeStore(), command, mirror)
+    private val published = mutableListOf<WatchlistUpdated>()
+    private val service = WatchlistService(FakeStore(), command) { published += it }
 
     @Test
-    fun `새 종목을 담으면 커밋된 상태로 미러를 동기화한다`() {
+    fun `새 종목을 담으면 커밋된 상태로 스냅샷을 발행한다`() {
         val state = WatchlistState(7, listOf("005930", "000660"))
         command.subscribeChange = SubscribeChange(SubscribeOutcome.ADDED, state)
 
         val created = service.subscribe(1L, "005930")
 
         assertTrue(created)
-        assertEquals(1L to MirrorChange(state, addedCode = "005930"), mirror.synced.single())
+        assertEquals(WatchlistUpdated(1, state.rev, state.codes), published.single())
     }
 
     @Test
@@ -74,35 +66,35 @@ class WatchlistServiceTest {
     }
 
     @Test
-    fun `이미 담긴 종목 재요청도 미러를 다시 동기화한다`() {
+    fun `이미 담긴 종목 재요청도 스냅샷을 다시 발행한다`() {
         val state = WatchlistState(8, listOf("005930"))
         command.subscribeChange = SubscribeChange(SubscribeOutcome.ALREADY_SUBSCRIBED, state)
 
         val created = service.subscribe(1L, "005930")
 
         assertFalse(created)
-        assertEquals(1L to MirrorChange(state, addedCode = "005930"), mirror.synced.single())
+        assertEquals(WatchlistUpdated(1, state.rev, state.codes), published.single())
     }
 
     @Test
-    fun `없는 종목은 404고 미러를 건드리지 않는다`() {
+    fun `없는 종목은 404고 발행하지 않는다`() {
         command.subscribeChange = SubscribeChange(SubscribeOutcome.UNKNOWN_STOCK)
 
         val failure = assertFailsWith<ApiException> { service.subscribe(1L, "999999") }
 
         assertEquals(ErrorCode.NOT_FOUND, failure.code)
-        assertTrue(mirror.synced.isEmpty())
+        assertTrue(published.isEmpty())
     }
 
     @Test
-    fun `한도를 채우면 422고 미러를 건드리지 않는다`() {
+    fun `한도를 채우면 422고 발행하지 않는다`() {
         command.subscribeChange = SubscribeChange(SubscribeOutcome.LIMIT_EXCEEDED)
 
         val failure = assertFailsWith<ApiException> { service.subscribe(1L, "005930") }
 
         assertEquals(ErrorCode.LIMIT_EXCEEDED, failure.code)
         assertEquals(WatchlistService.MAX_ITEMS, failure.detail?.get("limit"))
-        assertTrue(mirror.synced.isEmpty())
+        assertTrue(published.isEmpty())
     }
 
     @Test
@@ -115,27 +107,27 @@ class WatchlistServiceTest {
 
         assertEquals(ErrorCode.UNAUTHORIZED, put.code)
         assertEquals(ErrorCode.UNAUTHORIZED, delete.code)
-        assertTrue(mirror.synced.isEmpty())
+        assertTrue(published.isEmpty())
     }
 
     @Test
-    fun `해지하면 커밋된 상태로 미러를 동기화한다`() {
+    fun `해지하면 커밋된 상태로 스냅샷을 발행한다`() {
         val state = WatchlistState(9, listOf("000660"))
         command.unsubscribeChange = UnsubscribeChange(UnsubscribeOutcome.REMOVED, state)
 
         service.unsubscribe(1L, "005930")
 
-        assertEquals(1L to MirrorChange(state, removedCode = "005930"), mirror.synced.single())
+        assertEquals(WatchlistUpdated(1, state.rev, state.codes), published.single())
     }
 
     @Test
-    fun `담지 않은 종목 해지도 미러를 다시 동기화한다`() {
+    fun `담지 않은 종목 해지도 스냅샷을 다시 발행한다`() {
         val state = WatchlistState(10, emptyList())
         command.unsubscribeChange = UnsubscribeChange(UnsubscribeOutcome.ALREADY_REMOVED, state)
 
         service.unsubscribe(1L, "000660")
 
-        assertEquals(1L to MirrorChange(state, removedCode = "000660"), mirror.synced.single())
+        assertEquals(WatchlistUpdated(1, state.rev, state.codes), published.single())
     }
 
     @Test

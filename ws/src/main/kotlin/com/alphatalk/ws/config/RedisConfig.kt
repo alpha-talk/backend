@@ -1,5 +1,6 @@
 package com.alphatalk.ws.config
 
+import org.springframework.beans.factory.annotation.Qualifier
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import org.springframework.data.redis.connection.RedisConnectionFactory
@@ -11,7 +12,7 @@ class RedisConfig {
     @Bean
     fun redisMessageListenerContainer(
         connectionFactory: RedisConnectionFactory,
-        redisListenerExecutor: ThreadPoolTaskExecutor,
+        @Qualifier("redisListenerExecutor") redisListenerExecutor: ThreadPoolTaskExecutor,
     ): RedisMessageListenerContainer = RedisMessageListenerContainer().apply {
         setConnectionFactory(connectionFactory)
         setTaskExecutor(redisListenerExecutor)

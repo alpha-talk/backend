@@ -1,12 +1,15 @@
 package com.alphatalk.ws.subscription
 
 import com.alphatalk.contracts.ChannelKind
+import com.alphatalk.contracts.envelope.WatchlistUpdated
+
+data class WatchlistTarget(val userId: Long, val generation: String)
 
 interface DemandQuery {
     fun usersWatching(code: String): Set<Long>
     fun roomHasQuoteViewers(code: String): Boolean
     fun isUserConnected(userId: Long): Boolean
-    fun needsWatchlist(sessionId: String): Boolean
+    fun watchlistTargets(): List<WatchlistTarget>
     fun connectedUserIds(): Set<Long>
     fun connectedSessionCount(): Int
 }
@@ -14,7 +17,7 @@ interface DemandQuery {
 interface DemandMutator {
     fun registerSession(sessionId: String, userId: Long)
 
-    fun attachWatchlist(sessionId: String, watchlist: Set<String>)
+    fun startWatchlist(sessionId: String): WatchlistTarget?
 
     fun removeSession(sessionId: String)
 
@@ -22,5 +25,5 @@ interface DemandMutator {
 
     fun unsubscribeById(sessionId: String, subscriptionId: String)
 
-    fun applyWatchlistDiff(userId: Long, added: Collection<String>, removed: Collection<String>)
+    fun applyWatchlist(snapshot: WatchlistUpdated, target: WatchlistTarget? = null)
 }

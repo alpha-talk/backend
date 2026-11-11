@@ -1,6 +1,8 @@
-# Alpha Talk — `ws` 모듈 아키텍처 설계 v0.8
+# Alpha Talk — `ws` 모듈 아키텍처 설계 v0.9
 
-> 상위 문서: [구현 계획 v0.3](ws_module_plan.md) · [WS API 명세 v0.10](ws_api_spec.md) · [Redis 계약 v0.22](redis_contract.md)
+> **v0.9 관심목록 스냅샷 전환**: 첫 SUBSCRIBE에서 유저별 최초 조회를 예약하고, DB 스냅샷과 변경 이벤트를 같은 버전 비교로 반영한다. 연결 종료 시 상태를 제거한다. 변경 이벤트는 전체 목록을 담고 접속 중 최초 구독을 시작한 유저에게만 반영한다. HTTP는 별도 작업 풀에서 처리하며 실패는 빈 목록으로 확정하지 않는다. Redis 변경 채널 재구독 확인 시와 기본 30초마다 활성 유저 목록을 최대 100명씩 재검증한다. 목록을 읽은 기존 세션이 모두 종료되었다면 늦은 응답은 폐기한다. 동시 조회는 유저별로 합친다. 운영에서는 WS의 `ALPHATALK_WATCHLIST_CORE_API_URL`과 양쪽 서버의 `ALPHATALK_WATCHLIST_INTERNAL_KEY`를 설정한다.
+
+> 상위 문서: [구현 계획 v0.3](ws_module_plan.md) · [WS API 명세 v0.10](ws_api_spec.md) · [Redis 계약 v0.24](redis_contract.md)
 
 이 문서는 `ws` 게이트웨이의 **코드 레벨 설계 기준**이다. 컴포넌트 경계와 포트 계약, 인메모리 인덱스와 동시성 규율, 핵심 시퀀스, 에러 정책을 여기서 확정한다. `ws` 코드를 쓰거나 리뷰하기 전에 읽고, 코드와 어긋나면 둘 중 하나를 고친다. 역할 분담은 이렇다 — 단계(S0~S7)와 DoD는 계획서, 클라 ↔ 게이트웨이 STOMP 프로토콜은 API 명세, 서비스 간 채널·키 계약은 Redis 계약이 소유하고, 이 문서는 "어떤 구조로 구현하나"만 답한다.
 
@@ -46,7 +48,7 @@
                         │                                    ▲ BrokerMessageSink  │
                         │  [도메인 계층]                     │                    │
                         │  SessionEventListener              │                    │
-                        │    ├─► WatchlistResolver (P) ◄ RedisWatchlistResolver   │
+                        │    ├─► WatchlistResolver (P) ◄ HttpWatchlistResolver   │
                         │    ├─► PresenceRegistry (P)  ◄ RedisPresenceService      │
                         │    └─► DemandMutator (P) ┐                              │
                         │                          ▼                              │
@@ -82,17 +84,17 @@
 
 - **채널 종류 확장**: `trade`/`depth`(명세 확장분)를 추가할 때 `MessageRouter`를 수정하지 않는다. `RedisChannelHandler`를 구현한 `TradeRelayHandler`를 `@Component`로 추가하면 종류별 핸들러 맵에 자동 등록된다.
 - **인증 방식 교체**: HS256 → RS256/Nimbus 전환 시 `TokenVerifier` 구현만 갈아 끼운다(§7 합의 안건 대응).
-- **관심목록 소스 교체**: 임시 Redis → core-api REST/DB 전환 시 `WatchlistResolver` 구현만 갈아 끼운다.
+- **관심목록 소스 교체**: 조회는 `WatchlistResolver` 포트를 통해 core-api의 내부 HTTP에 위임한다.
 
 ### 3.3 LSP — 구현은 계약을 배신하지 않음
 
-포트마다 구현이 바뀌어도 성립해야 하는 계약을 문서화한다(§4.5). 예를 들어 `WatchlistResolver.resolve`는 **미존재 유저에 빈 Set 반환(널·예외 아님)**, `TokenVerifier.verify`는 **유효 시 userId, 무효 시 정해진 예외**다. 임시 구현과 실제 구현이 이 계약을 공유하므로 서로 대체할 수 있다.
+포트마다 구현이 바뀌어도 성립해야 하는 계약을 문서화한다(§4.5). 예를 들어 `WatchlistResolver.resolve`는 **변경 이력이 없는 유저에 rev 0과 빈 목록 반환**, `TokenVerifier.verify`는 **유효 시 userId, 무효 시 정해진 예외**다. 임시 구현과 실제 구현이 이 계약을 공유하므로 서로 대체할 수 있다.
 
 ### 3.4 ISP — 클라이언트별로 좁은 인터페이스
 
 - `DemandRegistry`를 **두 역할 인터페이스**로 노출한다:
   - `DemandQuery` (읽기 전용, `usersWatching(code)`) — 뜨거운 relay 경로의 핸들러가 의존. 실수로 상태를 못 바꾼다.
-  - `DemandMutator` (쓰기, `registerSession`/`attachWatchlist`/`subscribeRoom`/…) — 세션 수명 이벤트 처리기가 의존.
+  - `DemandMutator` (쓰기, `registerSession`/`startWatchlist`/`subscribeRoom`/…) — 세션 수명 이벤트 처리기가 의존.
 - `ClientMessageSink`는 `sendToUser(userId, type, envelope)`·`sendToRoom(code, envelope)` **둘만** 노출한다. `SimpMessagingTemplate`의 광범위한 API를 도메인에 흘리지 않고, STOMP 목적지 문자열 조립 지식(→ `Destinations`)을 한 곳에 가둔다.
 - `ChannelSubscriber`는 `subscribe(channel)`·`unsubscribe(channel)` **둘만**. `DemandRegistry`는 Redis 리스너 컨테이너의 나머지를 볼 필요가 없다.
 
@@ -103,7 +105,7 @@
 | 포트 (도메인이 의존) | 구현 (인프라) | 뒤집는 이유 / 테스트 seam |
 |---|---|---|
 | `TokenVerifier` (**:auth-jwt** 소유) | `JwtTokenProvider` (:auth-jwt) | core-api와 발급·검증 공유 → 클레임 스키마 불일치 원천 차단. 인터셉터는 가짜 검증기로 단위 테스트 |
-| `WatchlistResolver` | `RedisWatchlistResolver` (임시) | 조회 경로 미합의(§7). core-api 없이도 시드로 테스트 |
+| `WatchlistResolver` | `HttpWatchlistResolver` | 내부 HTTP, 단위 테스트에서는 포트 대체 |
 | `ClientMessageSink` | `BrokerMessageSink` (`SimpMessagingTemplate` 래핑) | 브로커 없이 relay 핸들러 검증. 목적지 문자열 캡슐화 |
 | `ChannelSubscriber` | `RedisChannelSubscriber` (리스너 컨테이너 래핑) | **Redis 없이 `DemandRegistry` 전이 로직 단위 테스트** — 이 프로젝트에서 가장 값진 seam |
 | `PresenceRegistry` | `RedisPresenceService` | 세션 수명 테스트에서 프레즌스 부수효과 스텁 |
@@ -113,7 +115,7 @@
 
 SOLID는 이음새가 있는 곳의 도구다. 이음새가 없는데 인터페이스를 만들면 간접호출만 늘고 읽기 어려워진다. 다음은 **구체 클래스로 둔다**:
 
-- `SessionEventListener` — Spring 이벤트를 포트 호출로 번역하고 **세션 수명 정책**(CONNECTED에 출석 등록, 첫 구독 시 해소·부착, 해소 실패 시 빈 목록)을 소유한다. 이 정책을 `DemandRegistry`에 넣지 않는 이유는 둘이다. resolve는 I/O(≤1s)라 레지스트리의 락 규율(락 안에서는 빠른 전이와 `ChannelSubscriber` 호출만)과 양립하지 않는다. 또 "어디서 가져오나"는 인덱스 불변식이 아니라 수명 정책이다(§11.4의 상태+불변식 응집 원칙). 구현이 하나뿐이고 교체점이 없어 인터페이스를 두지 않는다.
+- `SessionEventListener` — Spring 이벤트를 포트 호출로 번역하고 **세션 수명 정책**(CONNECTED에 출석 등록, 첫 구독 시 조회 예약, 조회 실패 시 다음 재검증에서 복구)을 소유한다. 이 정책을 `DemandRegistry`에 넣지 않는 이유는 둘이다. resolve는 I/O(≤1s)라 레지스트리의 락 규율(락 안에서는 빠른 전이와 `ChannelSubscriber` 호출만)과 양립하지 않는다. 또 "어디서 가져오나"는 인덱스 불변식이 아니라 수명 정책이다(§11.4의 상태+불변식 응집 원칙). 구현이 하나뿐이고 교체점이 없어 인터페이스를 두지 않는다.
 - `DemandRegistry` 자체 — 인덱스 자료구조는 이 클래스에 응집돼 있어야 한다. 저장소를 인터페이스로 빼면 "단일 소유" 불변식이 약해진다.
 - `WsProperties`·`WebSocketConfig`·`MetricsConfig` 등 설정 — 프레임워크 결선 지점.
 - 봉투 DTO(`Envelope` 등) — 순수 데이터. 인터페이스로 감싸지 않는다.
@@ -156,12 +158,12 @@ SOLID는 이음새가 있는 곳의 도구다. 이음새가 없는데 인터페�
 | 타입 | 종류 | 책임 |
 |---|---|---|
 | `DemandQuery` | **포트(읽기)** | `usersWatching(code): Set<userId>`(불변 스냅샷)·`roomHasQuoteViewers(code): Boolean` 등. relay 핸들러가 의존 — 둘 다 틱 경로에서 락 없이 읽는다 |
-| `DemandMutator` | **포트(쓰기)** | `registerSession`/`attachWatchlist`/`removeSession`/`subscribeRoom`/`unsubscribeById`/`applyWatchlistDiff`. 세션 리스너가 의존 |
-| `DemandRegistry` | 구현(셋 다) | §5 인덱스 단일 소유. 수요 전이(0↔1) 감지 시 `ChannelSubscriber` 호출 + `DemandSyncTrigger.request()`(논블로킹). **상태 변경은 락 안에서 직렬화 — 락 안에서 Redis I/O 금지** |
+| `DemandMutator` | **포트(쓰기)** | `registerSession`/`startWatchlist`/`removeSession`/`subscribeRoom`/`unsubscribeById`/`applyWatchlist`. 세션 리스너가 의존 |
+| `DemandRegistry` | 구현(셋 다) | §5 인덱스 단일 소유. 수요 전이(0↔1) 감지 시 `ChannelSubscriber`에 목표 상태 기록 + `DemandSyncTrigger.request()`로 동기화 요청. **상태 변경은 락 안에서 직렬화 — 락 안에서 Redis I/O 금지** |
 | `DemandSnapshotSource` | **포트(읽기)** | `demandSnapshot(): {quote: code→유저 수, room: code→구독 수}`. 락 안 순수 메모리 복사. `DemandRegistry`가 구현 |
 | `DemandSyncTrigger` | 구현(공유 신호) | 세마포어 기반 코얼레싱 신호. 레지스트리(요청)와 동기화 스레드(대기)가 공유 — 빈 의존 순환 없이 트리거 채널 제공 |
 | `RedisDemandSynchronizer` | 구현 | 단일 스레드가 주기(5s)·트리거마다 스냅샷을 Redis 해시에 **전체 재기록**(Lua DEL+HSET 원자, TTL 연장) 후 직전 기록과 비교해 0↔1 전이가 있었던 sync만 `demand:updated` 1건 발행(payload `{gwId, ts}`, v0.21) — 유실·드리프트는 다음 주기에 자가 치유. gwId(부팅마다 발급)·`gw:alive` 갱신·`gw:registry` 자기 등록(멱등 SADD)·stop 시 키 DEL + SREM 소유. 주기·TTL은 서비스 설정이 아니라 `:contracts`의 `DemandTiming`이 소유한다(worker-price의 복구 시간 검증식과 어긋나지 않도록) |
-| `SessionEventListener` | 구현 | Spring 이벤트 4종 → 포트 호출 번역 + 세션 수명 정책(CONNECTED→`registerSession`, 첫 SUBSCRIBE에서 resolve→`attachWatchlist`, §11.6). resolve는 락 밖(I/O), 등록·부착은 멱등 |
+| `SessionEventListener` | 구현 | Spring 이벤트 4종 → 포트 호출 번역 + 세션 수명 정책(CONNECTED→`registerSession`, 첫 SUBSCRIBE에서 `startWatchlist` 및 비동기 조회, §11.6). 조회는 락 밖에서 실행 |
 
 ### 4.4 relay 계층 (relay/ · client/)
 
@@ -171,7 +173,7 @@ SOLID는 이음새가 있는 곳의 도구다. 이음새가 없는데 인터페�
 | `RedisChannelHandler` | **포트** | `kind: ChannelKind` + `handle(code, body)`. 종류별 파싱·발행을 각자 소유 |
 | `QuoteRelayHandler`/`StreamRelayHandler` | 구현 | 봉투 역직렬화 → `demandQuery.usersWatching(code)` 순회 → `sink.sendToUser(...)` |
 | `PostRelayHandler` | 구현 | 봉투 역직렬화 → `sink.sendToRoom(code, envelope)` |
-| `WatchlistUpdateHandler` | 구현 | `WatchlistUpdated` 역직렬화 → `demandMutator.applyWatchlistDiff(...)` (자기 인스턴스에 세션 있을 때만) |
+| `WatchlistUpdateHandler` | 구현 | `WatchlistUpdated` 역직렬화 → `demandMutator.applyWatchlist(...)` (첫 SUBSCRIBE 이후에만) |
 | `ChannelSubscriber` | **포트** | `subscribe/unsubscribe(channel)` 둘만. `DemandRegistry`가 의존 |
 | `RedisChannelSubscriber` | 구현 | `RedisMessageListenerContainer`에 리스너 add/remove. 콜백은 `MessageRouter`로 |
 | `ClientMessageSink` | **포트** | `sendToUser(userId, type, envelope)`·`sendToRoom(code, envelope)` |
@@ -181,8 +183,8 @@ SOLID는 이음새가 있는 곳의 도구다. 이음새가 없는데 인터페�
 
 | 타입 | 종류 | 계약 (구현이 반드시 지킬 것) |
 |---|---|---|
-| `WatchlistResolver` | **포트** | `resolve(userId): Set<code>`. 미존재 유저 → **빈 Set**. 널·예외 금지. 블로킹 ≤ 1s |
-| `RedisWatchlistResolver` | 구현(임시) | `SMEMBERS watchlist:{userId}`. core-api 생기면 교체 |
+| `WatchlistResolver` | **포트** | `resolve(userIds): List<WatchlistUpdated>`. 성공 시 요청 유저별 스냅샷 하나, 미변경 유저 rev 0과 빈 목록. I/O 실패는 예외 |
+| `HttpWatchlistResolver` | 구현 | `WatchlistSnapshotClient`(Spring Cloud OpenFeign)로 내부 API를 호출한다. 연결·읽기 타임아웃은 각각 1초이며 조회 실패는 기존 재검증 경로에서 복구한다. |
 | `PresenceRegistry` | **포트** | `add(userId, sessionId)`/`remove(...)`/`refresh(...)`. 멱등 |
 | `RedisPresenceService` | 구현 | `SADD/SREM presence:{userId}` + TTL. 주기 스케줄러가 활성 세션 TTL 연장 |
 | `WsMetrics` | 구현 | Micrometer 게이지/카운터 (계획서 §4.9) |
@@ -199,8 +201,7 @@ SOLID는 이음새가 있는 곳의 도구다. 이음새가 없는데 인터페�
 // 전부 DemandRegistry 내부에서만 변경. 외부에는 DemandQuery(읽기 스냅샷)로만 노출.
 sessions:        Map<sessionId, SessionInfo(userId, roomSubs: Map<subId, (kind, code)>)>
 userSessions:    Map<userId, Set<sessionId>>          // 멀티디바이스
-userWatchlists:  Map<userId, Set<code>>               // 부착된 관심목록 (키 존재 = 부착됨 마커)
-pendingDiffs:    Map<userId, (added: Set, removed: Set)>  // 부착 전 diff의 압축 누적 — 이벤트 수와 무관하게 유계 (§11.6)
+userWatchlists:  Map<userId, (generation, rev, codes)> // 첫 SUBSCRIBE 이후 활성
 watchlistIndex:  Map<code, Set<userId>>               // quote:/stream: 라우팅 + refcount (락 없이 읽기)
 roomIndex:       Map<(kind, code), Int>               // 방 구독 수 카운트 (fan-out은 브로커가)
 roomQuoteCodes:  Set<code>                            // 방 quote 구독이 살아있는 code (락 없이 읽기)
@@ -215,9 +216,9 @@ roomQuoteCodes:  Set<code>                            // 방 quote 구독이 살
 | 이벤트 | 전이 | 부수효과 (포트 호출) |
 |---|---|---|
 | CONNECTED (`registerSession`) | 출석부만 기입 — sessions·userSessions | 없음 (인메모리만) |
-| 첫 SUBSCRIBE (`attachWatchlist`) | resolve 결과 + pendingDiffs 병합 → 유저의 각 code에 userId 추가 | 새 code면 `subscribe(stream:code)` + **방 quote 수요가 없을 때만** `subscribe(quote:code)` |
-| 유저 마지막 세션 종료 | 각 code에서 userId 제거 + pendingDiffs 정리 | 집합이 비면 `unsubscribe(stream:code)` + **방 quote 수요가 없을 때만** `unsubscribe(quote:code)` |
-| `watchlist:updated` diff | 부착된 유저 → 즉시 적용 / 미부착 → pendingDiffs에 버퍼 | 적용 시 같은 전이 규칙 |
+| 첫 SUBSCRIBE (`startWatchlist`) | 유저별 조회 대상 등록 | HTTP 조회 예약 |
+| 유저 마지막 세션 종료 | 각 code에서 userId 제거 + 활성 상태 정리 | 집합이 비면 `unsubscribe(stream:code)` + **방 quote 수요가 없을 때만** `unsubscribe(quote:code)` |
+| 관심목록 API 응답 또는 변경 이벤트 | 활성 유저의 최신 rev만 적용. 추가/삭제 종목을 계산하고 인덱스를 갱신 | 0↔1 전이 시 stream 구독 조정, 방 quote 수요가 없을 때 quote 조정 |
 | 방 SUBSCRIBE / UNSUBSCRIBE·종료 (post·trade·depth) | roomIndex 카운트 증감 (같은 세션 중복 구독도 각각 셈) | 0↔1 전이 시 `subscribe/unsubscribe(post:code)` 등 |
 | 방 quote SUBSCRIBE / UNSUBSCRIBE·종료 | roomIndex 증감 + roomQuoteCodes 갱신 | 0↔1 전이 시 **관심목록 수요가 없을 때만** `subscribe/unsubscribe(quote:code)` |
 
@@ -228,7 +229,7 @@ roomQuoteCodes:  Set<code>                            // 방 quote 구독이 살
 정합성 버그(refcount 꼬임 → 유령 구독·구독 유실)가 성능보다 훨씬 비싸다. 그래서 쓰기는 통째로 직렬화하고, 틱마다 도는 읽기 하나만 락 밖으로 뺀다.
 
 - 세션 이벤트 스레드와 `watchlist:updated`(Redis 리스너 스레드)가 동시에 인덱스를 만질 수 있다.
-- **v1은 단순하게**: `DemandRegistry`의 변경 메서드를 단일 락(`ReentrantLock`)으로 직렬화한다. `ChannelSubscriber` 호출도 **락 안에서 동기로** 일어난다(구독 해지 직후 재구독 유실 같은 레이스 차단). 변경 빈도는 초당 수십 건이라 경합이 문제되지 않는다.
+- `DemandRegistry`의 변경 메서드는 단일 락으로 직렬화한다. 같은 락 안에서 채널의 목표 상태를 기록하고 세마포어 신호를 보낸다. Redis 구독·해지는 전용 작업 스레드에서 처리한다.
 - 읽기(`DemandQuery.usersWatching` — 틱마다 호출)는 **락 없이** 읽는다. `watchlistIndex`를 `ConcurrentHashMap<code, 불변 Set>`으로 두고, 변경 시 Set을 통째로 교체(copy-on-write)한다.
 - 락 최적화는 S7 스모크에서 병목으로 확인될 때만 한다. CHM 대신 락을 고른 자세한 근거는 §11.3.
 
@@ -238,11 +239,13 @@ roomQuoteCodes:  Set<code>                            // 방 quote 구독이 살
 
 | 스레드풀 | 소속 | 하는 일 | 주의 |
 |---|---|---|---|
-| WS 전송(Tomcat) 워커 | 컨테이너 | 프레임 수신 + 인바운드 인터셉터 preSend(JWT 검증) + **`SessionSubscribeEvent` 리스너 = watchlist 해소·부착**(실측 `o-auto-N-exec-*`) + `SessionDisconnectEvent` 리스너(실측) | 인터셉터·구독 이벤트는 **호출 스레드에서 실행**된다. 프레임 단위로 빌리는 **공유 워커 풀(기본 200)** — outbound(코어×2)보다 10배 커서 접속 폭풍의 블로킹이 틱 전달과 격리된다. Redis 장애 대비 커맨드 타임아웃 1s 상한 (§11.6) |
+| WS 전송(Tomcat) 워커 | 컨테이너 | 프레임 수신 + 인바운드 인터셉터 preSend(JWT 검증) + **`SessionSubscribeEvent` 리스너 = watchlist 조회 예약**(실측 `o-auto-N-exec-*`) + `SessionDisconnectEvent` 리스너(실측) | 인터셉터·구독 이벤트는 **호출 스레드에서 실행**된다. 프레임 단위로 빌리는 **공유 워커 풀(기본 200)** — outbound(코어×2)보다 10배 커서 접속 폭풍의 블로킹이 틱 전달과 격리된다. Redis 장애 대비 커맨드 타임아웃 1s 상한 (§11.6) |
 | `clientInboundChannel` | Spring | 브로커 앞단 프레임 처리 | 제어 프레임 경로 — 틱 전달과 무관 |
 | `clientOutboundChannel` | Spring | 클라 송신(MESSAGE 포함) + **`SessionConnectedEvent` 리스너**(실측: CONNECTED ack가 이 풀에서 나가며 이벤트도 여기서 발화) | §11.6 적용 후 여기 남은 것은 프레즌스 쓰기(SADD/EXPIRE, 1s 타임아웃)뿐. 큐 깊이 = 과부하 신호, 메트릭 필수 |
 | broker channel | Spring | 브로커 fan-out | — |
 | heartbeat `TaskScheduler` | 우리 등록 | 하트비트 송신/감시 | 브로커 설정 필수 |
+| 관심목록 작업 풀 | WatchlistConfig | 최초 조회와 묶음 재검증 | 워커 4개, 대기열 512개 |
+| Redis 구독 작업 스레드 | RedisChannelSubscriber | 채널 변경 및 구독 연결 재구성 | 세마포어로 변경을 합쳐 최신 목표를 적용 |
 | Redis listener 풀 | RedisConfig | `MessageRouter` → 핸들러 | **무거운 작업 금지.** 파싱+발행만. 파싱 실패는 카운터+드랍 |
 | presence 스케줄러 | 우리 | TTL 연장 (~10s) | — |
 
@@ -265,13 +268,14 @@ CONNECTED ack → SessionConnectedEvent
     → PresenceRegistry.add(userId, sessionId)
 [WS 전송 스레드]
 클라 첫 SUBSCRIBE (아무 목적지) → SessionSubscribeEvent → SessionEventListener
-    → needsWatchlist(sessionId)? → WatchlistResolver.resolve(userId)   (Redis, ≤1s)
-    → DemandMutator.attachWatchlist(sessionId, ...)   (신규 code마다 subscribe(quote/stream))
+    → DemandMutator.startWatchlist(sessionId) → 최초 조회 예약
     → (방 토픽이면 이어서 subscribeRoom)
+[관심목록 작업 풀]
+WatchlistResolver.resolve(userIds) → DemandMutator.applyWatchlist(snapshot, target)
 ```
 
-- **attachWatchlist는 출석부에 살아있는 세션만 받는다** — resolve 도중 disconnect가 지나가면 no-op이라 유령 세션이 생기지 않는다.
-- 부착은 유저 단위 1회(needsWatchlist가 게이트). 동시 SUBSCRIBE 레이스는 중복 resolve 1회로 무해하다. 미부착 유저의 `watchlist:updated` diff는 pendingDiffs에 압축 버퍼링했다가 부착 시 병합한다(§11.6).
+- 마지막 세션 종료 후 다시 구독한 유저는 새 조회 세대를 가진다. 이전 조회 응답은 버린다.
+- 최신 버전 비교와 종목 차이 적용은 레지스트리 락 안에서 수행한다.
 - 아무것도 구독하지 않는 세션은 출석만 있고 수요는 없다 — 헛수요 없음, 접속자 집계는 정확.
 
 ### 6.2 틱 relay (가장 뜨거운 경로)
@@ -302,10 +306,10 @@ SUBSCRIBE /topic/rooms/005930/posts → 같은 경로로 roomIndex 0→1 이면 
 ### 6.4 관심목록 변경 (재접속 없이 반영 — FR-03)
 
 ```
-core-api: DB 커밋 후 PUBLISH watchlist:updated {userId, added, removed}
+core-api: DB 커밋 후 PUBLISH watchlist:updated {userId, rev, codes}
 → 모든 게이트웨이 MessageRouter 수신(상시 구독) → WatchlistUpdateHandler
-→ 자기 인스턴스에 userId 세션 없으면 무시(broadcast-and-filter)
-→ 있으면 DemandMutator.applyWatchlistDiff → refcount 전이 → ChannelSubscriber 조정
+→ 자기 인스턴스에 해당 유저의 관심목록 조회가 시작되지 않았으면 무시(broadcast-and-filter)
+→ 있으면 DemandMutator.applyWatchlist → refcount 전이 → ChannelSubscriber 조정
 ```
 
 ### 6.5 종료 (정상/하트비트 타임아웃 공통)
@@ -326,11 +330,11 @@ DISCONNECT 또는 하트비트 미수신 → 프레임워크 세션 정리 → S
 |---|---|
 | CONNECT JWT 실패 | `TokenVerifier`가 예외 → 프레임워크 `ERROR` + 종료. `message:unauthorized` |
 | 허용 외 SUBSCRIBE / SEND | 인터셉터 예외 → `ERROR` + 종료. `stomp_errors` 증가. 목적지를 새로 열 때 게이트웨이를 클라보다 먼저 올리는 이유다(API 명세 §7) |
-| watchlist 해소 실패(Redis 장애) | 세션 유지 + **빈 watchlist 시작** + 경고. 방 토픽 구독은 가능. 재연결 시 자연 복구 |
+| watchlist HTTP 조회 실패 | 세션과 기존 목록 유지. 빈 목록으로 확정하지 않고 다음 재검증에서 재시도 |
 | 봉투 역직렬화 실패 | 해당 `RedisChannelHandler`가 드랍 + 카운터. relay 계속(한 건의 독이 채널을 막지 않게) |
 | 느린 클라(송신 버퍼 초과) | 프레임워크가 세션 강제 종료 → 정리 이벤트 정상 발화 → 클라 재연결+REST 복구. `slow_client_disconnects` |
-| Redis 연결 단절 | `RedisMessageListenerContainer`가 자기 리스너 레지스트리 기준으로 재구독(`recoveryBackoff`) — 우리 코드에 재구독 경로는 없다. 등록이 구독 디스패치보다 먼저라 끊긴 뒤 살아난 연결도 컨테이너가 메운다 |
-| 채널 구독 실패(Redis 장애·컨테이너 미기동) | **우리 쪽에 처리 코드를 두지 않는다.** 컨테이너가 리스너 등록을 먼저 하고 그 등록으로 재구독(`recoveryBackoff`)하거나 기동 시 구독하므로, 수요 인덱스를 그대로 두면 복구된 구독과 맞아떨어진다. 롤백을 기각한 근거와 **아직 계측하지 못한 복구 사각(S6)**은 §11.8 |
+| Redis 연결 단절 | `RedisMessageListenerContainer`가 등록된 리스너 기준으로 재구독한다. `watchlist:updated` 재구독 확인 시 접속 중 관심목록을 재검증한다. |
+| Redis 구독·해지 명령 실패 | 전용 스레드가 5초 뒤 최신 목표 채널로 리스너 컨테이너를 재구성한다. 실패가 계속되면 같은 간격으로 다시 시도한다. |
 | graceful shutdown | 새 연결 거부 → 전 세션 close → 리스너 컨테이너 stop |
 
 ---
@@ -374,13 +378,13 @@ ws/src/main/kotlin/com/alphatalk/ws/
 ├─ relay/         RedisChannelHandler(P) · {Quote,Stream,Post,Trade,Depth}RelayHandler · WatchlistUpdateHandler
 │                 ChannelSubscriber(P) · RedisChannelSubscriber · MessageRouter · RelayBootstrap
 ├─ client/        ClientMessageSink(P) · BrokerMessageSink
-├─ watchlist/     WatchlistResolver(P) · RedisWatchlistResolver
+├─ watchlist/     WatchlistResolver(P) · HttpWatchlistResolver
 └─ presence/      PresenceRegistry(P) · RedisPresenceService
 
 contracts/src/main/kotlin/com/alphatalk/contracts/
 ├─ Channels.kt      quote()/stream()/post()/trade()/depth()/WATCHLIST_UPDATED + parse() (생성·파싱 단일 지점)
 ├─ ChannelKind.kt   QUOTE·STREAM·POST·TRADE·DEPTH·WATCHLIST
-├─ Keys.kt          presence()/price()/watchlist()/cursor()
+├─ Keys.kt          presence()/price()/cursor()
 ├─ Destinations.kt  STOMP 목적지 패턴 (게이트웨이·클라 문서 공유 기준)
 └─ envelope/        Envelope · QuoteData · StreamData · PostData · WatchlistUpdated
 ```
@@ -405,7 +409,7 @@ auth-jwt/src/main/kotlin/com/alphatalk/auth/
 
 | 요구 | 설계 대응 |
 |---|---|
-| FR-03 재접속 없이 구독 반영 | §6.4 `watchlist:updated` → `applyWatchlistDiff` |
+| FR-03 재접속 없이 구독 반영 | §6.4 `watchlist:updated` → `applyWatchlist` |
 | FR-06/07 p95 ≤ 1s | 뜨거운 경로(§6.2)는 파싱+스냅샷 조회+발행뿐, 락·블로킹 I/O 없음 |
 | NFR-03 동접 500 | 인덱스 O(1) 조회, 전송 제한으로 느린 클라 격리. S7 스모크로 검증 |
 | NFR-06 core-api 배포 무영향 | 게이트웨이는 프로세스·배포 분리, 의존은 Redis뿐 |
@@ -459,17 +463,11 @@ auth-jwt/src/main/kotlin/com/alphatalk/auth/
 - 그럼에도 현재는 단일 `MessageRouter` + 핸들러 맵으로 균일하게 처리한다(OCP 균일성, 코드 최소). 제어 리스너를 컨테이너에 직접 등록하는 분리안은 §11.4의 DI 순환도 근본 제거하지만, 채널 하나를 위해 등록 경로가 이원화되는 비용이 있어 보류한다.
 - **재검토 트리거**: 제어 채널이 하나 더 생기거나, trade/depth 활성화로 라우터 구조를 손댈 때 — 그 시점에는 제어/데이터 평면 분리가 이득이다.
 
-### 11.6 [적용됨] watchlist 해소의 블로킹 위치 — 최종: 첫 SUBSCRIBE에서 해소·부착
+### 11.6 관심목록 조회와 복구
 
-- **문제(실측)**: `SessionConnectedEvent`는 CONNECTED ack가 클라로 나가는 `clientOutboundChannel` 스레드에서 동기 발화한다. 초기 구현은 onConnected에서 watchlist 해소(SMEMBERS)를 수행해, **틱 MESSAGE 전달과 같은 풀**에서 Redis I/O가 블로킹됐다. 평시(산발 접속)엔 무해하나, **재접속 폭풍**(재배포 → 동접 전원 백오프 재연결) 시 부하가 가장 큰 순간에 틱 지연(p95 스파이크)을 만드는 구조였다.
-- **최종 해법 (v0.6) — 출석은 CONNECTED, 수요는 첫 SUBSCRIBE**: CONNECTED에서 `registerSession`(세션↔유저, 인메모리 맵만 — outbound 무해), 첫 SUBSCRIBE(전송 스레드 — 실측 `o-auto-N-exec-*`)에서 `needsWatchlist` 게이트 → resolve → `attachWatchlist`. 이점: ① `attachWatchlist`는 출석부에 살아있는 세션만 받아 resolve 중 disconnect 시 no-op — 유령 차단 ② 프레즌스/메트릭이 접속자를 정확히 봄 ③ 미구독 세션은 수요 없음(§11.2 헛수요 해소) ④ 핸드오프 구조 불필요.
-- **부착 전 diff 유실 방지 (2차 리뷰 반영, 4차에서 압축)**: resolve가 구버전을 읽은 직후 `watchlist:updated`가 도착하면 미부착이라 버려지고 구버전이 부착되는 레이스가 있었다. 미부착 유저의 diff는 무시가 아니라 **pending 버퍼에 병합**한다(마지막 세션 종료 시 버퍼 정리). 버퍼는 diff를 리스트로 쌓지 않고 **종목별 최종 연산 (added, removed) 집합 쌍으로 압축 누적**한다 — 새 diff (a,r)마다 `A←(A∖r)∪a`, `R←(R∖a)∪r`. 장기 접속 + 반복 변경에도 메모리가 이벤트 수가 아니라 언급된 종목 수로 유계다. resolve 결과에 이미 반영된 diff를 다시 적용해도 집합 연산이라 멱등이다.
-- **거쳐간 대안들**:
-  - *CONNECT 프리페치 인터셉터 + 스태시* (1차 적용 후 대체): 해소(전송 스레드)와 등록(outbound)의 시점이 갈라져 `PendingWatchlists` 핸드오프 버퍼 + 잔류 정리가 필요했다. 첫 SUBSCRIBE 방식이 같은 스레드 배치를 더 적은 구조로 달성해 대체.
-  - *SessionConnectEvent 청취(한 줄 변경)*: 스레드 목표는 달성하나 event.user가 비어 있고(핸드셰이크 주체), **성립 전 등록**이라 실패 세션의 유령 수요를 disconnect 정리에 의존 — 기각.
-- **블로킹은 제거가 아니라 이전이다**: 블로킹 스택(MVC + 동기 Lettuce)에서 Redis I/O는 반드시 어떤 스레드를 점유한다 — 고를 수 있는 건 지불하는 풀뿐이다. 전송 워커는 프레임 단위로 빌리는 공유 풀(기본 200)로 outbound(코어×2)의 10배라, 폭풍의 Redis I/O가 워커당 수 ms로 분산되고 틱 전달과 격리된다. Tomcat 워커의 블로킹 I/O는 서블릿 스택의 설계 중심(모든 REST 핸들러가 하는 일)이며, 제로 블로킹이 필요해지면 그건 WebFlux 전환의 문제다(v0.2에서 기각).
-- **Redis 장애 방어**: 진짜 위험은 폭풍이 아니라 Redis 자체가 느려질 때다. 포트 계약(블로킹 ≤ 1s, §4.5)을 `spring.data.redis.timeout: 1s`로 강제한다 — Lettuce 기본(60s)대로면 장애 시 워커가 장시간 물려 풀 고갈로 번진다.
-- **잔여 사항**: outbound에 남은 Redis I/O는 프레즌스 쓰기(SADD/EXPIRE, 1s 상한)뿐. S7 재접속 폭풍 시나리오에서 최종 검증한다.
+- CONNECTED는 세션만 등록하고 첫 SUBSCRIBE가 유저별 조회를 예약한다. 전용 작업 풀에서 HTTP를 호출해 접속과 틱 처리 스레드를 보호한다.
+- 최초 API 결과, 주기 재검증 결과, Pub/Sub 스냅샷은 동일한 버전 검사를 거친다. 같은 유저의 동시 조회는 한 건으로 합치고, 종료된 연결 세대의 응답은 버린다.
+- Redis 구독 확인 콜백 및 주기 작업이 활성 유저를 최대 100명씩 묶어 DB 원본과 대조한다. 마지막 이벤트가 누락되어도 다음 성공한 재검증에서 복구된다.
 
 ### 11.7 [수용] 인바운드 수신 순서 — preserveReceiveOrder 적용 (리뷰 공방 기록)
 
@@ -481,18 +479,8 @@ auth-jwt/src/main/kotlin/com/alphatalk/auth/
 - **기록해둘 함정 (중간에 밟았던 것)**: 공개 API 대신 핸들러에 플래그만 수동으로 켜면 **세션의 첫 프레임(CONNECT)만 처리되고 이후 프레임이 영원히 멈춘다** — 완료 콜백을 쏴줄 인터셉터가 결선되지 않아 ordered 큐가 진행되지 않기 때문(E2E 전멸로 실증). 수동으로 하려면 `configureInterceptor`까지 2단 결선이 필요하지만, 공개 API가 둘 다 해주므로 쓸 이유가 없다. 공개 API와 수동 `configureInterceptor`를 병용해도 **중복 등록되지는 않으나**(기존 `CallbackTaskInterceptor`를 `noneMatch`로 검사하는 멱등 구현 — 바이트코드 확인), 불필요한 수동 결선이므로 금지한다.
 - 효과: 세션 단위 인바운드 처리 순서 보장(전역 직렬화 아님 — 세션 간 병렬성 유지). 브로커 구독 레지스트리의 유령 구독(해제했는데 계속 전달) 가능성 제거.
 
-### 11.8 [열림] 구독 실패 — 롤백은 기각, 리컨실은 S6로 남긴다
+### 11.8 Redis 채널 구독과 실패 복구
 
-`ChannelSubscriber.subscribe`의 동기 예외를 아무도 처리하지 않는 것이 리뷰에서 "수요가 latch된다"는 지적을 받아, 롤백을 넣어봤다가 **되돌렸다.** 되돌린 근거는 의존 라이브러리 계측이다 — 빌드가 실제로 해석하는 버전(`:ws` runtimeClasspath 기준 spring-data-redis 3.5.13 · spring-websocket **6.2.19**)의 바이트코드를 읽었다.
-
-- `RedisMessageListenerContainer.addListener`는 **리스너 등록(`listenerTopics`·`channelMapping`)을 먼저 하고, 그 다음에 `isRunning()`을 보고, 그 뒤에야 구독을 디스패치**한다. 그래서 ① 운영 중 Redis 장애로 구독이 실패해도 등록은 남아 컨테이너의 `handleSubscriptionException`·`potentiallyRecover`(`recoveryBackoff`)가 재구독하고, ② 컨테이너가 아직 안 돌면 예외 없이 매핑만 보관했다가 기동 시 구독한다. **두 경우 모두 우리가 할 일이 없다** — 오히려 롤백하면 컨테이너가 되살릴 채널의 수요를 미리 버려 데이터가 끊긴다.
-- 예외를 던져 세션을 끊고 재연결로 재시도시키는 것도 불가능하다. 세션 이벤트 리스너의 예외는 `StompSubProtocolHandler.publishEvent`가 `Throwable`로 잡아 로깅만 한다.
-- 주기적 리컨실도 지금 구조로는 헛돈다. `RedisChannelSubscriber`가 호출 **전에** 자기 `channels`에 넣으므로, 수요와 그 집합을 비교하면 언제나 "빠진 것 없음"이다. 리컨실이 의미를 가지려면 컨테이너의 실제 등록·구독 상태를 읽는 출처가 따로 있어야 한다.
-
-**따라서 롤백은 기각한다.** 다만 "컨테이너가 등록해두므로 언제나 복구된다"까지 단정하지는 않는다 — 리뷰에서 아직 계측하지 못한 경로가 두 가지 제기됐다.
-
-1. **복구 중 추가되는 구독의 레이스**: 컨테이너가 이미 복구 절차에 들어간 뒤 `addListener`가 새 토픽을 기록하면, 복구가 그 이전 스냅샷으로 재구독을 끝내고 새 채널만 빠질 수 있다.
-2. **연결 장애가 아닌 구독 오류**: ACL 거부·커맨드 타임아웃처럼 `RedisConnectionFailureException`이 아닌 실패는 컨테이너의 재시도 대상이 아닐 수 있고, 이때 등록과 `RedisChannelSubscriber.channels`는 남은 채 구독만 죽는다.
-3. **여러 채널 전이의 중도 중단**: `attachWatchlist`는 관심목록 전체를 `userWatchlists`에 먼저 기록한 뒤 종목을 순회한다. 첫 종목의 `subscribe`가 던지면 루프가 거기서 끊겨 그 종목의 `stream:`과 **뒤따르는 종목 전부**가 구독되지 않는데, 유저는 이미 "부착됨"이라 `needsWatchlist`가 false다. 컨테이너가 실패한 그 한 건을 복구하더라도 건너뛴 나머지는 아무도 복구하지 않는다. 예외는 §11.8 위 항목대로 세션에도 닿지 않는다.
-
-셋 중 하나라도 성립하면 결과는 같다 — 수요는 있는데 구독이 없고, `channels`가 재시도를 막는다. **S6에서 계측하고, 필요하면 리컨실을 넣는다.** 그때 비교 대상은 우리 `channels`가 아니라 **컨테이너의 실제 등록·구독 상태**여야 한다(호출 전에 채우는 `channels`와 수요를 비교하면 항상 "빠진 것 없음"이 나온다). 이 공백은 방 quote 토픽 이전부터 있던 것이고 이 PR이 넓히지 않는다 — quote 채널의 소유자가 둘로 늘었을 뿐, 실패 처리 경로는 그대로다.
+- `DemandRegistry`는 수요 전이 순서대로 채널의 목표 상태를 기록한다. 어댑터는 전용 스레드가 필요할 때 깨어나도록 세마포어로 신호를 보내고, Redis 호출 전에 목표 목록을 복사한다. Redis 호출을 기다리는 동안에도 수요와 세션을 계속 갱신할 수 있다.
+- 전용 스레드는 지난번 적용한 목록과 목표 목록의 차이만 등록·해지한다. 명령 중 들어온 변경은 다음 처리에서 합쳐서 적용한다. Redis 채널 수 메트릭은 작업 스레드가 마지막으로 적용한 등록 수를 보고한다.
+- Spring Data Redis는 실제 해지 전에 로컬 매핑을 지운다. 해지 도중 실패하면 같은 명령을 다시 호출해도 Redis에 남은 구독을 제거할 수 없다. 구독·해지에서 예외가 나면 5초 뒤 상시 채널을 포함한 최신 목표 목록으로 리스너 컨테이너를 재구성한다. 재구성 중 틱은 best-effort 계약에 따라 누락될 수 있고, 관심목록은 재구독 콜백에서 원본을 재검증한다.

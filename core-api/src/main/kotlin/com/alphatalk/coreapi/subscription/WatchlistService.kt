@@ -1,5 +1,6 @@
 package com.alphatalk.coreapi.subscription
 
+import com.alphatalk.contracts.envelope.WatchlistUpdated
 import com.alphatalk.coreapi.support.ApiException
 import com.alphatalk.coreapi.support.ErrorCode
 import org.springframework.stereotype.Service
@@ -8,7 +9,7 @@ import org.springframework.stereotype.Service
 class WatchlistService(
     private val store: WatchlistStore,
     private val command: WatchlistCommand,
-    private val mirror: WatchlistMirrorSync,
+    private val broadcaster: WatchlistBroadcaster,
 ) {
     fun list(userId: Long): List<WatchlistItem> = store.list(userId)
 
@@ -17,12 +18,12 @@ class WatchlistService(
         val change = command.subscribe(userId, code, MAX_ITEMS)
         return when (change.outcome) {
             SubscribeOutcome.ADDED -> {
-                mirror.sync(userId, MirrorChange(requireNotNull(change.state), addedCode = code))
+                publish(userId, requireNotNull(change.state))
                 true
             }
 
             SubscribeOutcome.ALREADY_SUBSCRIBED -> {
-                mirror.sync(userId, MirrorChange(requireNotNull(change.state), addedCode = code))
+                publish(userId, requireNotNull(change.state))
                 false
             }
 
@@ -46,13 +47,17 @@ class WatchlistService(
         when (change.outcome) {
             UnsubscribeOutcome.REMOVED,
             UnsubscribeOutcome.ALREADY_REMOVED,
-            -> mirror.sync(userId, MirrorChange(requireNotNull(change.state), removedCode = code))
+            -> publish(userId, requireNotNull(change.state))
 
             UnsubscribeOutcome.OWNER_MISSING -> throw unauthorized()
         }
     }
 
     private fun unauthorized() = ApiException(ErrorCode.UNAUTHORIZED, "인증이 필요합니다")
+
+    private fun publish(userId: Long, state: WatchlistState) {
+        broadcaster.publish(WatchlistUpdated(userId, state.rev, state.codes))
+    }
 
     private fun normalize(rawCode: String): String {
         val code = rawCode.trim()

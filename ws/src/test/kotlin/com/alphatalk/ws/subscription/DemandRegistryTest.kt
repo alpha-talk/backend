@@ -1,6 +1,7 @@
 package com.alphatalk.ws.subscription
 
 import com.alphatalk.contracts.ChannelKind
+import com.alphatalk.contracts.envelope.WatchlistUpdated
 import com.alphatalk.ws.relay.ChannelSubscriber
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.Nested
@@ -31,7 +32,8 @@ class DemandRegistryTest {
 
     private fun connectAndAttach(sessionId: String, userId: Long, watchlist: Set<String>) {
         registry.registerSession(sessionId, userId)
-        registry.attachWatchlist(sessionId, watchlist)
+        val target = requireNotNull(registry.startWatchlist(sessionId))
+        registry.applyWatchlist(WatchlistUpdated(userId, 1, watchlist.toList()), target)
     }
 
     @Nested
@@ -43,15 +45,15 @@ class DemandRegistryTest {
             assertThat(subscriber.subscribeCalls).isEmpty()
             assertThat(registry.connectedSessionCount()).isEqualTo(1)
             assertThat(registry.isUserConnected(1L)).isTrue()
-            assertThat(registry.needsWatchlist("s1")).isTrue()
+            assertThat(registry.watchlistTargets()).isEmpty()
         }
 
         @Test
         fun `needsWatchlist - 미등록 세션은 false, 부착 후 false`() {
-            assertThat(registry.needsWatchlist("ghost")).isFalse()
+            assertThat(registry.startWatchlist("ghost")).isNull()
 
             connectAndAttach("s1", 1L, setOf("005930"))
-            assertThat(registry.needsWatchlist("s1")).isFalse()
+            assertThat(registry.startWatchlist("s1")).isNull()
         }
 
         @Test
@@ -59,7 +61,7 @@ class DemandRegistryTest {
             connectAndAttach("s1", 1L, setOf("005930"))
             registry.registerSession("s2", 1L)
 
-            assertThat(registry.needsWatchlist("s2")).isFalse()
+            assertThat(registry.startWatchlist("s2")).isNull()
         }
     }
 
@@ -78,9 +80,10 @@ class DemandRegistryTest {
         @Test
         fun `죽은 세션에 부착 - 무시 (유령 세션 차단)`() {
             registry.registerSession("s1", 1L)
+            val target = requireNotNull(registry.startWatchlist("s1"))
             registry.removeSession("s1")
 
-            registry.attachWatchlist("s1", setOf("005930"))
+            registry.applyWatchlist(WatchlistUpdated(1, 1, listOf("005930")), target)
 
             assertThat(subscriber.subscribeCalls).isEmpty()
             assertThat(registry.usersWatching("005930")).isEmpty()
@@ -91,7 +94,7 @@ class DemandRegistryTest {
             connectAndAttach("s1", 1L, setOf("005930"))
             registry.registerSession("s2", 1L)
 
-            registry.attachWatchlist("s2", setOf("999999"))
+            assertThat(registry.startWatchlist("s2")).isNull()
 
             assertThat(registry.usersWatching("999999")).isEmpty()
             assertThat(registry.usersWatching("005930")).containsExactly(1L)
@@ -132,12 +135,12 @@ class DemandRegistryTest {
     }
 
     @Nested
-    inner class WatchlistDiff {
+    inner class WatchlistSnapshots {
         @Test
-        fun `added - 새 code 구독, removed - 수요 0이면 해지`() {
+        fun `a full snapshot skips missing revisions and replaces the old list`() {
             connectAndAttach("s1", 1L, setOf("005930"))
 
-            registry.applyWatchlistDiff(1L, added = listOf("000660"), removed = listOf("005930"))
+            registry.applyWatchlist(WatchlistUpdated(1, 14, listOf("000660")))
 
             assertThat(subscriber.active).containsExactlyInAnyOrder("quote:000660", "stream:000660")
             assertThat(registry.usersWatching("005930")).isEmpty()
@@ -145,81 +148,44 @@ class DemandRegistryTest {
         }
 
         @Test
-        fun `접속하지 않은 유저의 diff - 무시 (broadcast-and-filter)`() {
-            registry.applyWatchlistDiff(99L, added = listOf("005930"), removed = emptyList())
-
-            assertThat(subscriber.subscribeCalls).isEmpty()
-            assertThat(registry.usersWatching("005930")).isEmpty()
-        }
-
-        @Test
-        fun `부착 전 도착한 diff - 버퍼링 후 부착 시 병합 (구버전 해소와의 레이스 방지)`() {
+        fun `events for inactive users do not create demand`() {
             registry.registerSession("s1", 1L)
+            registry.applyWatchlist(WatchlistUpdated(1, 2, listOf("005930")))
 
-            registry.applyWatchlistDiff(1L, added = listOf("000660"), removed = listOf("005930"))
-            assertThat(subscriber.subscribeCalls).isEmpty()
-
-            registry.attachWatchlist("s1", setOf("005930", "035420"))
-
-            assertThat(registry.usersWatching("005930")).isEmpty()
-            assertThat(registry.usersWatching("000660")).containsExactly(1L)
-            assertThat(registry.usersWatching("035420")).containsExactly(1L)
-        }
-
-        @Test
-        fun `부착 전 여러 diff - 종목별 최종 연산으로 압축 (추가 후 제거)`() {
-            registry.registerSession("s1", 1L)
-
-            registry.applyWatchlistDiff(1L, added = listOf("000660"), removed = emptyList())
-            registry.applyWatchlistDiff(1L, added = emptyList(), removed = listOf("000660"))
-
-            registry.attachWatchlist("s1", emptySet())
-
-            assertThat(registry.usersWatching("000660")).isEmpty()
             assertThat(subscriber.subscribeCalls).isEmpty()
         }
 
         @Test
-        fun `부착 전 여러 diff - 제거 후 재추가는 살아남는다`() {
+        fun `an event wins over an older initial response and duplicate versions`() {
             registry.registerSession("s1", 1L)
+            val target = requireNotNull(registry.startWatchlist("s1"))
 
-            registry.applyWatchlistDiff(1L, added = emptyList(), removed = listOf("000660"))
-            registry.applyWatchlistDiff(1L, added = listOf("000660"), removed = emptyList())
+            registry.applyWatchlist(WatchlistUpdated(1, 14, listOf("000660")))
+            registry.applyWatchlist(WatchlistUpdated(1, 13, listOf("005930")), target)
+            registry.applyWatchlist(WatchlistUpdated(1, 14, listOf("005930")))
 
-            registry.attachWatchlist("s1", emptySet())
-
-            assertThat(registry.usersWatching("000660")).containsExactly(1L)
+            assertThat(subscriber.active).containsExactlyInAnyOrder("quote:000660", "stream:000660")
         }
 
         @Test
-        fun `부착 전 diff 후 마지막 세션 종료 - pending 잔류 없음`() {
+        fun `a response from a previous connection is discarded`() {
             registry.registerSession("s1", 1L)
-            registry.applyWatchlistDiff(1L, added = listOf("000660"), removed = emptyList())
+            val previous = requireNotNull(registry.startWatchlist("s1"))
             registry.removeSession("s1")
+            connectAndAttach("s2", 1L, setOf("005930"))
 
-            registry.registerSession("s2", 1L)
-            registry.attachWatchlist("s2", setOf("005930"))
+            registry.applyWatchlist(WatchlistUpdated(1, 9, listOf("000660")), previous)
 
             assertThat(registry.usersWatching("000660")).isEmpty()
             assertThat(registry.usersWatching("005930")).containsExactly(1L)
         }
 
         @Test
-        fun `중복 added - 멱등`() {
-            connectAndAttach("s1", 1L, setOf("005930"))
-            val calls = subscriber.subscribeCalls.size
-
-            registry.applyWatchlistDiff(1L, added = listOf("005930"), removed = emptyList())
-
-            assertThat(subscriber.subscribeCalls).hasSize(calls)
-        }
-
-        @Test
-        fun `다른 유저도 보는 code의 removed - 채널 유지`() {
+        fun `an empty snapshot preserves another user's demand`() {
             connectAndAttach("s1", 1L, setOf("005930"))
             connectAndAttach("s2", 2L, setOf("005930"))
 
-            registry.applyWatchlistDiff(1L, added = emptyList(), removed = listOf("005930"))
+            registry.applyWatchlist(WatchlistUpdated(1, 2, emptyList()))
 
             assertThat(subscriber.active).contains("quote:005930")
             assertThat(registry.usersWatching("005930")).containsExactly(2L)
@@ -426,7 +392,7 @@ class DemandRegistryTest {
         fun `watchlist diff - added·removed가 스냅샷에 반영된다`() {
             connectAndAttach("s1", 1L, setOf("005930"))
 
-            registry.applyWatchlistDiff(1L, added = listOf("000660"), removed = listOf("005930"))
+            registry.applyWatchlist(WatchlistUpdated(1, 2, listOf("000660")))
 
             assertThat(registry.demandSnapshot().quote).isEqualTo(mapOf("000660" to 1))
         }
