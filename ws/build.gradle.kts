@@ -49,11 +49,14 @@ tasks.register<Test>("loadTest") {
     group = "verification"
     testClassesDirs = sourceSets["test"].output.classesDirs
     classpath = sourceSets["test"].runtimeClasspath
-    maxHeapSize = "1g"
+    maxHeapSize = providers.gradleProperty("wsLoadHeap").getOrElse("2g")
     useJUnitPlatform {
         includeTags("load")
     }
     systemProperty("ws.load.clients", providers.gradleProperty("wsLoadClients").getOrElse("500"))
     systemProperty("ws.load.rounds", providers.gradleProperty("wsLoadRounds").getOrElse("5"))
     systemProperty("ws.load.fanout.seconds", providers.gradleProperty("wsLoadFanoutSeconds").getOrElse("30"))
+    systemProperty("ws.load.connect.batch", providers.gradleProperty("wsLoadConnectBatch").getOrElse("50"))
+    systemProperty("ws.load.connect.pause.millis", providers.gradleProperty("wsLoadConnectPauseMillis").getOrElse("0"))
+    systemProperty("ws.load.connect.timeout.seconds", providers.gradleProperty("wsLoadConnectTimeoutSeconds").getOrElse("30"))
 }

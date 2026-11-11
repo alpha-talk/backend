@@ -19,6 +19,22 @@ Docker가 실행 중이면 Testcontainers가 Redis와 포트가 임의 배정된
   -PwsLoadFanoutSeconds=10
 ```
 
+10,000세션을 한 게이트웨에 연결할 때는 부하 생성기 힙을 함께 늘린다.
+
+```bash
+./gradlew :ws:loadTest \
+  -PwsLoadClients=10000 \
+  -PwsLoadHeap=4g \
+  -PwsLoadConnectBatch=25 \
+  -PwsLoadConnectPauseMillis=50 \
+  -PwsLoadConnectTimeoutSeconds=30 \
+  -PwsLoadRounds=5 \
+  -PwsLoadFanoutSeconds=30
+```
+
+이 프로필은 초당 약 500세션으로 연결을 늘린 뒤 10,000 고정 동시성을 측정한다. 연결 폭주(spike) 수용량 테스트가 아니다.
+서버는 Tomcat 기본 연결 상한 8,192를 넘기기 위해 `WS_TOMCAT_MAX_CONNECTIONS`를 기본 12,000으로 두며, 배포 용량에 맞게 조정할 수 있다.
+
 합격 기준은 락 대기 p99 100ms 미만, 락 대기·보유 100ms 초과 0건, quote 수신율 99% 이상, quote 종단 지연 p95 1초 이하, 종료 시 outbound 큐 0이다. 생성기와 서버가 한 JVM의 CPU를 공유하므로 CPU 포화나 transport error가 발생하면 서버 한계로 단정하지 않고 생성기를 별도 머신으로 옮겨 재검증한다.
 
 Prometheus 이름은 다음과 같다.
@@ -28,6 +44,7 @@ Prometheus 이름은 다음과 같다.
 - `ws_demand_lock_over_threshold_total{phase,operation}`
 - `ws_demand_lock_queued`
 - `ws_client_outbound_queue_depth`
+- `ws_presence_failures_total{operation}`
 
 ## core-api 스트림 조회
 

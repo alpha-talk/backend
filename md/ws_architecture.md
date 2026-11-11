@@ -232,7 +232,7 @@ roomQuoteCodes:  Set<code>                            // 방 quote 구독이 살
 - `DemandRegistry`의 변경 메서드는 단일 락으로 직렬화한다. 같은 락 안에서 채널의 목표 상태를 기록하고 세마포어 신호를 보낸다. Redis 구독·해지는 전용 작업 스레드에서 처리한다.
 - 읽기(`DemandQuery.usersWatching` — 틱마다 호출)는 **락 없이** 읽는다. `watchlistIndex`를 `ConcurrentHashMap<code, 불변 Set>`으로 두고, 변경 시 Set을 통째로 교체(copy-on-write)한다.
 - 모든 락 경로는 `ws.demand.lock.wait`·`ws.demand.lock.hold` 타이머로 분리 계측하고, `ws.demand.lock.over.threshold{phase,operation}`가 100ms 초과를 센다. 현재 대기 스레드는 `ws.demand.lock.queued` 게이지로 본다. operation 태그는 메서드별 고정 집합이라 카디널리티가 유계다.
-- 단일 인스턴스 500세션·41종목 동시 SUBSCRIBE/UNSUBSCRIBE 스모크에서 락 대기 p99 < 100ms이고 100ms 초과 카운터가 0이어야 한다. 락 최적화는 이 S7 계측에서 병목으로 확인될 때만 한다. CHM 대신 락을 고른 자세한 근거는 §11.3.
+- 단일 인스턴스 10,000세션·41종목 동시 SUBSCRIBE/UNSUBSCRIBE 스모크에서 락 대기 p99 < 100ms이고 100ms 초과 카운터가 0이어야 한다. 락 최적화는 이 S7 계측에서 병목으로 확인될 때만 한다. CHM 대신 락을 고른 자세한 근거는 §11.3.
 
 ### 5.4 스레딩 모델
 

@@ -3,7 +3,9 @@ package com.alphatalk.ws
 import com.alphatalk.auth.JwtTokenProvider
 import com.alphatalk.contracts.Channels
 import com.alphatalk.contracts.Destinations
+import com.alphatalk.contracts.envelope.WatchlistUpdated
 import com.alphatalk.ws.subscription.DemandLockMetrics
+import com.alphatalk.ws.watchlist.WatchlistResolver
 import com.fasterxml.jackson.databind.ObjectMapper
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.Timer
@@ -12,10 +14,15 @@ import org.awaitility.Awaitility.await
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Tag
 import org.junit.jupiter.api.Test
+import org.apache.tomcat.websocket.Constants
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.context.SpringBootTest
+import org.springframework.boot.test.context.TestConfiguration
 import org.springframework.boot.test.web.server.LocalServerPort
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection
+import org.springframework.context.annotation.Bean
+import org.springframework.context.annotation.Import
+import org.springframework.context.annotation.Primary
 import org.springframework.data.redis.core.StringRedisTemplate
 import org.springframework.messaging.simp.stomp.StompHeaders
 import org.springframework.messaging.simp.stomp.StompSession
@@ -40,15 +47,30 @@ import kotlin.math.ceil
 @Tag("load")
 @SpringBootTest(
     webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
-    properties = ["alphatalk.auth.jwt.secret=$LOAD_TEST_SECRET"],
+    properties = [
+        "alphatalk.auth.jwt.secret=$LOAD_TEST_SECRET",
+        "ws.watchlist.reconcile-interval=1h",
+        "logging.level.com.alphatalk.ws.subscription.SessionEventListener=WARN",
+        "logging.level.com.alphatalk.ws.presence.RedisPresenceService=ERROR",
+    ],
 )
 @Testcontainers
+@Import(WsLoadSmokeTest.LoadTestConfiguration::class)
 class WsLoadSmokeTest {
     companion object {
         @Container
         @ServiceConnection
         @JvmStatic
         val redis = GenericContainer("redis:7-alpine").withExposedPorts(6379)
+    }
+
+    @TestConfiguration
+    class LoadTestConfiguration {
+        @Bean
+        @Primary
+        fun emptyWatchlistResolver() = WatchlistResolver { userIds ->
+            userIds.map { WatchlistUpdated(it, 0, emptyList()) }
+        }
     }
 
     @LocalServerPort
@@ -66,6 +88,9 @@ class WsLoadSmokeTest {
     private val clients = System.getProperty("ws.load.clients", "500").toInt()
     private val rounds = System.getProperty("ws.load.rounds", "5").toInt()
     private val fanoutSeconds = System.getProperty("ws.load.fanout.seconds", "30").toInt()
+    private val connectBatchSize = System.getProperty("ws.load.connect.batch", "50").toInt()
+    private val connectPauseMillis = System.getProperty("ws.load.connect.pause.millis", "0").toLong()
+    private val connectTimeoutSeconds = System.getProperty("ws.load.connect.timeout.seconds", "30").toLong()
     private val codes = (1..41).map { it.toString().padStart(6, '0') }
     private val tokenProvider = JwtTokenProvider(LOAD_TEST_SECRET)
     private val sessions = Collections.synchronizedList(mutableListOf<StompSession>())
@@ -75,14 +100,19 @@ class WsLoadSmokeTest {
         setThreadNamePrefix("load-stomp-")
         initialize()
     }
-    private val stomp = WebSocketStompClient(StandardWebSocketClient()).apply {
+    private val webSocketClient = StandardWebSocketClient().apply {
+        setUserProperties(
+            mapOf(Constants.IO_TIMEOUT_MS_PROPERTY to TimeUnit.SECONDS.toMillis(connectTimeoutSeconds).toString()),
+        )
+    }
+    private val stomp = WebSocketStompClient(webSocketClient).apply {
         taskScheduler = scheduler
         setDefaultHeartbeat(longArrayOf(0, 0))
     }
 
     @AfterEach
     fun cleanup() {
-        sessions.forEach { runCatching { it.disconnect() } }
+        disconnectAll()
         stomp.stop()
         scheduler.shutdown()
     }
@@ -139,11 +169,13 @@ class WsLoadSmokeTest {
             percentile(timer("ws.demand.lock.wait", operation))
         }
         val overThreshold = meters.find("ws.demand.lock.over.threshold").counters().sumOf { it.count() }
+        val presenceFailures = meters.find("ws.presence.failures").counters().sumOf { it.count() }
 
         println(
             "ws-load clients=$clients rounds=$rounds expected=$expected received=${received.get()} " +
                 "deliveryRatio=$deliveryRatio quoteP95Ms=$p95 lockWaitP99Ms=$lockP99 " +
-                "lockOver100Ms=$overThreshold outboundQueueMax=${maxOutboundQueue.get()}",
+                "lockOver100Ms=$overThreshold presenceFailures=$presenceFailures " +
+                "outboundQueueMax=${maxOutboundQueue.get()}",
         )
 
         assertThat(transportErrors).isEmpty()
@@ -151,21 +183,30 @@ class WsLoadSmokeTest {
         assertThat(p95).isLessThanOrEqualTo(1_000)
         assertThat(lockP99.values).allMatch { it < DemandLockMetrics.THRESHOLD_MILLIS }
         assertThat(overThreshold).isZero()
+        assertThat(presenceFailures).isZero()
 
         unsubscribeBurst(subscriptions)
         await().atMost(Duration.ofSeconds(10)).untilAsserted {
             assertThat(gauge("ws.client.outbound.queue.depth")).isZero()
             assertThat(gauge("ws.redis.channels.subscribed")).isEqualTo(fixedRedisChannels)
         }
-        sessions.forEach { it.disconnect() }
+        disconnectAll()
         await().atMost(Duration.ofSeconds(10)).untilAsserted {
             assertThat(gauge("ws.sessions.connected")).isZero()
         }
+        assertThat(meters.find("ws.presence.failures").counters().sumOf { it.count() }).isZero()
         sessions.clear()
     }
 
+    private fun disconnectAll() {
+        sessions.toList().chunked(connectBatchSize).forEach { batch ->
+            batch.forEach { runCatching { it.disconnect() } }
+            if (connectPauseMillis > 0) TimeUnit.MILLISECONDS.sleep(connectPauseMillis)
+        }
+    }
+
     private fun connectAll() {
-        (0 until clients).chunked(CONNECT_BATCH_SIZE).forEach { batch ->
+        (0 until clients).chunked(connectBatchSize).forEach { batch ->
             val futures = batch.map { index ->
                 val connectHeaders = StompHeaders().apply {
                     add(
@@ -185,10 +226,18 @@ class WsLoadSmokeTest {
                 )
             }
             futures.forEach { future ->
-                future.get(15, TimeUnit.SECONDS).also {
-                    sessions += it
+                try {
+                    future.get(connectTimeoutSeconds + 5, TimeUnit.SECONDS).also {
+                        sessions += it
+                    }
+                } catch (exception: Exception) {
+                    throw AssertionError(
+                        "WebSocket ramp-up failed after ${sessions.size}/$clients connected sessions",
+                        exception,
+                    )
                 }
             }
+            if (connectPauseMillis > 0) TimeUnit.MILLISECONDS.sleep(connectPauseMillis)
         }
     }
 
@@ -276,6 +325,5 @@ class WsLoadSmokeTest {
 }
 
 private const val LOAD_TEST_SECRET = "load-test-secret-0123456789abcdef"
-private const val CONNECT_BATCH_SIZE = 50
 private const val QUOTE_HZ = 4
 private val QUOTE_PERIOD_NANOS = TimeUnit.SECONDS.toNanos(1) / QUOTE_HZ
