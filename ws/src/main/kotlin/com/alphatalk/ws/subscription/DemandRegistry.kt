@@ -7,12 +7,12 @@ import com.alphatalk.ws.relay.ChannelSubscriber
 import org.springframework.stereotype.Component
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.locks.ReentrantLock
-import kotlin.concurrent.withLock
 
 @Component
 class DemandRegistry(
     private val channelSubscriber: ChannelSubscriber,
     private val syncTrigger: DemandSyncTrigger,
+    private val lockMetrics: DemandLockMetrics,
 ) : DemandQuery, DemandMutator, DemandSnapshotSource {
     private class SessionInfo(
         val userId: Long,
@@ -37,36 +37,44 @@ class DemandRegistry(
     private val watchlistIndex = ConcurrentHashMap<String, Set<Long>>()
     private val roomQuoteCodes = ConcurrentHashMap.newKeySet<String>()
 
+    init {
+        lockMetrics.bind(lock)
+    }
+
     override fun usersWatching(code: String): Set<Long> = watchlistIndex[code] ?: emptySet()
 
     override fun roomHasQuoteViewers(code: String): Boolean = code in roomQuoteCodes
 
-    override fun demandSnapshot(): DemandSnapshot = lock.withLock {
+    override fun demandSnapshot(): DemandSnapshot = withMeasuredLock("demand_snapshot") {
         val quote = watchlistIndex.mapValues { it.value.size }
         val room = HashMap<String, Int>()
         roomIndex.forEach { (key, count) -> room.merge(key.second, count, Int::plus) }
         DemandSnapshot(quote = quote, room = room)
     }
 
-    override fun isUserConnected(userId: Long): Boolean = lock.withLock { userId in userSessions }
+    override fun isUserConnected(userId: Long): Boolean = withMeasuredLock("is_user_connected") {
+        userId in userSessions
+    }
 
-    override fun watchlistTargets(): List<WatchlistTarget> = lock.withLock {
+    override fun watchlistTargets(): List<WatchlistTarget> = withMeasuredLock("watchlist_targets") {
         userWatchlists.values.map { it.target }
     }
 
-    override fun connectedUserIds(): Set<Long> = lock.withLock { userSessions.keys.toSet() }
+    override fun connectedUserIds(): Set<Long> = withMeasuredLock("connected_user_ids") {
+        userSessions.keys.toSet()
+    }
 
-    override fun connectedSessionCount(): Int = lock.withLock { sessions.size }
+    override fun connectedSessionCount(): Int = withMeasuredLock("connected_session_count") { sessions.size }
 
     override fun registerSession(sessionId: String, userId: Long) {
-        lock.withLock {
+        withMeasuredLock("register_session") {
             if (sessionId in sessions) return
             sessions[sessionId] = SessionInfo(userId)
             userSessions.getOrPut(userId) { HashSet() }.add(sessionId)
         }
     }
 
-    override fun startWatchlist(sessionId: String): WatchlistTarget? = lock.withLock {
+    override fun startWatchlist(sessionId: String): WatchlistTarget? = withMeasuredLock("start_watchlist") {
         val info = sessions[sessionId] ?: return null
         if (info.userId in userWatchlists) return null
         val target = WatchlistTarget(info.userId, sessionId)
@@ -75,7 +83,7 @@ class DemandRegistry(
     }
 
     override fun removeSession(sessionId: String) {
-        lock.withLock {
+        withMeasuredLock("remove_session") {
             val info = sessions.remove(sessionId) ?: return
             info.roomSubs.values.forEach { releaseRoom(it) }
             val remaining = userSessions[info.userId]?.apply { remove(sessionId) }
@@ -93,7 +101,7 @@ class DemandRegistry(
         ) {
             "not a room channel kind: $kind"
         }
-        lock.withLock {
+        withMeasuredLock("subscribe_room") {
             val info = sessions[sessionId] ?: return
             val previous = info.roomSubs.put(subscriptionId, RoomSub(kind, code))
             if (previous != null) releaseRoom(previous)
@@ -113,7 +121,7 @@ class DemandRegistry(
     }
 
     override fun unsubscribeById(sessionId: String, subscriptionId: String) {
-        lock.withLock {
+        withMeasuredLock("unsubscribe_by_id") {
             val info = sessions[sessionId] ?: return
             val sub = info.roomSubs.remove(subscriptionId) ?: return
             releaseRoom(sub)
@@ -121,7 +129,7 @@ class DemandRegistry(
     }
 
     override fun applyWatchlist(snapshot: WatchlistUpdated, target: WatchlistTarget?) {
-        lock.withLock {
+        withMeasuredLock("apply_watchlist") {
             val watchlist = userWatchlists[snapshot.userId] ?: return
             if (target != null && target != watchlist.target) return
             if (snapshot.rev <= watchlist.rev) return
@@ -178,4 +186,16 @@ class DemandRegistry(
         }
     }
 
+    private inline fun <T> withMeasuredLock(operation: String, block: () -> T): T {
+        val waitStarted = System.nanoTime()
+        lock.lock()
+        val acquired = System.nanoTime()
+        try {
+            return block()
+        } finally {
+            val released = System.nanoTime()
+            lock.unlock()
+            lockMetrics.record(operation, acquired - waitStarted, released - acquired)
+        }
+    }
 }

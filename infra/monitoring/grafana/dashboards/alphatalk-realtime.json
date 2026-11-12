@@ -197,6 +197,55 @@
         { "refId": "D", "expr": "sum(rate(minute_candle_backfill_day_total[5m])) * 60", "legendFormat": "backfill day" }
       ],
       "fieldConfig": { "defaults": { "unit": "opm" }, "overrides": [] }
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "WS Demand Lock p99",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 29 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(ws_demand_lock_wait_seconds_bucket[1m]))) * 1000",
+          "legendFormat": "wait p99"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(ws_demand_lock_hold_seconds_bucket[1m]))) * 1000",
+          "legendFormat": "hold p99"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 100 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "WS Lock / Outbound Queue",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 29 },
+      "targets": [
+        { "refId": "A", "expr": "ws_demand_lock_queued", "legendFormat": "lock queued" },
+        { "refId": "B", "expr": "ws_client_outbound_queue_depth", "legendFormat": "outbound queue" },
+        {
+          "refId": "C",
+          "expr": "sum(increase(ws_demand_lock_over_threshold_total[1m]))",
+          "legendFormat": "lock over 100ms"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 0 }, "overrides": [] }
     }
   ]
 }

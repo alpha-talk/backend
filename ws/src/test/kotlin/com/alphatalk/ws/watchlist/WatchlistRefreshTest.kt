@@ -2,6 +2,7 @@ package com.alphatalk.ws.watchlist
 
 import com.alphatalk.contracts.envelope.WatchlistUpdated
 import com.alphatalk.ws.relay.ChannelSubscriber
+import com.alphatalk.ws.subscription.DemandLockMetrics
 import com.alphatalk.ws.subscription.DemandRegistry
 import com.alphatalk.ws.subscription.DemandSyncTrigger
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
@@ -12,7 +13,7 @@ class WatchlistRefreshTest {
     private val registry = DemandRegistry(object : ChannelSubscriber {
         override fun subscribe(channel: String) = Unit
         override fun unsubscribe(channel: String) = Unit
-    }, DemandSyncTrigger())
+    }, DemandSyncTrigger(), DemandLockMetrics(SimpleMeterRegistry()))
 
     @Test
     fun `reconciliation batches active users and repairs the missed final event`() {

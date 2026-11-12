@@ -2,6 +2,7 @@ package com.alphatalk.ws.relay
 
 import com.alphatalk.contracts.ChannelKind
 import com.alphatalk.contracts.Channels
+import com.alphatalk.ws.subscription.DemandLockMetrics
 import com.alphatalk.ws.subscription.DemandRegistry
 import com.alphatalk.ws.subscription.DemandSyncTrigger
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
@@ -24,7 +25,7 @@ class RedisChannelSubscriberTest {
         val router = Mockito.mock(MessageRouter::class.java)
         val beans = DefaultListableBeanFactory().apply { registerSingleton("router", router) }
         val subscriber = RedisChannelSubscriber(container, beans.getBeanProvider(MessageRouter::class.java), SimpleMeterRegistry())
-        val registry = DemandRegistry(subscriber, DemandSyncTrigger())
+        val registry = DemandRegistry(subscriber, DemandSyncTrigger(), DemandLockMetrics(SimpleMeterRegistry()))
         val enteredRedis = CountDownLatch(1)
         val releaseRedis = CountDownLatch(1)
         val firstChannel = ChannelTopic(Channels.quote("005930"))
