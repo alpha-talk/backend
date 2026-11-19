@@ -15,12 +15,12 @@ worker-ingest·worker-llm을 구현하거나 리뷰하기 전에 여는 문서�
 | ② 유사 내용의 타 언론사 기사 묶기 | worker-llm 임베딩 클러스터링 — 클러스터당 스트림 이벤트 1건 | FR-04/05 노이즈 감소 |
 | ③ 매일 호재·악재 AI 요약 | 일일 다이제스트 — `queue:ingest`에 digest 잡 적재 → worker-llm 생성 | 기획안 AI_SUMMARY(P3)의 뉴스 기반 조기 구체화 |
 
-수집과 가공은 서버를 나누고, 둘은 `queue:ingest` 하나로만 잇는다. 큐를 사이에 두면 스케줄은 싱글턴(ingest), 실행은 무상태 ×N(llm)으로 갈라져 리더 선출이 필요 없다.
+수집과 가공은 서버를 나눈다. 작업은 `queue:ingest`로 전달하고, RSS 기사의 수집본과 처리 결과는 PostgreSQL 수집 테이블을 공유한다.
 
 | 워커 | 책임 | 비책임 |
 |---|---|---|
-| **worker-ingest** | 소스 폴링(RSS), 정규화·exact 중복 제거, `XADD queue:ingest`, 일일 다이제스트 잡 적재(스케줄러) — 종목 후보는 소스가 아는 것만 전달(텍스트 매칭 없음, §2.4) | LLM 호출, DB 쓰기(읽기는 허용), Pub/Sub 발행 |
-| **worker-llm** | `XREADGROUP g:llm` 소비, 본문 확보, 클러스터 판정, LLM 요약·감성 분류, `stream_event` persist, `PUBLISH stream:{code}`, XACK, 일일 다이제스트 생성 | 수집·폴링, 스케줄(무상태 ×N 유지) |
+| **worker-ingest** | RSS 폴링, 정규화, 피드 상태·기사 저장, `XADD queue:ingest`, 일일 다이제스트 잡 적재 — 종목 후보는 소스가 아는 것만 전달(§2.4) | LLM 호출, Pub/Sub 발행 |
+| **worker-llm** | `XREADGROUP g:llm` 소비, 본문 확보, 클러스터 판정, LLM 요약·감성 분류, `stream_event` 저장, `PUBLISH stream:{code}`, RSS 처리 결과 기록과 XACK, 일일 다이제스트 생성 | 수집·폴링, 스케줄 |
 
 **핵심 설계 결정** (근거는 각 절):
 
@@ -35,7 +35,7 @@ worker-ingest·worker-llm을 구현하거나 리뷰하기 전에 여는 문서�
 
 ## 1. 전체 파이프라인
 
-두 워커 사이에 직접 호출은 없다. 모든 연결은 `queue:ingest` 한 곳을 지나고, 기사는 수집 → 큐 → 가공 → 발행 한 방향으로만 흐른다.
+두 워커 사이에 직접 호출은 없다. 기사는 수집 → PostgreSQL → 큐 → 가공 → 발행 순서로 흐른다.
 
 ```
 [RSS 피드들]                                               (매일 18:00 KST)
@@ -43,8 +43,8 @@ worker-ingest·worker-llm을 구현하거나 리뷰하기 전에 여는 문서�
       ▼                                                       ▼
 ┌─────────────────────────────┐                    ┌──────────────────────┐
 │ worker-ingest               │                    │ ingest 스케줄러       │
-│  폴링 → 정규화 → seen 체크   │                    │  당일 뉴스 있는 종목별 │
-│  → 종목 후보(소스 부여만)    │                    │  digest 잡 생성       │
+│  폴링 → 기사 정규화          │                    │  당일 뉴스 있는 종목별 │
+│  → 피드 상태와 기사 DB 저장  │                    │  digest 잡 생성       │
 └──────────┬──────────────────┘                    └──────────┬───────────┘
            │ XADD (type=news)                                 │ XADD (type=digest)
            ▼                                                  ▼
@@ -81,7 +81,7 @@ worker-ingest는 외부 소스를 큐 엔트리로 바꾸는 일만 한다. 관�
 
 - RSS 설정은 기본 `application.yml`이 소유해 실행 프로필과 무관하게 같은 목록을 쓴다. 피드의 `id`는 섹션별 로그·메트릭 식별자이고, `source`는 언론사 단위 표시값이자 `sourceId` 네임스페이스다. 같은 언론사의 여러 섹션에 같은 기사가 걸려도 하나만 남긴다.
 - MVP RSS는 연합뉴스·한국경제·동아일보·조선일보의 경제·산업·금융 섹션만 쓴다. 매일경제·뉴시스는 기본 목록에서 뺐고, 주식 관련성이 낮은 사회·정치 섹션과 경향신문·한겨레·서울경제 피드도 제외한다. 본문 fetch 허용 호스트(worker-llm `allowed-host-suffixes`)는 피드를 다시 넓힐 때를 대비해 더 넓게 유지한다 — 허용 목록에만 있고 피드에 없는 언론사는 기사가 들어오지 않아 무해하다.
-- 피드별 ETag와 Last-Modified는 해당 `NewsSource` 인스턴스가 메모리에 들고 있다. `304 Not Modified`는 빈 결과로 처리하며, 재기동 후 첫 요청은 조건 없이 보낸다.
+- 피드별 ETag와 Last-Modified는 `news_ingest_feed`에 저장한다. 새 응답의 기사와 피드 상태를 같은 PostgreSQL 트랜잭션으로 커밋한다. 재기동 후에도 조건부 요청을 보내며 `304 Not Modified`면 저장을 생략한다. URL 변경 시 이전 검증 값을 보내지 않는다.
 - 소스는 `NewsSource` 포트 뒤의 어댑터로 추가한다 — 소스가 늘어도 파이프라인 코드는 그대로여야 한다.
 - **크롤링 준법**: robots.txt 준수, 식별 가능한 User-Agent, 사이트별 요청 간격 제한. robots.txt와 본문 요청은 `rate:article-fetch:{host}` TTL 게이트로 모든 llm-worker 인스턴스가 기본 1초 간격을 공유한다. 본문 페이지 fetch는 worker-llm이 신규 클러스터를 요약하기 직전에만 한다(수집 단계 대량 fetch 금지).
 - **폴링 병렬화**: 소스별 fetch·처리는 고정 크기 스레드 풀(`fetch-concurrency`, 기본 4)에서 소스 단위 태스크로 병렬 실행한다. 느리거나 죽은 소스(타임아웃 최대 ~15s) 하나가 전체 폴링 주기를 끌지 않게 하려는 것이다. 같은 소스 안의 기사 처리는 순차라 사이트별 요청 예절은 그대로 지켜지고, 통계는 소스별로 모은 뒤 합산한다(공유 가변 상태 없음).
@@ -98,8 +98,12 @@ worker-ingest는 외부 소스를 큐 엔트리로 바꾸는 일만 한다. 관�
 |---|---|
 | URL 정규화 | 추적 파라미터(utm_* 등) 제거, 스킴·호스트 소문자화 |
 | `sourceId` | `{source}:{기사 고유 ID}` — 고유 ID 없으면 정규화 URL의 SHA-256 앞 16자 |
-| exact 중복 | `seen:ingest:{sourceId}` 확인 → `XADD` → 마커 기록(TTL 7일)을 Redis 단일 실행으로 처리, 마커가 있으면 skip — 같은 기사 재수집 흡수([redis_contract](redis_contract.md) §2.1). 마커를 XADD보다 먼저 기록하지 않으므로 적재 실패가 유실로 남지 않는다 |
-| 저장 범위 | 제목 + 리드 발췌(≤200자) + 원문 URL만 큐에 싣는다. 전문(全文)은 싣지도 저장하지도 않는다 |
+| exact 중복 | `news_ingest_inbox.source_id` 기본키로 최초 기사만 저장한다. 동시 삽입이나 피드 버전 충돌로 롤백되면 받아 둔 응답으로 새 트랜잭션을 최대 두 번 재시도한다. 피드 버전이 앞서 바뀌었으면 응답의 새 기사만 저장하고 최신 검증 값을 유지한다 |
+| 저장 범위 | 제목, 리드 발췌(≤200자), 원문 URL과 처리용 메타데이터를 DB에 저장하고 큐에 싣는다. 전문(全文)은 저장하지 않는다 |
+
+미종결 기사는 5초 간격으로 PostgreSQL에서 다음 전송 시각순으로 최대 100건을 조회한다. 조건부 갱신으로 다음 전송 시각을 1분 뒤로 미루면서 전송 슬롯을 선점한다. Redis에 이전 스트림 항목이 있으면 그대로 두고, 장애·초기화·trim으로 없어졌으면 재적재한다. Redis 호출 실패 시 해당 회차를 종료한다. `ingest.captured`, `ingest.enqueued`, `ingest.enqueue.errors`로 DB 저장과 큐 적재를 추적한다.
+
+LLM 처리가 끝나면 DB에 완료 상태를 기록한 뒤 ACK한다. poison은 DLQ에 옮긴 뒤 DB 실패 상태를 기록하고 ACK한다. 종결 행은 중복 방지와 수동 복구에 사용한다. Redis 초기화로 그룹이 없어지면 소비자가 다시 만든다. 기존 Redis 항목에는 DB 행이 없을 수 있다. 배포 때 모든 LLM 워커를 먼저 전환한다. 최초 DB 커밋 전 RSS에서 사라진 기사는 복구할 수 없다.
 
 ### 2.4 종목 후보 매핑
 
@@ -427,7 +431,7 @@ market_digest(
 -- INDEX news_cluster (last_article_at) — 72h 창 후보 조회
 ```
 
-Liquibase 마이그레이션(`db-migrations` 모듈, `news/` changelog — Flyway V1~V7에서 이관): `0001`(news_* + stock_alias) · `0002`(stream_event) · `0003`(다이제스트 부분 유니크 인덱스) · `0004`(news_cluster 요약 lease·fencing token) · `0005`(종목 verdict 기각 상태와 기존 완료 행 백필) · `0006`(클러스터 category와 허용값 제약) · `0007`(기사 수집 시 빈 후보 경계) · `0008`(market_digest — §4.3, 논리 소유 worker-llm). worker-llm은 `db-migrations` 의존만으로 기동 시 changelog를 적용한다. 투자의견용 nullable `source_key`와 부분 유니크 인덱스는 core-api stream 모듈이 논리 소유하고, worker-batch 착수 시 `db-migrations`에 후속 changeSet으로 추가한다.
+Liquibase 마이그레이션(`db-migrations` 모듈, `news/` changelog — Flyway V1~V7에서 이관): `0001`(news_* + stock_alias) · `0002`(stream_event) · `0003`(다이제스트 부분 유니크 인덱스) · `0004`(news_cluster 요약 lease·fencing token) · `0005`(종목 verdict 기각 상태와 기존 완료 행 백필) · `0006`(클러스터 category와 허용값 제약) · `0007`(기사 수집 시 빈 후보 경계) · `0008`(market_digest — §4.3, 논리 소유 worker-llm) · `0009`(RSS 피드 검증 값·수집본·처리 결과 — §2.3). worker-ingest와 worker-llm은 기동 시 `db-migrations` changelog를 적용한다. 투자의견용 nullable `source_key`와 부분 유니크 인덱스는 core-api stream 모듈이 논리 소유하고, worker-batch 착수 시 `db-migrations`에 후속 changeSet으로 추가한다.
 
 **Flyway → Liquibase 전환 정책** — 전환은 운영 DB가 생기기 전에 끝냈으므로 baseline(`changelog-sync`) 절차를 두지 않는다. `flyway_schema_history`만 있는 기존 로컬 DB는 지원하지 않는다 — `docker compose down -v`로 리셋 후 재기동이 유일한 경로다(Liquibase가 `0001`부터 재실행을 시도해 기동에 실패하는 것이 의도된 fail-closed다). 리셋 불가한 공유 DB가 전환 전에 생겼다면 그때는 해당 DB에 한해 수동 `changelog-sync`로 이력을 등록한다.
 
@@ -472,6 +476,7 @@ Liquibase 마이그레이션(`db-migrations` 모듈, `news/` changelog — Flywa
 worker-ingest/
 ├─ scheduler/   IngestPoller(소스 폴링 오케스트레이션) · DigestTrigger(§4.1)
 ├─ source/      NewsSource(포트) · RssNewsSource
+├─ inbox/       PostgreSQL 피드 상태·기사 저장 및 Redis 재전송
 └─ queue/       IngestQueue(포트) · RedisIngestQueue(마커 확인→XADD→마커 기록 단일 실행 — exact 중복 제거 포함)
 
 worker-llm/
@@ -484,7 +489,7 @@ worker-llm/
 └─ publish/     StreamPublisher(포트) · RedisStreamPublisher
 ```
 
-- 서버 → 서버 의존 금지 — worker-ingest는 `:contracts`에만, worker-llm은 `:contracts`·`:db-migrations`에 의존한다. JWT가 필요 없으므로 `:auth-jwt`는 의존하지 않는다.
+- 서버 → 서버 의존 금지 — worker-ingest와 worker-llm은 `:contracts`·`:db-migrations`에 의존한다. JWT가 필요 없으므로 `:auth-jwt`는 의존하지 않는다.
 - 포트는 도메인 패키지에 구현과 함께 둔다(`port/` 패키지로 몰지 않음). 도메인 클래스는 Lettuce·HTTP 클라이언트·LLM SDK를 직접 import하지 않는다 — `ClusterAssigner`·`ClusterSummarizer` 전이 로직이 인프라 없이 단위 테스트되어야 한다.
 
 ### 7.1 데이터 접근 — JPA 우선과 raw SQL 예외
@@ -533,7 +538,7 @@ SPRING_PROFILES_ACTIVE=local LLM_PROVIDER=fake ./gradlew :worker-llm:bootRun
 | 단계 | 범위 | DoD |
 |---|---|---|
 | **N0** | 두 모듈 스캐폴딩 · settings.gradle 등록 · :contracts 상수(§6 잔여분) | `./gradlew :worker-ingest:test :worker-llm:test` 통과 |
-| **N1** | ingest: RSS 1소스 → 정규화·seen → XADD *(사전 매핑은 구현 후 v0.6에서 제거)* | 동일 기사 재수집 시 큐 적재 0건(Testcontainers Redis) |
+| **N1** | ingest: RSS → 정규화 → 피드 상태·기사 PostgreSQL 저장 → XADD | 동일 기사 재수집 시 신규 적재 0건. Redis 스트림 유실 시 미종결 수집본 재적재 |
 | **N2** | llm: 소비 → 요약·감성 → persist→publish→ack (클러스터링 없이 1기사=1이벤트) | **FR-11**: 동일 sourceId 중복 요약 0건 · XADD→`GET /rooms/{code}/stream` 노출 E2E |
 | **N3** | 클러스터링(pgvector·락·편입 병합) + 네이버 검색 API 소스 *(소스는 2026-08-11 제거 — §2.1)* | 동일 사건 3개 언론사 기사 → stream_event 1건 · `sources` 3건 · 편입 재발행 0건 |
 | **N4** | 일일 다이제스트 | `digest:{code}:{date}` 멱등 — 잡 2회 적재에도 브리핑 1건 · 호재/악재 리스트 노출 |

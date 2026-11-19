@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Test
 import java.net.InetSocketAddress
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.test.assertEquals
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class UrlConnectionRssFeedClientTest {
@@ -58,12 +59,13 @@ class UrlConnectionRssFeedClientTest {
         val source = RssNewsSource(
             id = "test-economy",
             name = "test",
-            feedUrl = "http://127.0.0.1:${server.address.port}/rss",
+            url = "http://127.0.0.1:${server.address.port}/rss",
             client = UrlConnectionRssFeedClient(),
         )
 
-        assertEquals(1, source.fetchLatest().size)
-        assertTrue(source.fetchLatest().isEmpty())
+        val update = checkNotNull(source.fetchLatest(FeedValidators()))
+        assertEquals(1, update.articles.size)
+        assertNull(source.fetchLatest(update.validators))
         assertTrue(conditionalRequestSeen.get())
     }
 }

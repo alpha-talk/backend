@@ -7,16 +7,12 @@ import java.io.ByteArrayInputStream
 class RssNewsSource(
     override val id: String,
     override val name: String,
-    private val feedUrl: String,
+    override val url: String,
     private val client: RssFeedClient,
 ) : NewsSource {
-    private var etag: String? = null
-    private var lastModified: Long? = null
-
-    @Synchronized
-    override fun fetchLatest(): List<FetchedArticle> {
-        val response = client.fetch(RssFeedRequest(feedUrl, etag, lastModified))
-        if (response === RssFeedResponse.NotModified) return emptyList()
+    override fun fetchLatest(validators: FeedValidators): FeedUpdate? {
+        val response = client.fetch(RssFeedRequest(url, validators.etag, validators.lastModified))
+        if (response === RssFeedResponse.NotModified) return null
         response as RssFeedResponse.Modified
         val feed = ByteArrayInputStream(response.body).use { SyndFeedInput().build(XmlReader(it)) }
         val articles = feed.entries.mapNotNull { entry ->
@@ -31,9 +27,7 @@ class RssNewsSource(
                 publishedAt = entry.publishedDate?.time,
             )
         }
-        etag = response.etag
-        lastModified = response.lastModified
-        return articles
+        return FeedUpdate(articles, FeedValidators(response.etag, response.lastModified))
     }
 
     private fun stripHtml(value: String): String =

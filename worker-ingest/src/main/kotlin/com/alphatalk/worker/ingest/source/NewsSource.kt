@@ -4,8 +4,13 @@ interface NewsSource {
     val id: String
         get() = name
     val name: String
-    fun fetchLatest(): List<FetchedArticle>
+    val url: String
+    fun fetchLatest(validators: FeedValidators): FeedUpdate?
 }
+
+data class FeedValidators(val etag: String? = null, val lastModified: Long? = null)
+
+data class FeedUpdate(val articles: List<FetchedArticle>, val validators: FeedValidators = FeedValidators())
 
 data class FetchedArticle(
     val sourceId: String? = null,

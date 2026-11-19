@@ -55,3 +55,10 @@ databaseChangeLog:
         - sqlFile:
             path: sql/0008_market_digest.sql
             relativeToChangelogFile: true
+  - changeSet:
+      id: 0009-news-ingest-inbox
+      author: worker-ingest
+      changes:
+        - sqlFile:
+            path: sql/0009_news_ingest_inbox.sql
+            relativeToChangelogFile: true

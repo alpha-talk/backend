@@ -1,14 +1,20 @@
 package com.alphatalk.worker.ingest
 
+import com.alphatalk.contracts.queue.IngestQueueEntry
+import com.alphatalk.contracts.queue.IngestType
 import com.alphatalk.worker.ingest.config.IngestProperties
+import com.alphatalk.worker.ingest.inbox.IngestInbox
+import com.alphatalk.worker.ingest.inbox.IngestInboxRepository
 import com.alphatalk.worker.ingest.scheduler.DigestUniverse
 import com.alphatalk.worker.ingest.scheduler.IngestPoller
 import com.alphatalk.worker.ingest.scheduler.MarketDigestTrigger
+import com.alphatalk.worker.ingest.source.FeedValidators
 import com.alphatalk.worker.ingest.source.NewsSource
 import org.junit.jupiter.api.Test
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection
+import org.springframework.transaction.support.TransactionTemplate
 import org.testcontainers.containers.PostgreSQLContainer
 import org.testcontainers.junit.jupiter.Container
 import org.testcontainers.junit.jupiter.Testcontainers
@@ -16,6 +22,7 @@ import org.testcontainers.utility.DockerImageName
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 
 @SpringBootTest(
     properties = [
@@ -50,6 +57,44 @@ class IngestWorkerApplicationTest {
 
     @Autowired
     private lateinit var marketDigestTrigger: MarketDigestTrigger
+
+    @Autowired
+    private lateinit var inbox: IngestInbox
+
+    @Autowired
+    private lateinit var articles: IngestInboxRepository
+
+    @Autowired
+    private lateinit var transactions: TransactionTemplate
+
+    @Test
+    fun `피드 검증 값과 기사는 함께 커밋되고 함께 롤백된다`() {
+        val article = IngestQueueEntry(
+            source = "test",
+            sourceId = "test:atomic-capture",
+            type = IngestType.NEWS,
+            codes = emptyList(),
+            title = "테스트 기사",
+            url = "https://example.com/article",
+            fetchedAt = 1_700_000_000_000,
+        )
+        val feedId = "atomic-capture"
+        val feedUrl = "https://example.com/rss"
+        val validators = FeedValidators("\"v1\"", 1_700_000_000_000)
+
+        transactions.executeWithoutResult { status ->
+            inbox.capture(feedId, feedUrl, null, validators, listOf(article))
+            status.setRollbackOnly()
+        }
+        assertNull(inbox.checkpoint(feedId, feedUrl))
+        assertFalse(articles.existsById(article.sourceId))
+
+        assertEquals(1, inbox.capture(feedId, feedUrl, null, validators, listOf(article)))
+        assertEquals(validators, inbox.checkpoint(feedId, feedUrl)?.validators)
+        assertEquals(FeedValidators(), inbox.checkpoint(feedId, "https://example.com/new-rss")?.validators)
+        assertEquals(0, inbox.capture(feedId, feedUrl, inbox.checkpoint(feedId, feedUrl), validators, listOf(article)))
+        assertNotNull(articles.findById(article.sourceId).orElse(null))
+    }
 
     @Test
     fun `컨텍스트 로드`() {

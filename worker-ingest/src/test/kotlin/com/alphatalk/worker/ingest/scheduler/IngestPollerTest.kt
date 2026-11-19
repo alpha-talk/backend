@@ -2,11 +2,15 @@ package com.alphatalk.worker.ingest.scheduler
 
 import com.alphatalk.contracts.queue.IngestQueueEntry
 import com.alphatalk.worker.ingest.config.IngestProperties
-import com.alphatalk.worker.ingest.queue.EnqueueResult
-import com.alphatalk.worker.ingest.queue.IngestQueue
+import com.alphatalk.worker.ingest.inbox.FeedCheckpoint
+import com.alphatalk.worker.ingest.inbox.IngestInbox
+import com.alphatalk.worker.ingest.source.FeedUpdate
+import com.alphatalk.worker.ingest.source.FeedValidators
 import com.alphatalk.worker.ingest.source.FetchedArticle
 import com.alphatalk.worker.ingest.source.NewsSource
 import org.junit.jupiter.api.Test
+import org.springframework.dao.DataIntegrityViolationException
+import java.sql.SQLException
 import java.util.concurrent.CyclicBarrier
 import java.util.concurrent.Executor
 import java.util.concurrent.Executors
@@ -15,29 +19,29 @@ import kotlin.test.assertEquals
 
 class IngestPollerTest {
     private val sameThread = Executor { it.run() }
-    private val queue = RecordingQueue()
+    private val inbox = RecordingInbox()
 
     private fun poller(vararg sources: NewsSource) =
         IngestPoller(
             sources.toList(),
-            queue,
+            inbox,
             props = IngestProperties(excerptMaxLength = 200),
             fetchExecutor = sameThread,
             clock = { 1719500000000 },
         )
 
     @Test
-    fun `같은 기사를 두 번 폴링해도 큐 적재는 한 번`() {
+    fun `같은 기사를 두 번 폴링해도 수집본은 하나만 저장한다`() {
         val article = FetchedArticle(title = "삼성전자 수주", url = "https://example.com/1")
         val poller = poller(FakeSource("hankyung", listOf(article)))
 
         val first = poller.pollOnce()
         val second = poller.pollOnce()
 
-        assertEquals(1, first.enqueued)
+        assertEquals(1, first.captured)
         assertEquals(1, second.duplicateSkipped)
-        assertEquals(0, second.enqueued)
-        assertEquals(1, queue.entries.size)
+        assertEquals(0, second.captured)
+        assertEquals(1, inbox.entries.size)
     }
 
     @Test
@@ -54,10 +58,10 @@ class IngestPollerTest {
 
         val stats = poller.pollOnce()
 
-        assertEquals(1, stats.enqueued)
+        assertEquals(1, stats.captured)
         assertEquals(1, stats.duplicateSkipped)
-        assertEquals("yna", queue.entries.single().source)
-        assertEquals("yna:news-0001", queue.entries.single().sourceId)
+        assertEquals("yna", inbox.entries.single().source)
+        assertEquals("yna:news-0001", inbox.entries.single().sourceId)
     }
 
     @Test
@@ -72,7 +76,7 @@ class IngestPollerTest {
             ),
         )
         val stats = poller.pollOnce()
-        assertEquals(1, stats.enqueued)
+        assertEquals(1, stats.captured)
         assertEquals(1, stats.duplicateSkipped)
     }
 
@@ -80,8 +84,8 @@ class IngestPollerTest {
     fun `후보 없는 기사도 전량 적재 - 관련성 판정은 LLM 몫`() {
         val poller = poller(FakeSource("hankyung", listOf(FetchedArticle(title = "삼성전자 수주", url = "https://example.com/w"))))
         val stats = poller.pollOnce()
-        assertEquals(1, stats.enqueued)
-        val entry = queue.entries.single()
+        assertEquals(1, stats.captured)
+        val entry = inbox.entries.single()
         assertEquals(emptyList(), entry.codes)
         assertEquals(null, entry.macroHint)
     }
@@ -95,22 +99,37 @@ class IngestPollerTest {
         )
         val poller = poller(FakeSource("dart", listOf(article)))
         poller.pollOnce()
-        val entry = queue.entries.single()
+        val entry = inbox.entries.single()
         assertEquals(listOf("000660", "005930"), entry.codes)
     }
 
     @Test
-    fun `적재 실패에는 마커가 남지 않는다 - 다음 폴링에서 재시도`() {
+    fun `수집본 저장 실패 후 다음 폴링에서 재시도한다`() {
         val article = FetchedArticle(title = "삼성전자 수주", url = "https://example.com/1")
         val poller = poller(FakeSource("hankyung", listOf(article)))
 
-        queue.failNext = true
+        inbox.nextFailure = IllegalStateException("capture failed")
         val first = poller.pollOnce()
         val second = poller.pollOnce()
 
-        assertEquals(1, first.enqueueErrors)
-        assertEquals(1, second.enqueued)
-        assertEquals(1, queue.entries.size)
+        assertEquals(1, first.sourceErrors)
+        assertEquals(1, second.captured)
+        assertEquals(1, inbox.entries.size)
+    }
+
+    @Test
+    fun `동시 중복 저장 충돌 후 같은 RSS 응답으로 남은 기사를 저장한다`() {
+        val sharedArticle = FetchedArticle(sourceId = "shared", title = "공통 기사", url = "https://example.com/shared")
+        val otherArticle = FetchedArticle(sourceId = "other", title = "새 기사", url = "https://example.com/other")
+        val source = FakeSource("yna", listOf(sharedArticle, otherArticle), "yna-industry")
+        poller(FakeSource("yna", listOf(sharedArticle), "yna-economy")).pollOnce()
+        inbox.nextFailure = DataIntegrityViolationException("duplicate source ID", SQLException("duplicate key", "23505"))
+
+        val stats = poller(source).pollOnce()
+
+        assertEquals(1, source.fetchCalls)
+        assertEquals(PollStats(fetched = 2, captured = 1, duplicateSkipped = 1), stats)
+        assertEquals(listOf("yna:shared", "yna:other"), inbox.entries.map { it.sourceId })
     }
 
     @Test
@@ -121,7 +140,7 @@ class IngestPollerTest {
         )
         val stats = poller.pollOnce()
         assertEquals(1, stats.sourceErrors)
-        assertEquals(1, stats.enqueued)
+        assertEquals(1, stats.captured)
     }
 
     @Test
@@ -130,23 +149,24 @@ class IngestPollerTest {
         val sources = listOf("a", "b").map { sourceName ->
             object : NewsSource {
                 override val name = sourceName
-                override fun fetchLatest(): List<FetchedArticle> {
+                override val url = "https://example.com/rss"
+                override fun fetchLatest(validators: FeedValidators): FeedUpdate {
                     barrier.await(2, TimeUnit.SECONDS)
-                    return listOf(FetchedArticle(title = "삼성전자 $sourceName", url = "https://example.com/$sourceName"))
+                    return FeedUpdate(listOf(FetchedArticle(title = "삼성전자 $sourceName", url = "https://example.com/$sourceName")))
                 }
             }
         }
         val pool = Executors.newFixedThreadPool(2)
         try {
             val poller = IngestPoller(
-                sources, queue,
+                sources, inbox,
                 props = IngestProperties(excerptMaxLength = 200),
                 fetchExecutor = pool,
             )
             val stats = poller.pollOnce()
             assertEquals(0, stats.sourceErrors)
             assertEquals(2, stats.fetched)
-            assertEquals(2, stats.enqueued)
+            assertEquals(2, stats.captured)
         } finally {
             pool.shutdown()
         }
@@ -162,10 +182,10 @@ class IngestPollerTest {
                     FakeSource("b", listOf(FetchedArticle(title = "오늘의 날씨", url = "https://example.com/w"))),
                     FailingSource("c"),
                 ),
-                queue, props = IngestProperties(excerptMaxLength = 200), fetchExecutor = pool,
+                inbox, props = IngestProperties(excerptMaxLength = 200), fetchExecutor = pool,
             )
             val stats = poller.pollOnce()
-            assertEquals(2, stats.enqueued)
+            assertEquals(2, stats.captured)
             assertEquals(1, stats.sourceErrors)
         } finally {
             pool.shutdown()
@@ -178,7 +198,7 @@ class IngestPollerTest {
             FakeSource("hankyung", listOf(FetchedArticle(title = "삼성전자", url = "https://example.com/1", excerpt = "가".repeat(500)))),
         )
         poller.pollOnce()
-        assertEquals(200, queue.entries.single().body?.length)
+        assertEquals(200, inbox.entries.single().body?.length)
     }
 
     private class FakeSource(
@@ -186,27 +206,43 @@ class IngestPollerTest {
         private val articles: List<FetchedArticle>,
         override val id: String = name,
     ) : NewsSource {
-        override fun fetchLatest() = articles
+        override val url = "https://example.com/rss"
+        var fetchCalls = 0
+            private set
+
+        override fun fetchLatest(validators: FeedValidators): FeedUpdate {
+            fetchCalls++
+            return FeedUpdate(articles)
+        }
     }
 
     private class FailingSource(override val name: String) : NewsSource {
-        override fun fetchLatest(): List<FetchedArticle> = throw IllegalStateException("boom")
+        override val url = "https://example.com/rss"
+        override fun fetchLatest(validators: FeedValidators): FeedUpdate = throw IllegalStateException("boom")
     }
 
-    private class RecordingQueue : IngestQueue {
+    private class RecordingInbox : IngestInbox {
         val entries = mutableListOf<IngestQueueEntry>()
-        private val marked = mutableSetOf<String>()
-        var failNext = false
+        private val sourceIds = mutableSetOf<String>()
+        var nextFailure: RuntimeException? = null
+
+        override fun checkpoint(feedId: String, url: String): FeedCheckpoint? = null
 
         @Synchronized
-        override fun enqueueIfNew(entry: IngestQueueEntry): EnqueueResult {
-            if (failNext) {
-                failNext = false
-                throw IllegalStateException("redis down")
+        override fun capture(
+            feedId: String,
+            url: String,
+            previous: FeedCheckpoint?,
+            validators: FeedValidators,
+            entries: List<IngestQueueEntry>,
+        ): Int {
+            nextFailure?.let {
+                nextFailure = null
+                throw it
             }
-            if (!marked.add(entry.sourceId)) return EnqueueResult.ALREADY_ENQUEUED
-            entries.add(entry)
-            return EnqueueResult.ENQUEUED
+            val captured = entries.filter { sourceIds.add(it.sourceId) }
+            this.entries.addAll(captured)
+            return captured.size
         }
     }
 }

@@ -21,10 +21,17 @@ class RedisIngestQueue(
         require(markerTtlMillis > 0)
     }
 
-    override fun enqueueIfNew(entry: IngestQueueEntry): EnqueueResult {
+    override fun enqueueIfNew(entry: IngestQueueEntry): EnqueueResult =
+        enqueue(entry, durable = false)
+
+    fun enqueueCaptured(entry: IngestQueueEntry): EnqueueResult =
+        enqueue(entry, durable = true)
+
+    private fun enqueue(entry: IngestQueueEntry, durable: Boolean): EnqueueResult {
         val args = buildList {
             add(maxLen.toString())
             add(markerTtlMillis.toString())
+            add(if (durable) "1" else "0")
             entry.toFields().forEach { (field, value) ->
                 add(field)
                 add(value)
@@ -46,15 +53,23 @@ class RedisIngestQueue(
     private companion object {
         val ENQUEUE_IF_NEW_SCRIPT = DefaultRedisScript(
             """
-            if redis.call('EXISTS', KEYS[1]) == 1 then
-                return 0
+            local marker = redis.call('GET', KEYS[1])
+            local durable = ARGV[3] == '1'
+            if marker then
+                if not durable then
+                    return 0
+                end
+                if marker ~= '1' and #redis.call('XRANGE', KEYS[2], marker, marker, 'COUNT', 1) > 0 then
+                    redis.call('PEXPIRE', KEYS[1], ARGV[2])
+                    return 0
+                end
             end
             local xaddArgs = {'MAXLEN', '~', ARGV[1], '*'}
-            for index = 3, #ARGV do
+            for index = 4, #ARGV do
                 table.insert(xaddArgs, ARGV[index])
             end
-            redis.call('XADD', KEYS[2], unpack(xaddArgs))
-            redis.call('SET', KEYS[1], '1', 'PX', ARGV[2])
+            local id = redis.call('XADD', KEYS[2], unpack(xaddArgs))
+            redis.call('SET', KEYS[1], durable and id or '1', 'PX', ARGV[2])
             return 1
             """.trimIndent(),
             Long::class.java,

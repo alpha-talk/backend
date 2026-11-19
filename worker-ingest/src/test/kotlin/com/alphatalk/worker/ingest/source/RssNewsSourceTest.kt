@@ -4,7 +4,6 @@ import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
-import kotlin.test.assertTrue
 
 class RssNewsSourceTest {
     private val rss = """
@@ -37,7 +36,7 @@ class RssNewsSourceTest {
     private val source = RssNewsSource(
         id = "test-economy",
         name = "test",
-        feedUrl = "https://example.com/rss",
+        url = "https://example.com/rss",
         client = RssFeedClient {
             RssFeedResponse.Modified(rss.toByteArray(), null, null)
         },
@@ -45,7 +44,7 @@ class RssNewsSourceTest {
 
     @Test
     fun `RSS 파싱 - 제목 트림·HTML 제거·guid·발행시각`() {
-        val articles = source.fetchLatest()
+        val articles = source.fetchLatest(FeedValidators())!!.articles
         assertEquals(2, articles.size)
 
         val first = articles.first()
@@ -58,7 +57,7 @@ class RssNewsSourceTest {
 
     @Test
     fun `guid가 링크와 같으면 sourceId로 쓰지 않는다`() {
-        assertNull(source.fetchLatest().last().sourceId)
+        assertNull(source.fetchLatest(FeedValidators())!!.articles.last().sourceId)
     }
 
     @Test
@@ -67,7 +66,7 @@ class RssNewsSourceTest {
         val conditionalSource = RssNewsSource(
             id = "test-economy",
             name = "test",
-            feedUrl = "https://example.com/rss",
+            url = "https://example.com/rss",
             client = RssFeedClient { request ->
                 requests += request
                 if (requests.size == 1) {
@@ -78,8 +77,9 @@ class RssNewsSourceTest {
             },
         )
 
-        assertEquals(2, conditionalSource.fetchLatest().size)
-        assertTrue(conditionalSource.fetchLatest().isEmpty())
+        val first = checkNotNull(conditionalSource.fetchLatest(FeedValidators()))
+        assertEquals(2, first.articles.size)
+        assertNull(conditionalSource.fetchLatest(first.validators))
         assertEquals(null, requests.first().etag)
         assertEquals(null, requests.first().lastModified)
         assertEquals("\"v1\"", requests.last().etag)
