@@ -21,15 +21,14 @@ class PollingScheduler(
     fun poll() {
         val stats = poller.pollOnce()
         meters.counter("ingest.fetched").increment(stats.fetched.toDouble())
-        meters.counter("ingest.enqueued").increment(stats.enqueued.toDouble())
+        meters.counter("ingest.captured").increment(stats.captured.toDouble())
         meters.counter("ingest.dup.skipped").increment(stats.duplicateSkipped.toDouble())
         meters.counter("ingest.source.errors").increment(stats.sourceErrors.toDouble())
-        meters.counter("ingest.enqueue.errors").increment(stats.enqueueErrors.toDouble())
         if (stats != PollStats()) {
             log.info(
-                "poll done: fetched={} enqueued={} dup={} sourceErrors={} enqueueErrors={}",
-                stats.fetched, stats.enqueued, stats.duplicateSkipped,
-                stats.sourceErrors, stats.enqueueErrors,
+                "poll done: fetched={} captured={} dup={} sourceErrors={}",
+                stats.fetched, stats.captured, stats.duplicateSkipped,
+                stats.sourceErrors,
             )
         }
     }
