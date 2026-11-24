@@ -3,6 +3,7 @@ package com.alphatalk.ws
 import com.alphatalk.auth.JwtTokenProvider
 import com.alphatalk.contracts.Channels
 import com.alphatalk.contracts.Destinations
+import com.alphatalk.contracts.Keys
 import com.alphatalk.contracts.WatchlistSnapshotRequest
 import com.alphatalk.contracts.WatchlistSnapshots
 import com.alphatalk.contracts.envelope.WatchlistUpdated
@@ -11,14 +12,12 @@ import com.alphatalk.ws.watchlist.WatchlistResolver
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.fasterxml.jackson.module.kotlin.readValue
 import com.sun.net.httpserver.HttpServer
-import feign.RetryableException
 import io.micrometer.core.instrument.MeterRegistry
 import org.junit.jupiter.api.AfterAll
 import org.springframework.test.context.DynamicPropertyRegistry
 import org.springframework.test.context.DynamicPropertySource
 import org.springframework.data.redis.listener.RedisMessageListenerContainer
 import java.net.InetSocketAddress
-import java.net.SocketTimeoutException
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicInteger
@@ -186,13 +185,13 @@ class WsIntegrationTest {
 
     @Test
     fun `watchlist HTTP read times out without retrying the request`() {
+        val failures = meters.counter("ws.watchlist.fallback.failures")
+        val before = failures.count()
         try {
             assertTimeoutPreemptively(Duration.ofSeconds(4)) {
-                val failure = assertThrows<RetryableException> {
-                    watchlistResolver.resolve(listOf(SLOW_API_USER_ID))
-                }
-                assertThat(failure).hasCauseInstanceOf(SocketTimeoutException::class.java)
+                assertThat(watchlistResolver.resolve(listOf(SLOW_API_USER_ID))).isEmpty()
                 assertThat(slowRequestCount.get()).isEqualTo(1)
+                assertThat(failures.count()).isEqualTo(before + 1)
             }
         } finally {
             releaseSlowResponse.countDown()
@@ -323,13 +322,14 @@ class WsIntegrationTest {
 
     @Test
     fun `Lettuce reconnect reloads the active watchlist`() {
-        snapshots[8L] = WatchlistUpdated(8, 1, listOf("005930"))
+        val key = Keys.watchlistSnapshot(8L)
+        redisTemplate.opsForValue().set(key, mapper.writeValueAsString(WatchlistUpdated(8, 1, listOf("005930"))))
         val session = connect(8L)
         val received = subscribeQueue(session, Destinations.USER_QUEUE_QUOTE)
         publishUntilReceived(Channels.quote("005930"), """{"type":"quote","code":"005930","ts":1,"data":{}}""", received)
         received.clear()
 
-        snapshots[8L] = WatchlistUpdated(8, 2, listOf("000660"))
+        redisTemplate.opsForValue().set(key, mapper.writeValueAsString(WatchlistUpdated(8, 2, listOf("000660"))))
         val disconnected = redis.execInContainer("redis-cli", "CLIENT", "KILL", "TYPE", "pubsub")
         assertThat(disconnected.exitCode).isZero()
         assertThat(disconnected.stdout.trim().toInt()).isPositive()

@@ -14,7 +14,7 @@ import java.security.MessageDigest
 
 @RestController
 class InternalWatchlistController(
-    private val reader: WatchlistSnapshotReader,
+    private val snapshots: WatchlistSnapshotService,
     @param:Value("\${ALPHATALK_WATCHLIST_INTERNAL_KEY:}") private val key: String,
 ) {
     @PostMapping(WatchlistSnapshots.PATH)
@@ -31,6 +31,6 @@ class InternalWatchlistController(
         ) {
             throw ApiException(ErrorCode.VALIDATION_FAILED, "사용자 ID 요청 범위가 올바르지 않습니다")
         }
-        return reader.read(userIds.distinct())
+        return snapshots.readAndFill(userIds.distinct())
     }
 }

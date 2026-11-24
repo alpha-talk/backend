@@ -1,7 +1,9 @@
 package com.alphatalk.coreapi.subscription
 
 import com.alphatalk.contracts.Channels
+import com.alphatalk.contracts.Keys
 import com.alphatalk.contracts.WatchlistSnapshots
+import com.alphatalk.contracts.envelope.WatchlistUpdated
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
 import org.junit.jupiter.api.AfterEach
@@ -25,6 +27,7 @@ import org.testcontainers.containers.PostgreSQLContainer
 import org.testcontainers.junit.jupiter.Container
 import org.testcontainers.junit.jupiter.Testcontainers
 import org.testcontainers.utility.DockerImageName
+import java.util.UUID
 import java.util.concurrent.CyclicBarrier
 import java.util.concurrent.Executors
 import java.util.concurrent.LinkedBlockingQueue
@@ -69,6 +72,15 @@ class WatchlistEndToEndTest {
     @Autowired
     private lateinit var connectionFactory: RedisConnectionFactory
 
+    @Autowired
+    private lateinit var command: WatchlistCommand
+
+    @Autowired
+    private lateinit var broadcaster: RedisWatchlistBroadcaster
+
+    @Autowired
+    private lateinit var revisions: WatchlistRevisionJpaRepository
+
     private val mapper = ObjectMapper()
     private val published = LinkedBlockingQueue<String>()
     private lateinit var listener: RedisMessageListenerContainer
@@ -90,10 +102,13 @@ class WatchlistEndToEndTest {
             """.trimIndent(),
         )
 
-        post("/api/v1/auth/signup", """{"email":"a@b.c","password":"password1","nickname":"민균"}""")
-        val login = post("/api/v1/auth/login", """{"email":"a@b.c","password":"password1"}""")
+        val email = "${UUID.randomUUID()}@example.test"
+        val signup = post("/api/v1/auth/signup", """{"email":"$email","password":"password1","nickname":"민균"}""")
+        assertEquals(201, signup.statusCode.value())
+        val login = post("/api/v1/auth/login", """{"email":"$email","password":"password1"}""")
+        assertEquals(200, login.statusCode.value())
         token = json(login.body).path("accessToken").asText()
-        userId = jdbc.queryForObject("SELECT id FROM users WHERE email = 'a@b.c'", Long::class.java)!!
+        userId = jdbc.queryForObject("SELECT id FROM users WHERE email = ?", Long::class.java, email)!!
 
         startListening()
     }
@@ -129,6 +144,17 @@ class WatchlistEndToEndTest {
     }
 
     private fun nextEvent(): JsonNode? = published.poll(3, TimeUnit.SECONDS)?.let(mapper::readTree)
+
+    private fun eventAtRevision(rev: Long): JsonNode? {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3)
+        while (true) {
+            val remaining = deadline - System.nanoTime()
+            if (remaining <= 0) return null
+            val payload = published.poll(remaining, TimeUnit.NANOSECONDS) ?: return null
+            val event = json(payload)
+            if (event.path("userId").asLong() == userId && event.path("rev").asLong() == rev) return event
+        }
+    }
 
     private fun json(body: String?): JsonNode = mapper.readTree(body)
 
@@ -174,6 +200,7 @@ class WatchlistEndToEndTest {
         assertEquals(userId, event.path("userId").asLong())
         assertEquals(listOf("005930"), event.path("codes").map { it.asText() })
         assertEquals(1L, event.path("rev").asLong())
+        assertEquals(event, json(redisTemplate.opsForValue().get(Keys.watchlistSnapshot(userId))))
         assertEquals(event, json(snapshots().body).single())
     }
 
@@ -185,7 +212,7 @@ class WatchlistEndToEndTest {
         val again = call(HttpMethod.PUT, "/api/v1/watchlist/005930")
 
         assertEquals(200, again.statusCode.value())
-        val event = assertNotNull(nextEvent(), "재요청 복구 이벤트가 발행되지 않았다")
+        val event = assertNotNull(eventAtRevision(2), "재요청 복구 이벤트가 발행되지 않았다")
         assertEquals(listOf("005930"), event.path("codes").map { it.asText() })
         assertEquals(1, json(call(HttpMethod.GET, "/api/v1/watchlist").body).path("items").size())
     }
@@ -199,6 +226,52 @@ class WatchlistEndToEndTest {
         val result = json(snapshots(ids = "$userId,$userId").body).single()
         assertEquals(0L, result.path("rev").asLong())
         assertTrue(result.path("codes").isArray && result.path("codes").isEmpty)
+        val key = Keys.watchlistSnapshot(userId)
+        assertEquals(result, json(redisTemplate.opsForValue().get(key)))
+        assertTrue(redisTemplate.getExpire(key, TimeUnit.SECONDS) in 1L..359L)
+    }
+
+    @Test
+    fun `Redis 키 유실 시 기존 관심목록을 원본에서 복원한다`() {
+        assertEquals(201, call(HttpMethod.PUT, "/api/v1/watchlist/005930").statusCode.value())
+        val key = Keys.watchlistSnapshot(userId)
+        redisTemplate.delete(key)
+
+        val result = json(snapshots().body).single()
+
+        assertEquals(listOf("005930"), result.path("codes").map { it.asText() })
+        assertEquals(result, json(redisTemplate.opsForValue().get(key)))
+    }
+
+    @Test
+    fun `커밋 직후 누락된 Redis 변경을 복구하고 늦은 버전을 거부한다`() {
+        val committed = command.subscribe(userId, "005930", 100)
+        val older = WatchlistUpdated(userId, 0, emptyList())
+
+        broadcaster.retryPending()
+        broadcaster.publish(older)
+
+        val expectedRev = requireNotNull(committed.state).rev
+        val cached = json(redisTemplate.opsForValue().get(Keys.watchlistSnapshot(userId)))
+        assertEquals(expectedRev, cached.path("rev").asLong())
+        assertEquals(listOf("005930"), cached.path("codes").map { it.asText() })
+        assertEquals(cached, nextEvent())
+        assertEquals(null, revisions.findById(userId).orElseThrow().redisPendingSince)
+    }
+
+    @Test
+    fun `재처리는 Redis에 잘못된 자료형으로 저장된 키를 복구한다`() {
+        val key = Keys.watchlistSnapshot(userId)
+        redisTemplate.opsForSet().add(key, "005930")
+        val committed = command.subscribe(userId, "000660", 100)
+
+        broadcaster.retryPending()
+
+        val cached = json(redisTemplate.opsForValue().get(key))
+        assertEquals(requireNotNull(committed.state).rev, cached.path("rev").asLong())
+        assertEquals(listOf("000660"), cached.path("codes").map { it.asText() })
+        assertTrue(redisTemplate.getExpire(key, TimeUnit.SECONDS) in 1L..359L)
+        assertEquals(null, revisions.findById(userId).orElseThrow().redisPendingSince)
     }
 
     @Test
@@ -210,7 +283,7 @@ class WatchlistEndToEndTest {
         val delete = call(HttpMethod.DELETE, "/api/v1/watchlist/005930")
 
         assertEquals(204, delete.statusCode.value())
-        val event = assertNotNull(nextEvent(), "watchlist:updated가 발행되지 않았다")
+        val event = assertNotNull(eventAtRevision(3), "watchlist:updated가 발행되지 않았다")
         assertEquals(listOf("000660"), event.path("codes").map { it.asText() })
     }
 
@@ -224,29 +297,25 @@ class WatchlistEndToEndTest {
     }
 
     @Test
-    fun `같은 종목의 구독과 해지가 겹쳐도 DB와 최신 이벤트가 같은 상태로 끝난다`() {
+    fun `같은 종목의 구독과 해지가 겹쳐도 DB와 Redis가 같은 상태로 끝난다`() {
         val pool = Executors.newFixedThreadPool(2)
         try {
-            repeat(10) {
-                published.clear()
-                call(HttpMethod.DELETE, "/api/v1/watchlist/005930")
+            repeat(10) { round ->
+                assertEquals(204, call(HttpMethod.DELETE, "/api/v1/watchlist/005930").statusCode.value())
                 val barrier = CyclicBarrier(2)
                 val requests = listOf(HttpMethod.PUT, HttpMethod.DELETE).map { method ->
                     pool.submit {
                         barrier.await(10, TimeUnit.SECONDS)
-                        call(method, "/api/v1/watchlist/005930")
+                        val status = call(method, "/api/v1/watchlist/005930").statusCode.value()
+                        assertTrue(status in if (method == HttpMethod.PUT) listOf(200, 201) else listOf(204))
                     }
                 }
                 requests.forEach { it.get(30, TimeUnit.SECONDS) }
 
-                val stored = jdbc.queryForObject(
-                    "SELECT EXISTS(SELECT 1 FROM watchlist WHERE user_id = ? AND code = '005930')",
-                    Boolean::class.java,
-                    userId,
-                )!!
-                val latest = List(3) { assertNotNull(nextEvent()) }.maxBy { it.path("rev").asLong() }
-                assertEquals(stored, latest.path("codes").any { it.asText() == "005930" })
-                assertEquals(latest, json(snapshots().body).single())
+                val cached = json(redisTemplate.opsForValue().get(Keys.watchlistSnapshot(userId)))
+                val persisted = json(snapshots().body).single()
+                assertEquals(3L * (round + 1), persisted.path("rev").asLong())
+                assertEquals(persisted, cached)
             }
         } finally {
             pool.shutdownNow()
