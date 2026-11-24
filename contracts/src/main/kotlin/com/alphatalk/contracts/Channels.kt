@@ -5,6 +5,8 @@ object Channels {
 
     const val DEMAND_UPDATED = "demand:updated"
 
+    const val MINUTE_REFRESH_COMPLETED = "minute:refresh:completed"
+
     fun quote(code: String) = "${ChannelKind.QUOTE.prefix}:$code"
     fun stream(code: String) = "${ChannelKind.STREAM.prefix}:$code"
     fun post(code: String) = "${ChannelKind.POST.prefix}:$code"
