@@ -11,7 +11,10 @@ import org.hibernate.annotations.Generated
 import org.hibernate.annotations.JdbcTypeCode
 import org.hibernate.generator.EventType
 import org.hibernate.type.SqlTypes
+import org.springframework.data.domain.Pageable
 import org.springframework.data.jpa.repository.JpaRepository
+import org.springframework.data.jpa.repository.Modifying
+import org.springframework.data.jpa.repository.Query
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Repository
 import org.springframework.transaction.annotation.Isolation
@@ -48,6 +51,8 @@ class WatchlistRevisionEntity(
     var userId: Long = 0,
     @Column(name = "rev", nullable = false)
     var rev: Long = 0,
+    @Column(name = "redis_pending_since")
+    var redisPendingSince: Instant? = null,
 )
 
 interface WatchlistJpaRepository : JpaRepository<WatchlistEntity, WatchlistId> {
@@ -62,7 +67,18 @@ interface WatchlistJpaRepository : JpaRepository<WatchlistEntity, WatchlistId> {
     fun deleteByUserIdAndCode(userId: Long, code: String): Long
 }
 
-interface WatchlistRevisionJpaRepository : JpaRepository<WatchlistRevisionEntity, Long>
+interface WatchlistRevisionJpaRepository : JpaRepository<WatchlistRevisionEntity, Long> {
+    @Query(
+        "select w.userId from WatchlistRevisionEntity w where w.redisPendingSince is not null " +
+            "order by w.redisPendingSince, w.userId",
+    )
+    fun findRedisPendingUserIds(pageable: Pageable): List<Long>
+
+    @Transactional
+    @Modifying
+    @Query("update WatchlistRevisionEntity w set w.redisPendingSince = null where w.userId = :userId and w.rev = :rev and w.redisPendingSince is not null")
+    fun clearRedisPending(userId: Long, rev: Long): Int
+}
 
 @Repository
 class JpaWatchlistStore(
@@ -112,6 +128,7 @@ class JpaWatchlistStore(
     override fun nextRev(userId: Long): Long {
         val revision = revisions.findById(userId).orElseGet { WatchlistRevisionEntity(userId = userId, rev = 0) }
         revision.rev += 1
+        if (revision.redisPendingSince == null) revision.redisPendingSince = Instant.now()
         revisions.save(revision)
         return revision.rev
     }

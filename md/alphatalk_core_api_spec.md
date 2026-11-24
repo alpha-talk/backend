@@ -171,9 +171,9 @@ ULID 사전순이 곧 시간순이라는 성질을 이용한 **양방향 커서*
 
 **한도 검사는 사용자 단위로 직렬화한다.** 99개를 가진 사용자가 서로 다른 두 종목을 동시에 PUT하면, 두 요청 모두 "99개"를 읽고 통과해 101개가 된다. `(user_id, code)` 기본키는 같은 종목의 중복만 막을 뿐 서로 다른 종목끼리의 경쟁은 막지 못한다. 그래서 구독·해지 트랜잭션은 auth 모듈의 `UserAccountLock` 포트로 사용자 엔티티를 `PESSIMISTIC_WRITE` 잠근 뒤 상태 확인과 변경을 끝낸다. subscription은 `users` 테이블이나 auth의 JPA 엔티티를 직접 알지 않는다. 잠글 사용자가 이미 사라졌으면 유효하지 않은 인증 주체이므로 401을 반환한다. 수락된 요청은 멱등 재요청이라도 커밋 전에 사용자별 `watchlist_rev`를 1 올리고 변경 후 전체 스냅샷을 함께 돌려준다 — 잠금이 트랜잭션을 직렬화하므로 **rev 순서가 곧 커밋 순서**다.
 
-**변경 발행**은 DB 커밋 뒤 `watchlist:updated`에 `{userId, rev, codes}`를 best-effort로 발행한다. 발행 실패는 로그·메트릭에 남기며 커밋된 변경은 성공으로 응답한다.
+**변경 발행**은 DB 커밋 뒤 Redis 스냅샷과 `watchlist:updated`에 `{userId, rev, codes}`를 반영한다. 구독·해지 트랜잭션에서 `watchlist_rev.redis_pending_since`를 함께 기록한다. 반영이 성공하면 동일한 rev의 대기 표시만 해제한다. core-api의 재처리 작업은 5초 간격으로 오래된 표시부터 최대 100명을 읽고, 최신 DB 스냅샷으로 Redis 반영을 재시도한다. Redis 장애 시 실패 지점에서 멈추고 다음 주기에 재시도한다. 반영 실패는 로그·메트릭에 기록하며 커밋된 사용자 변경은 성공으로 응답한다.
 
-**WS 전용 조회**는 `POST /internal/watchlists/snapshots`에 `{"userIds":[123]}`를 보내고 `[{"userId":123,"rev":14,"codes":["005930"]}]`를 받는다. 요청당 양수 ID를 최대 100개 허용하고 중복은 한 번만 조회한다. DB의 동일한 읽기 스냅샷에서 버전과 목록을 읽는다. 목록을 변경한 이력이 없는 ID의 상태는 rev 0과 빈 목록이다. `X-AlphaTalk-Watchlist-Key` 헤더는 환경변수 `ALPHATALK_WATCHLIST_INTERNAL_KEY`와 일치해야 한다. 서버에 키가 없거나 일치하지 않으면 401이다.
+**Redis 키가 없을 때의 WS 폴백**은 `POST /internal/watchlists/snapshots`에 `{"userIds":[123]}`를 보내고 `[{"userId":123,"rev":14,"codes":["005930"]}]`를 받는다. 요청당 양수 ID를 최대 100개 허용하고 중복은 한 번만 조회한다. DB의 동일한 읽기 스냅샷에서 버전과 목록을 읽는다. 버전 이력이 없는 ID는 rev 0으로 반환하며 저장된 종목이 없다면 빈 목록을 반환한다. core-api는 조회한 스냅샷으로 Redis 누락 키를 배치로 채운다. 동시 반영으로 이미 키가 생겼다면 해당 값을 유지한다. Redis 채우기 실패 시에도 DB 결과를 반환한다. `X-AlphaTalk-Watchlist-Key` 헤더는 환경변수 `ALPHATALK_WATCHLIST_INTERNAL_KEY`와 일치해야 한다. 서버에 키가 없거나 일치하지 않으면 401이다.
 
 ---
 
