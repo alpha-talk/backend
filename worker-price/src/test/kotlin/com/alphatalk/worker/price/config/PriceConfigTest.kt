@@ -3,7 +3,6 @@ package com.alphatalk.worker.price.config
 import com.alphatalk.contracts.DemandTiming
 import com.alphatalk.worker.price.demand.RedisDemandSource
 import com.alphatalk.worker.price.session.SessionPool
-import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory
 import org.springframework.data.redis.core.StringRedisTemplate
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -42,7 +41,7 @@ class PriceConfigTest {
 
     @Test
     fun `수요 소스는 게이트웨이 수요만 사용한다 - 초기 목표 집합은 공집합`() {
-        val demandSource = RedisDemandSource(StringRedisTemplate(), LettuceConnectionFactory())
+        val demandSource = RedisDemandSource(StringRedisTemplate())
 
         assertEquals(emptySet(), demandSource.targetSymbols())
     }

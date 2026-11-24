@@ -6,26 +6,31 @@ import java.time.Duration
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 class HttpMinuteCandleRefresherTest {
     private lateinit var server: HttpServer
+    private val serverExecutor = Executors.newFixedThreadPool(4)
     private val hits = AtomicInteger()
     private val gate = CountDownLatch(1)
+    private val requestStarted = CountDownLatch(1)
     private var blocking = false
 
     @BeforeTest
     fun setUp() {
         server = HttpServer.create(InetSocketAddress(0), 0)
-        server.executor = Executors.newFixedThreadPool(4)
+        server.executor = serverExecutor
         server.createContext("/internal/minute-candles") { exchange ->
             hits.incrementAndGet()
+            requestStarted.countDown()
             if (blocking) gate.await(5, TimeUnit.SECONDS)
             exchange.sendResponseHeaders(200, -1)
             exchange.close()
@@ -36,7 +41,8 @@ class HttpMinuteCandleRefresherTest {
     @AfterTest
     fun tearDown() {
         gate.countDown()
-        server.stop(0)
+        if (::server.isInitialized) server.stop(0)
+        serverExecutor.shutdownNow()
     }
 
     private fun baseUrl() = "http://localhost:${server.address.port}"
@@ -98,6 +104,34 @@ class HttpMinuteCandleRefresherTest {
         }
 
         assertEquals(1, hits.get())
+    }
+
+    @Test
+    fun `읽기와 같은 종목 합류는 기본 1초를 넘겨 워커의 응답을 기다린다`() {
+        blocking = true
+        val refresher = refresher(AtomicLong(1_000_000))
+        val pool = Executors.newFixedThreadPool(2)
+        try {
+            val leader = pool.submit { refresher.refresh("005930") }
+            assertTrue(requestStarted.await(1, TimeUnit.SECONDS))
+            val joining = CountDownLatch(1)
+            val follower = pool.submit {
+                joining.countDown()
+                refresher.refresh("005930")
+            }
+            assertTrue(joining.await(1, TimeUnit.SECONDS))
+
+            assertFailsWith<TimeoutException> { follower.get(1_200, TimeUnit.MILLISECONDS) }
+            assertTrue(!leader.isDone)
+            gate.countDown()
+
+            leader.get(2, TimeUnit.SECONDS)
+            follower.get(2, TimeUnit.SECONDS)
+            assertEquals(1, hits.get())
+        } finally {
+            gate.countDown()
+            pool.shutdownNow()
+        }
     }
 
     @Test

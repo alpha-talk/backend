@@ -1,4 +1,6 @@
-# Alpha Talk — Redis 계약 (`:contracts`) v0.26
+# Alpha Talk — Redis 계약 (`:contracts`) v0.27
+
+> v0.27 (2026-11-25): 분봉 신선화 락에 실행별 작업 ID를 저장하고, 작업 ID별 완료 결과와 알림 채널을 추가한다(§1.4·§3).
 
 > v0.26 (2026-11-24): PostgreSQL에 수집본이 있는 RSS 기사의 `seen:ingest:{sourceId}` 값은 스트림 항목 ID다. Redis 단일 실행에서 그 항목의 존재를 확인하고, 없으면 XADD 후 마커를 갱신한다. 구버전 값 `1`에는 항목 ID가 없어 재적재할 수 있다. 다이제스트 마커와 큐 엔트리 스키마는 기존 규약을 유지한다.
 
@@ -108,6 +110,10 @@ Redis를 세 가지 용도로 쓴다. **이름이 비슷해도 메커니즘이 �
 - best-effort다. worker-price는 이 메시지를 **리컨실 트리거**로만 쓰고, 목표 종목 집합은 항상 §3의 해시 합산으로 재계산한다(payload를 신뢰해 부분 갱신하지 않는다). 유실은 주기 전체 리컨실이 자기치유한다 — 주기는 worker-price의 구독 해제 유예(`removal-grace-ms`, 기본 30s)보다 짧아야 하며(기본 10s, 기동 시 검증), 그래야 수요를 한 번 놓쳐도 KIS 구독이 실제로 끊기기 전에 복구된다.
 - 증감 시점: CONNECT 시 관심목록 해소분 +1씩 / DISCONNECT −1씩 / `watchlist:updated` 반영 시 ± / 방 토픽 SUBSCRIBE·UNSUBSCRIBE 시 room ±.
 
+### 1.4 분봉 신선화 완료 채널 `minute:refresh:completed` — worker-price → worker-price
+
+메시지 본문은 UTF-8 작업 ID(UUID) 하나다. 선행 워커는 PostgreSQL upsert가 커밋된 뒤 §3의 작업 결과를 기록하고 같은 Redis 스크립트에서 이 채널로 작업 ID를 발행한다. 작업 예외도 실패 결과를 기록하고 알린다. 알림은 best-effort이며 대기자를 깨운다. 완료 판정은 Redis 결과 키를 읽어 확인한다. 워커는 `demand:updated`와 같은 리스너 컨테이너에서 채널을 구독한다.
+
 ---
 
 ## 2. Redis Streams — 작업 큐 `queue:ingest` (워커 간)
@@ -198,7 +204,8 @@ ingest-worker 스케줄러(싱글턴)가 매일 적재하고 — 종목 잡은 1
 | `kis:token:lock:{keyId}` | String (`SET NX PX`) | 토큰 발급 직렬화 락 — 동시 발급으로 서로의 토큰을 무효화하는 것을 방지 | price/batch-worker | price/batch-worker | 발급 시도 시간 상한 |
 | `kis:token:issued:{keyId}` | String (epoch ms) | 마지막 발급 시각 — KIS 재발급 최소 간격(1분) 준수 판정 | price/batch-worker | price/batch-worker | 없음 |
 | `job-lock:alphatalk:{job}` | String | worker-batch ShedLock 잡 락(라이브러리 규칙 키 — `Keys` 생성 함수 없음). 다중 기동 시 같은 잡의 동시 실행 방지 | batch-worker | batch-worker | 잡별 `lockAtMostFor` |
-| `lock:minute-refresh:{code}` | String (`SET NX PX`) | 분봉 신선화의 종목별 인스턴스 간 single-flight 락(KIS 워커 명세 §2.6) — 미획득 인스턴스는 no-op | worker-price | worker-price | 페치 데드라인+여유 (기본 90s·일 확정 시 200s) |
+| `lock:minute-refresh:{code}` | String (작업 ID) | 종목별 분봉 신선화 락. 단일 Lua 실행에서 기존 작업 ID를 반환하거나 새 UUID와 TTL을 기록한다. 해제는 작업 ID가 일치할 때만 한다. | worker-price | worker-price | 페치 데드라인+여유 (기본 90s·일 확정 시 200s) |
+| `minute:refresh:result:{jobId}` | String (`ok:<건수>` 또는 `failed`) | 해당 실행의 종료 상태. `ok:0`은 정상 완료다. 키가 없으면 아직 결과를 확인할 수 없다. | worker-price | worker-price | 30s |
 | `lock:minute-backfill:{code}` | String (`SET NX PX`) | 분봉 과거 백필(`minute_candle_backfill`, KIS 워커 명세 §2.6)의 종목별 인스턴스 간 중복 방지 락 — 미획득 인스턴스는 no-op(다음 트리거가 재시도) | worker-price | worker-price | 백필 실행 예산+여유 (기본 200s) |
 | `minute:through:{code}:{date}` | String (`HHmm`) | 그 종목·일자를 몇 시까지 조회 완료했는지(완주 워터마크, §2.6) — 인스턴스 간 공유해 재기동·리더 전환 후 전 구간 재조회를 막는다 | worker-price | worker-price | **2일** |
 | `market-div:{code}` | String (`UN`\|`J`) | 그 종목의 시계열 API가 통합(`UN`)을 받는지 KRX 전용(`J`)이어야 하는지 — **NXT 상장 여부의 단일 소유자**(KIS 워커 명세 §2.3·§2.6). 분봉·실시간 구독·현재가 폴백이 모두 이 키를 읽는다. 쓰기는 확정 판정만: 분봉의 `acml_vol>0 && 봉 전부 0` → `J`, 정상 봉 → `UN`; 실시간의 통합 틱 수신 → `UN`(**실시간은 `J`를 쓰지 않는다** — 침묵은 "통합이 안 준다"와 "체결이 없었다"를 구분하지 못한다. 또한 체결 TR의 틱만 근거로 쓴다 — 시간외 `H0STOUP0`은 구분과 무관하게 항상 등록되는 KRX 채널이라 통합 체결의 증거가 아니다). **KRX 조회가 성공했다는 사실만으로는 쓰지 않는다**(`J`는 모든 종목에서 동작하므로 NXT 미상장의 증거가 아니다) | worker-price | worker-price | **7일** |

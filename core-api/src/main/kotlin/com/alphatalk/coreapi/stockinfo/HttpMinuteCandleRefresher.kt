@@ -11,8 +11,8 @@ import java.util.concurrent.TimeUnit
 class HttpMinuteCandleRefresher(
     baseUrl: String,
     connectTimeout: Duration = Duration.ofMillis(500),
-    readTimeout: Duration = Duration.ofMillis(1_000),
-    private val joinTimeout: Duration = Duration.ofMillis(1_000),
+    readTimeout: Duration = Duration.ofSeconds(2),
+    private val joinTimeout: Duration = Duration.ofSeconds(2),
     private val clock: () -> Long = System::currentTimeMillis,
     private val throttleMillis: Long = 1_000,
 ) : MinuteCandleRefresher {

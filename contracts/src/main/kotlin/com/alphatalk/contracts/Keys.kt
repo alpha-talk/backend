@@ -22,6 +22,8 @@ object Keys {
 
     fun minuteRefreshLock(code: String) = "lock:minute-refresh:$code"
 
+    fun minuteRefreshResult(jobId: String) = "minute:refresh:result:$jobId"
+
     fun minuteBackfillLock(code: String) = "lock:minute-backfill:$code"
 
     fun kisRestRate(keyId: String) = "rate:kis-rest:$keyId"

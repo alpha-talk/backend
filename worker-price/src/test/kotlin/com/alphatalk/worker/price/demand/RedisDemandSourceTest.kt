@@ -2,11 +2,14 @@ package com.alphatalk.worker.price.demand
 
 import com.alphatalk.contracts.Channels
 import com.alphatalk.contracts.Keys
+import com.alphatalk.worker.price.candle.RedisMinuteRefreshLock
+import com.alphatalk.worker.price.config.PriceRedisListenerConfig
 import org.awaitility.Awaitility.await
 import org.junit.jupiter.api.AfterAll
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory
+import org.springframework.data.redis.core.ReactiveStringRedisTemplate
 import org.springframework.data.redis.core.StringRedisTemplate
 import org.testcontainers.containers.GenericContainer
 import org.testcontainers.junit.jupiter.Container
@@ -54,7 +57,7 @@ class RedisDemandSourceTest {
         template.opsForHash<String, String>().put(Keys.demandQuote("gw1"), "999999", "0")
         template.opsForHash<String, String>().put(Keys.demandRoom("gw1"), "035420", "1")
 
-        val source = RedisDemandSource(template, factory)
+        val source = RedisDemandSource(template)
         source.refresh()
 
         assertEquals(setOf("000660", "035420"), source.targetSymbols())
@@ -71,7 +74,7 @@ class RedisDemandSourceTest {
         template.opsForHash<String, String>().put(Keys.demandRoom("gw1"), "999999", "0")
         template.opsForHash<String, String>().put(Keys.demandRoom("gw2"), "005930", "3")
 
-        val source = RedisDemandSource(template, factory)
+        val source = RedisDemandSource(template)
         source.refresh()
 
         assertEquals(mapOf("005930" to 5L, "000660" to 1L), source.roomDemand())
@@ -83,7 +86,7 @@ class RedisDemandSourceTest {
         register("gw-dead")
         template.opsForHash<String, String>().put(Keys.demandQuote("gw-dead"), "000660", "3")
 
-        val source = RedisDemandSource(template, factory)
+        val source = RedisDemandSource(template)
         source.refresh()
 
         assertEquals(emptySet(), source.targetSymbols())
@@ -94,7 +97,7 @@ class RedisDemandSourceTest {
         markAlive("gw-unregistered")
         template.opsForHash<String, String>().put(Keys.demandQuote("gw-unregistered"), "000660", "1")
 
-        val source = RedisDemandSource(template, factory)
+        val source = RedisDemandSource(template)
         source.refresh()
 
         assertEquals(emptySet(), source.targetSymbols())
@@ -109,7 +112,7 @@ class RedisDemandSourceTest {
         template.opsForHash<String, String>().put(Keys.demandQuote("gw1"), "000660", "1")
         template.opsForHash<String, String>().put(Keys.demandQuote("gw2"), "035420", "1")
 
-        val source = RedisDemandSource(template, factory)
+        val source = RedisDemandSource(template)
         source.refresh()
 
         assertEquals(setOf("000660", "035420"), source.targetSymbols())
@@ -123,7 +126,7 @@ class RedisDemandSourceTest {
         template.opsForHash<String, String>().put(Keys.demandQuote("gw-live"), "000660", "1")
         template.opsForHash<String, String>().put(Keys.demandQuote("gw-dead"), "035420", "1")
 
-        val source = RedisDemandSource(template, factory)
+        val source = RedisDemandSource(template)
         source.refresh()
 
         assertEquals(setOf("000660"), source.targetSymbols())
@@ -135,7 +138,7 @@ class RedisDemandSourceTest {
         register("gw-dead")
         markAlive("gw-live")
 
-        val source = RedisDemandSource(template, factory)
+        val source = RedisDemandSource(template)
         source.refresh()
 
         assertEquals(setOf("gw-live"), template.opsForSet().members(Keys.GW_REGISTRY))
@@ -147,14 +150,14 @@ class RedisDemandSourceTest {
         register("gw-dead")
         markAlive("gw-revived")
 
-        RedisDemandSource(template, factory).sweepRegistry(listOf("gw-revived", "gw-dead"))
+        RedisDemandSource(template).sweepRegistry(listOf("gw-revived", "gw-dead"))
 
         assertEquals(setOf("gw-revived"), template.opsForSet().members(Keys.GW_REGISTRY))
     }
 
     @Test
     fun `새로 등록된 게이트웨이는 다음 리컨실에 바로 보인다`() {
-        val source = RedisDemandSource(template, factory)
+        val source = RedisDemandSource(template)
         source.refresh()
         assertEquals(emptySet(), source.targetSymbols())
 
@@ -171,7 +174,7 @@ class RedisDemandSourceTest {
         register("gw1")
         markAlive("gw1")
         template.opsForHash<String, String>().put(Keys.demandQuote("gw1"), "000660", "1")
-        val source = RedisDemandSource(template, factory)
+        val source = RedisDemandSource(template)
         source.refresh()
         assertEquals(setOf("000660"), source.targetSymbols())
 
@@ -183,9 +186,15 @@ class RedisDemandSourceTest {
 
     @Test
     fun `demand updated 수신 - 즉시 리컨실해 수요 등장과 소멸을 반영한다`() {
-        val source = RedisDemandSource(template, factory, reconcileIntervalMs = 600_000)
+        val source = RedisDemandSource(template, reconcileIntervalMs = 600_000)
+        val config = PriceRedisListenerConfig()
+        val executor = config.priceRedisListenerExecutor().apply { initialize() }
+        val lock = RedisMinuteRefreshLock(template, ReactiveStringRedisTemplate(factory))
+        val container = config.priceRedisListenerContainer(factory, source, lock, executor)
+        container.afterPropertiesSet()
         source.start()
         try {
+            container.start()
             register("gw1")
             markAlive("gw1")
             template.opsForHash<String, String>().put(Keys.demandQuote("gw1"), "000660", "1")
@@ -196,6 +205,8 @@ class RedisDemandSourceTest {
             template.convertAndSend(Channels.DEMAND_UPDATED, """{"gwId":"gw1","ts":2}""")
             await().atMost(Duration.ofSeconds(5)).until { source.targetSymbols().isEmpty() }
         } finally {
+            container.destroy()
+            executor.shutdown()
             source.stop()
         }
     }

@@ -2,6 +2,7 @@ package com.alphatalk.worker.price.candle
 
 import com.alphatalk.kis.rest.KisMinuteCandle
 import com.alphatalk.worker.price.calendar.MarketCalendar
+import com.alphatalk.worker.price.candle.MinuteRefreshLock.Result
 import com.alphatalk.worker.price.market.MarketDivStore
 import io.micrometer.core.instrument.MeterRegistry
 import org.slf4j.LoggerFactory
@@ -36,8 +37,11 @@ class MinuteCandleRefreshService(
     private val inFlight = ConcurrentHashMap<String, CompletableFuture<Int>>()
     private val lastFetchedAt = ConcurrentHashMap<String, Instant>()
 
-    fun refresh(code: String): Int =
-        coalesced(code, fetchDeadlineMillis) { doRefresh(code, fetchDeadlineMillis, honorFreshness = true) }
+    fun refresh(code: String, onAcquired: () -> Unit = {}): Int =
+        coalesced(code, fetchDeadlineMillis) {
+            onAcquired()
+            doRefresh(code, fetchDeadlineMillis, honorFreshness = true)
+        }
 
     fun syncDay(code: String): Int =
         exclusive(code, dailySyncDeadlineMillis) { doRefresh(code, dailySyncDeadlineMillis, honorFreshness = false) }
@@ -55,14 +59,14 @@ class MinuteCandleRefreshService(
         val mine = CompletableFuture<Int>()
         val existing = inFlight.putIfAbsent(code, mine)
         if (existing != null) return awaitExisting(existing)
-        return runClaimed(code, deadlineMillis, mine, work)
+        return runClaimed(code, deadlineMillis, mine, joinRemote = true, work)
     }
 
     private fun exclusive(code: String, deadlineMillis: Long, work: () -> Int): Int {
         repeat(MAX_CLAIM_ATTEMPTS) {
             val mine = CompletableFuture<Int>()
             val existing = inFlight.putIfAbsent(code, mine)
-            if (existing == null) return runClaimed(code, deadlineMillis, mine, work)
+            if (existing == null) return runClaimed(code, deadlineMillis, mine, joinRemote = false, work)
             runCatching { existing.get(waitTimeoutMillis, TimeUnit.MILLISECONDS) }
         }
         log.warn("minute candle syncDay could not claim in-flight slot: code={}", code)
@@ -81,10 +85,11 @@ class MinuteCandleRefreshService(
         code: String,
         deadlineMillis: Long,
         mine: CompletableFuture<Int>,
+        joinRemote: Boolean,
         work: () -> Int,
     ): Int {
         try {
-            val synced = withDistributedLock(code, deadlineMillis, work)
+            val synced = withDistributedLock(code, deadlineMillis, joinRemote, work)
             mine.complete(synced)
             return synced
         } catch (t: Throwable) {
@@ -95,13 +100,49 @@ class MinuteCandleRefreshService(
         }
     }
 
-    private fun withDistributedLock(code: String, deadlineMillis: Long, work: () -> Int): Int {
-        if (!refreshLock.tryAcquire(code, Duration.ofMillis(deadlineMillis + LOCK_MARGIN_MILLIS))) return 0
-        return try {
-            work()
+    private fun withDistributedLock(code: String, deadlineMillis: Long, joinRemote: Boolean, work: () -> Int): Int {
+        val claim = refreshLock.claim(code, Duration.ofMillis(deadlineMillis + LOCK_MARGIN_MILLIS))
+        if (!claim.acquired) return if (joinRemote) awaitRemote(code, claim.jobId) else 0
+        try {
+            val synced = try {
+                work()
+            } catch (t: Throwable) {
+                recordResult(code, claim.jobId, Result.Failed)
+                throw t
+            }
+            recordResult(code, claim.jobId, Result.Succeeded(synced))
+            return synced
         } finally {
-            refreshLock.release(code)
+            runCatching { refreshLock.release(code, claim.jobId) }
+                .onFailure { log.warn("minute candle lock release failed: code={} jobId={}", code, claim.jobId, it) }
         }
+    }
+
+    private fun recordResult(code: String, jobId: String, result: Result) {
+        runCatching { refreshLock.complete(jobId, result) }
+            .onFailure { log.warn("minute candle result write failed: code={} jobId={}", code, jobId, it) }
+    }
+
+    private fun awaitRemote(code: String, jobId: String): Int {
+        val result = try {
+            refreshLock.awaitResult(jobId, Duration.ofMillis(waitTimeoutMillis))
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            meters.counter("minute.candle.refresh.join", "outcome", "interrupted").increment()
+            return 0
+        } catch (e: Exception) {
+            log.warn("minute candle result read failed: code={} jobId={}", code, jobId, e)
+            meters.counter("minute.candle.refresh.join", "outcome", "redis_error").increment()
+            return 0
+        }
+
+        val outcome = when (result) {
+            is Result.Succeeded -> "success"
+            Result.Failed -> "failed"
+            null -> "timeout"
+        }
+        meters.counter("minute.candle.refresh.join", "outcome", outcome).increment()
+        return (result as? Result.Succeeded)?.synced ?: 0
     }
 
     private fun doRefresh(code: String, deadlineMillis: Long, honorFreshness: Boolean): Int {
