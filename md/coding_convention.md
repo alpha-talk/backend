@@ -25,7 +25,7 @@
 
 ### 설계 의도·불변식·계약은 문서로
 
-포트 계약(예: `WatchlistResolver`는 미존재 유저에 빈 Set 반환), refcount 전이 규칙, persist→publish→ack 같은 **불변식과 근거는 코드 주석이 아니라 설계 문서가 단일 소유**한다:
+포트 계약(예: `WatchlistResolver`는 조회된 유저별 스냅샷을 최대 하나 반환), refcount 전이 규칙, persist→publish→ack 같은 **불변식과 근거는 코드 주석이 아니라 설계 문서가 단일 소유**한다:
 
 - 컴포넌트 책임·포트 계약·동시성 → [ws_architecture.md](ws_architecture.md)
 - 서비스 간 채널·키 계약 → [redis_contract.md](redis_contract.md)

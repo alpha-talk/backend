@@ -60,7 +60,8 @@ class WatchlistRefresh(
         val byId = targets.associateBy { it.userId }
         try {
             val snapshots = resolver.resolve(byId.keys.toList())
-            check(snapshots.size == byId.size && snapshots.map { it.userId }.toSet() == byId.keys) {
+            val resolvedIds = snapshots.map { it.userId }.toSet()
+            check(snapshots.size == resolvedIds.size && byId.keys.containsAll(resolvedIds)) {
                 "Watchlist snapshot response does not match request"
             }
             snapshots.forEach { demand.applyWatchlist(it, byId.getValue(it.userId)) }

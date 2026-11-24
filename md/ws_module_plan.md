@@ -99,7 +99,7 @@ ws/src/main/kotlin/com/alphatalk/ws/
 ├─ relay/           # RedisChannelHandler(P)·{Quote,Stream,Post,WatchlistUpdate}Handler,
 │                   #   ChannelSubscriber(P)·RedisChannelSubscriber, MessageRouter
 ├─ client/          # ClientMessageSink(P)·BrokerMessageSink (브로커 아웃바운드 경계)
-├─ watchlist/       # WatchlistResolver(P)·HttpWatchlistResolver
+├─ watchlist/       # WatchlistResolver(P)·RedisWatchlistResolver
 └─ presence/        # PresenceRegistry(P)·RedisPresenceService
 ```
 
@@ -175,7 +175,7 @@ class WebSocketConfig : WebSocketMessageBrokerConfigurer {
 
 ### 4.5 관심목록 해소 & `watchlist:updated`
 
-- 첫 SUBSCRIBE에서 내부 API로 버전과 전체 종목을 조회하고, 접속 중 변경 이벤트의 스냅샷을 버전 순서로 적용한다.
+- 첫 SUBSCRIBE에서 Redis 스냅샷을 읽고 키 누락 시 내부 API로 복구하며, 접속 중 변경 이벤트의 스냅샷을 버전 순서로 적용한다.
 - Redis 재구독과 주기적 원본 대조로 마지막 이벤트 누락을 복구한다. 상세 계약은 [아키텍처](ws_architecture.md)와 [core-api 명세](alphatalk_core_api_spec.md) 참조.
 
 ### 4.6 Redis 구독 관리 (ChannelSubscriber + MessageRouter)
@@ -214,7 +214,7 @@ Micrometer: `ws.sessions.connected` · `ws.users.connected` · `ws.redis.channel
 | **S2** 인증 | `StompAuthChannelInterceptor` — CONNECT JWT, SUBSCRIBE 화이트리스트, SEND 거부 | 유효/만료/변조 토큰, 미인증 구독, SEND 케이스 테스트 |
 | **S3** 수요 인덱스 | `DemandRegistry` + STOMP 이벤트 리스너, 종료 시 전량 회수 | 구독→인덱스 반영, 멀티세션, 정리 테스트 |
 | **S4** Redis relay | refcount 구독, `post:{code}` → `/topic/rooms/{code}/posts` E2E | Testcontainers: PUBLISH → STOMP MESSAGE 수신, 채널 1회 구독 검증 |
-| **S5** 관심목록 | WatchlistResolver(내부 HTTP 구현), `/user/queue/quote·stream` 라우팅, `watchlist:updated` 반영 | 구독 변경이 재접속 없이 반영 (FR-03 수용 기준) |
+| **S5** 관심목록 | WatchlistResolver(Redis 우선 조회와 내부 HTTP 폴백), `/user/queue/quote·stream` 라우팅, `watchlist:updated` 반영 | 구독 변경이 재접속 없이 반영 (FR-03 수용 기준) |
 | **S6** 경화 | 프레즌스, graceful shutdown, 메트릭, (필요시) quote 샘플러, **구독 실패 복구 사각 계측**([아키텍처 §11.8](ws_architecture.md)) | 느린 클라·재기동 시나리오 테스트 + **결함 주입 3종**: ① 컨테이너 복구 진행 중 새 채널 구독 → 복구 후 그 채널 틱이 도착하는가 ② 연결 장애가 아닌 구독 오류(ACL 거부·커맨드 타임아웃) → 재시도되는가 ③ **여러 종목 관심목록 부착 중 첫 종목 실패** → 복구 후 필요한 모든 종목이 구독되는가. 하나라도 복구되지 않으면 리컨실을 구현해야 S6 종료 |
 | **S7** 통합 검증 | opt-in `:ws:loadTest`로 가짜 price-worker 41종목 틱 fan-out·단일 인스턴스 10,000세션 스모크와 10,000건 단일 락 직접 경합을 분리 검증 | 틱 p95 ≤ 1s, 락 대기 p99 < 100ms·100ms 초과 0건, 프레즌스 실패 0건, outbound 큐가 지속 증가하지 않고 종료 후 세션·동적 구독 회수 |
 
@@ -229,7 +229,7 @@ Micrometer: `ws.sessions.connected` · `ws.users.connected` · `ws.redis.channel
 | 계층 | 대상 | 방법 |
 |---|---|---|
 | 단위 | **DemandRegistry refcount 전이** — `ChannelSubscriber` 포트를 페이크로 주입해 Redis 없이 검증(DIP의 배당금), 인터셉터(인증·화이트리스트·SEND 거부, `TokenVerifier` 페이크), relay 핸들러(`ClientMessageSink` 페이크) | JUnit5 + 수동 페이크/mock |
-| 포트 계약(LSP) | `WatchlistResolver`(미존재 유저 rev 0과 빈 목록)·`TokenVerifier`(유효→userId/무효→예외) 등 포트별 계약 테스트를 **구현 공용**으로 작성 → 임시·실제 구현이 같은 테스트 통과 | 추상 계약 테스트(구현마다 상속) |
+| 포트 계약(LSP) | `WatchlistResolver`(조회된 유저별 스냅샷 최대 하나)·`TokenVerifier`(유효→userId/무효→예외) 등 포트별 계약 테스트를 **구현 공용**으로 작성 → 임시·실제 구현이 같은 테스트 통과 | 추상 계약 테스트(구현마다 상속) |
 | 계약(:contracts) | 봉투 직렬화 왕복, `Channels` 생성·파싱 라운드트립 | `:contracts` 테스트 (워커/메인서버와 공용) |
 | 통합 | PUBLISH→MESSAGE 전달, `/user` 목적지 멀티세션 전달, watchlist:updated 반영, 세션 정리 | Testcontainers(Redis) + `WebSocketStompClient` |
 | 성능 스모크 | 41종목 × 10,000세션 fan-out, 10,000건 동시 단일 락 직접 경합 | `WebSocketStompClient` 통합 테스트 + 가상 스레드 기반 `DemandRegistryLockContentionTest`. opt-in `:ws:loadTest`에서만 실행 |

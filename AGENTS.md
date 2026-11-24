@@ -17,7 +17,7 @@
 | [md/ws_architecture.md](md/ws_architecture.md) | **코드 레벨 설계 기준** — 컴포넌트 책임, 인덱스/동시성, 시퀀스, 에러 정책 |
 | [md/ws_module_plan.md](md/ws_module_plan.md) | 구현 계획 — 단계(S0~S7)별 범위·DoD, 열린 합의 안건 |
 | [md/ws_api_spec.md](md/ws_api_spec.md) | 클라 ↔ 게이트웨이 STOMP 프로토콜 계약 (v0.9) |
-| [md/redis_contract.md](md/redis_contract.md) | 게이트웨이 ↔ 워커 ↔ 메인서버 Redis 계약 — **서비스 간 단일 진실** (v0.24) |
+| [md/redis_contract.md](md/redis_contract.md) | 게이트웨이 ↔ 워커 ↔ 메인서버 Redis 계약 — **서비스 간 단일 진실** (v0.26) |
 | [md/alphatalk_core_api_spec.md](md/alphatalk_core_api_spec.md) | 클라 ↔ 메인서버 REST 계약 (v0.6) — core-api 구현 기준 |
 | [md/alphatalk_kis_worker_spec.md](md/alphatalk_kis_worker_spec.md) | KIS/OpenDART 수집 워커 명세 — 워커 적재 테이블 스키마(§4)의 원천 |
 | [md/alphatalk_news_worker_spec.md](md/alphatalk_news_worker_spec.md) | 뉴스 파이프라인 명세 — worker-ingest·worker-llm (수집·클러스터링·일일 호재/악재 브리핑) |
@@ -54,7 +54,7 @@ backend/
 └─ worker-llm/   [서버]       LLM 요약
 ```
 
-**의존 규칙**: 서버는 라이브러리에만 의존한다 — **서버 → 서버 의존 금지**. `contracts`·`auth-jwt`는 순수(무의존). `ws → contracts·auth-jwt` 단방향. 상세는 [md/기획안.md](md/기획안.md) §3.1. **서버 간 HTTP 예외**는 core-api → worker-price 분봉 신선화 멱등 트리거([KIS 워커 명세](md/alphatalk_kis_worker_spec.md) §2.6)와 WS → core-api 읽기 전용 관심목록 스냅샷 조회([core-api 명세](md/alphatalk_core_api_spec.md) §4)로 제한한다.
+**의존 규칙**: 서버는 라이브러리에만 의존한다 — **서버 → 서버 의존 금지**. `contracts`·`auth-jwt`는 순수(무의존). `ws → contracts·auth-jwt` 단방향. 상세는 [md/기획안.md](md/기획안.md) §3.1. **서버 간 HTTP 예외**는 core-api → worker-price 분봉 신선화 멱등 트리거([KIS 워커 명세](md/alphatalk_kis_worker_spec.md) §2.6)와 WS → core-api Redis 키 누락 시 관심목록 원본 조회([core-api 명세](md/alphatalk_core_api_spec.md) §4)로 제한한다.
 **인증 규칙**: JWT 발급·검증 코드는 반드시 `:auth-jwt`를 쓴다 — 서버마다 따로 구현하면 클레임 스키마가 어긋난다. Boot 자동구성이라 **의존성 추가 + `alphatalk.auth.jwt.secret` 프로퍼티만으로 빈이 등록**된다(결선 코드 작성 금지). ws는 `TokenVerifier` 타입으로만 주입(검증 전용, 발급 금지).
 지금 존재하는 모듈만 `settings.gradle.kts`에 include하고, 나머지 서버는 착수 시점에 등록한다 (M0 스캐폴딩: `contracts → ws → core-api`).
 
@@ -63,7 +63,7 @@ backend/
 ## 불변 규칙 (어기면 설계 위반)
 
 1. **푸시 전용 엣지**: 클라 SEND 프레임은 무조건 거부. 콘텐츠를 받는 코드를 만들지 않는다.
-2. **게이트웨이의 Redis 사용은 Pub/Sub SUBSCRIBE + 프레즌스·수요(demand) 쓰기만**: 수요 쓰기는 `demand:*:{gwId}` refcount·`demand:updated` 전이 발행·`gw:alive:{gwId}` 하트비트·`gw:registry` 자기 gwId 등록/철수([redis_contract.md](md/redis_contract.md) §1.3·§3 v0.20)로 한정. DB 접근, `queue:ingest`(Streams), `price:{code}` 캐시 읽기 코드 금지.
+2. **게이트웨이의 Redis 사용은 Pub/Sub SUBSCRIBE + 관심목록 스냅샷 읽기 + 프레즌스·수요(demand) 쓰기만**: 수요 쓰기는 `demand:*:{gwId}` refcount·`demand:updated` 전이 발행·`gw:alive:{gwId}` 하트비트·`gw:registry` 자기 gwId 등록/철수([redis_contract.md](md/redis_contract.md) §1.3·§3 v0.20)로 한정. DB 접근, `queue:ingest`(Streams), `price:{code}` 캐시 읽기 코드 금지.
 3. **채널명·키·목적지 문자열 하드코딩 금지**: 반드시 `:contracts`의 `Channels`/`Keys`/`Destinations` 상수 사용.
 4. **best-effort 푸시**: 재전송·전달 보장 로직을 만들지 않는다. 유실 복구는 클라의 REST 몫.
 5. **보안**: JWT는 STOMP CONNECT 헤더로만 받는다 (URL 쿼리파라미터 금지). 토큰 원문·시크릿 로그 금지. 시크릿은 환경변수 주입.

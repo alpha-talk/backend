@@ -1,6 +1,8 @@
-# Alpha Talk — Redis 계약 (`:contracts`) v0.25
+# Alpha Talk — Redis 계약 (`:contracts`) v0.26
 
-> v0.25 (2026-11-17): PostgreSQL에 수집본이 있는 RSS 기사의 `seen:ingest:{sourceId}` 값은 스트림 항목 ID다. Redis 단일 실행에서 그 항목의 존재를 확인하고, 없으면 XADD 후 마커를 갱신한다. 구버전 값 `1`에는 항목 ID가 없어 재적재할 수 있다. 다이제스트 마커와 큐 엔트리 스키마는 기존 규약을 유지한다.
+> v0.26 (2026-11-24): PostgreSQL에 수집본이 있는 RSS 기사의 `seen:ingest:{sourceId}` 값은 스트림 항목 ID다. Redis 단일 실행에서 그 항목의 존재를 확인하고, 없으면 XADD 후 마커를 갱신한다. 구버전 값 `1`에는 항목 ID가 없어 재적재할 수 있다. 다이제스트 마커와 큐 엔트리 스키마는 기존 규약을 유지한다.
+
+> v0.25 (2026-11-24): 게이트웨이의 관심목록 조회를 Redis 스냅샷 우선으로 전환한다. 키 누락은 core-api 배치 API로 복구한다.
 
 > v0.24 (2026-11-11): `watchlist:updated`는 DB 커밋 후 발행하는 전체 관심목록 스냅샷이다. 기존 diff 이벤트와 미러 키를 폐기한다. 배포 시 core-api와 WS를 함께 전환한다.
 
@@ -76,7 +78,7 @@ Redis를 세 가지 용도로 쓴다. **이름이 비슷해도 메커니즘이 �
 - `{code}` = 종목코드(예: `005930`). **유저로 키하지 않는다** — 채널 수는 종목 수(~2,600)로 고정되고 유저 수와 무관하다.
 - 같은 종목을 N명이 봐도 게이트웨이는 채널을 **한 번만 구독**하고 N명에게 fan-out한다(중복 제거).
 - 유저별 채널을 만들면 채널이 폭증하므로 `watchlist:updated`만 **단일 전역 채널 + broadcast-and-filter**다. 발행 빈도가 낮아 전원 수신·필터로 충분하다.
-- 게이트웨이는 `watchlist:updated`의 전체 목록을 현재 목록과 비교하여 수요를 조정한다. 이미 적용한 rev 이하인 이벤트는 무시한다.
+- core-api는 Redis 스냅샷을 반영한 뒤 `watchlist:updated`를 발행한다. 게이트웨이는 전체 목록을 현재 목록과 비교하여 수요를 조정한다. 이미 적용한 rev 이하인 이벤트는 무시한다.
 
 ### 1.2 메시지 스키마 (Pub/Sub payload)
 
@@ -185,6 +187,7 @@ ingest-worker 스케줄러(싱글턴)가 매일 적재하고 — 종목 잡은 1
 | 키 | 타입 | 용도 | 쓰기 | 읽기 | TTL |
 |---|---|---|---|---|---|
 | `price:{code}` | Hash/String | 현재가 last-value 캐시(스냅샷) | price-worker | 메인서버(REST 현재가) | 갱신/없음 |
+| `watchlist:snapshot:{userId}` | String (JSON) | DB 관심목록 사본. 값은 `watchlist:updated`와 같은 `{userId, rev, codes}` | core-api | 게이트웨이 | 300~359초 (유저 ID 기준 분산, 읽기 시 연장 없음) |
 | `presence:{userId}` | Set(+멤버 TTL) | 접속 세션 집합(멀티디바이스) | 게이트웨이 | 게이트웨이 | 하트비트로 갱신 |
 | `cursor:{userId}:{code}` | String | 마지막 읽은 `eventId`(읽음 위치) — **fast path 미러**, 진실은 DB `read_cursor` | 메인서버(REST) | 메인서버 | **1일** — 쓰기·재적재 시 갱신. 미러 SET 실패로 stale해져도 TTL 만료 후 DB에서 재적재되어 자가 치유 |
 | `seen:ingest:{sourceId}` | String | 적재 중복 제거 마커. DB에 저장한 RSS 기사는 스트림 항목 ID, 일일 다이제스트 잡은 `1` (§2.1) | ingest-worker | ingest-worker | 기본 7일 |
@@ -210,6 +213,13 @@ ingest-worker 스케줄러(싱글턴)가 매일 적재하고 — 종목 잡은 1
 - 봉(OHLCV)은 KIS에서 받아 캐시하되, 권위 있는 가격 저장소로 쓰지 않는다(틱은 영속화 안 함).
 - 메인서버 **전용** 키(서비스 간 계약 아님 — 게이트웨이·워커는 접근 금지): `rl:{action}:{key}:{windowIndex}`(레이트리밋 고정 윈도 카운터, TTL=윈도), `badge:{userId}`(미읽음 배지 집계 캐시, TTL 10초 — 커서 전진·모두 읽음 시 DEL). 둘 다 `:contracts` `Keys` 생성 함수 사용. 멱등 응답은 Redis가 아니라 DB 원장(`idempotency_record`)이다 — core-api 명세 §1.6.
 
+### 3.1 관심목록 스냅샷
+
+- core-api는 관심목록과 `watchlist_rev`를 커밋한 뒤 단일 키 Lua 스크립트로 Redis의 rev를 비교한다. 더 최신인 값은 유지하고, 같거나 새로 반영된 버전의 전체 목록을 발행한다. 잘못된 Redis 자료형은 이 갱신 경로에서 스냅샷으로 교체한다. 중복 발행은 WS의 rev 검사로 흡수한다.
+- DB에는 유저당 하나의 Redis 반영 대기 표시를 같은 트랜잭션에서 남긴다. Redis 반영과 발행이 성공하면 처리한 rev의 표시를 지운다. 중단이나 응답 유실 이후 최신 DB 스냅샷을 재시도한다. 여러 core-api 인스턴스가 같은 작업을 읽어도 Redis 버전과 DB 완료 확인 조건으로 역행을 막는다.
+- 게이트웨이는 최초 구독과 재검증에서 최대 100개 키를 한 번에 읽고, 정상 Redis 응답에서 누락된 유저만 기존 내부 API에 요청한다. 빈 목록도 스냅샷 값으로 저장한다. API는 DB 원본을 읽어 누락 키만 TTL과 함께 채운다. Redis 조회 자체가 실패하면 기존 로컬 목록을 유지하고 재검증한다.
+- Redis 키 초기화는 활성 유저부터 조회 시 복구한다. 이전 백업 복원이나 구버전 core-api의 변경으로 남은 오래된 키는 TTL 만료 후 원본으로 다시 채운다. 롤링 배포는 DB 마이그레이션과 core-api를 먼저 적용하고 게이트웨이를 전환한다.
+
 ---
 
 ## 4. 생산자 / 소비자 매트릭스
@@ -219,6 +229,7 @@ ingest-worker 스케줄러(싱글턴)가 매일 적재하고 — 종목 잡은 1
 | `quote:{code}` (P/S) | **PUBLISH** | — | — | — | — | **SUBSCRIBE** |
 | `stream:{code}` (P/S) | — | **PUBLISH**(투자의견) | — | **PUBLISH** | — | **SUBSCRIBE** |
 | `post:{code}` (P/S) | — | — | — | — | **PUBLISH** | **SUBSCRIBE** |
+| `watchlist:snapshot:{userId}` (자료구조) | — | — | — | — | **WRITE/READ** | **READ** |
 | `watchlist:updated` (P/S) | — | — | — | — | **PUBLISH** | **SUBSCRIBE** |
 | `trade/depth:{code}` (P/S) | **PUBLISH** | — | — | — | — | **SUBSCRIBE** |
 | `queue:ingest` (Stream) | — | — | **XADD** | **XREADGROUP/XACK** (`g:llm`) | — | — |
@@ -237,7 +248,7 @@ ingest-worker 스케줄러(싱글턴)가 매일 적재하고 — 종목 잡은 1
 | `gw:alive:{gwId}` (자료구조) | READ | — | — | — | — | **WRITE** |
 | `gw:registry` (자료구조) | READ/SREM(청소) | — | — | — | — | **SADD/SREM** |
 
-게이트웨이는 **Pub/Sub SUBSCRIBE만** 한다(+프레즌스·수요 쓰기, `demand:updated` 발행). Streams·DB 쓰기는 만지지 않는다.
+게이트웨이의 Redis 접근 범위는 Pub/Sub 구독, 관심목록 스냅샷 읽기, 프레즌스·수요 갱신과 `demand:updated` 발행이다.
  
 ---
 
