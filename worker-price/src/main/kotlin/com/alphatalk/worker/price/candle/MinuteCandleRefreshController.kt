@@ -22,8 +22,8 @@ class MinuteCandleRefreshController(
         if (!universe.contains(code)) {
             throw ResponseStatusException(HttpStatus.NOT_FOUND, "상장 종목이 아니다")
         }
-        backfill.requestAsync(code)
-        return mapOf("synced" to service.refresh(code))
+        val synced = service.refresh(code) { backfill.requestAsync(code) }
+        return mapOf("synced" to synced)
     }
 
     private companion object {

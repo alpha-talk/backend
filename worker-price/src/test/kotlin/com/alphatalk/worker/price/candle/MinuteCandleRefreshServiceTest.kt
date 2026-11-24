@@ -3,6 +3,7 @@ package com.alphatalk.worker.price.candle
 import com.alphatalk.kis.rest.KisMinuteCandle
 import com.alphatalk.kis.rest.KisMinuteChart
 import com.alphatalk.worker.price.calendar.MarketCalendar
+import com.alphatalk.worker.price.candle.MinuteRefreshLock.Result
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import java.time.LocalTime
 import java.time.ZoneId
@@ -15,6 +16,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -112,16 +114,26 @@ class MinuteCandleRefreshServiceTest {
     private fun krxDivs(code: String = "005930", date: String = "20260804") =
         InMemoryMarketDivs().apply { put(code, date, "J") }
 
-    private class FakeRefreshLock(private val acquirable: Boolean = true) : MinuteRefreshLock {
+    private class FakeRefreshLock(
+        private val acquirable: Boolean = true,
+        private val joinedResult: Result? = null,
+    ) : MinuteRefreshLock {
         val acquired = AtomicInteger()
         val released = AtomicInteger()
+        var completed: Result? = null
 
-        override fun tryAcquire(code: String, ttl: java.time.Duration): Boolean {
+        override fun claim(code: String, ttl: java.time.Duration): MinuteRefreshLock.Claim {
             if (acquirable) acquired.incrementAndGet()
-            return acquirable
+            return MinuteRefreshLock.Claim("job-id", acquired = acquirable)
         }
 
-        override fun release(code: String) {
+        override fun complete(jobId: String, result: Result) {
+            completed = result
+        }
+
+        override fun awaitResult(jobId: String, timeout: java.time.Duration): Result? = joinedResult
+
+        override fun release(code: String, jobId: String) {
             released.incrementAndGet()
         }
     }
@@ -307,6 +319,52 @@ class MinuteCandleRefreshServiceTest {
 
         assertEquals(0, service.refresh("005930"))
         assertEquals(0, fetcher.calls.get())
+    }
+
+    @Test
+    fun `다른 워커의 작업에 합류하면 적재 건수를 공유하고 백필도 예약하지 않는다`() {
+        val fetcher = PagingFetcher()
+        val lock = FakeRefreshLock(acquirable = false, joinedResult = Result.Succeeded(5))
+
+        val synced = service(fetcher, InMemoryMinuteStore(), lock = lock).refresh("005930") {
+            error("joined requests must not schedule backfill")
+        }
+
+        assertEquals(5, synced)
+        assertEquals(0, fetcher.calls.get())
+        assertEquals(0, lock.released.get())
+    }
+
+    @Test
+    fun `다른 워커가 실패하면 재수집하지 않고 0을 반환한다`() {
+        val fetcher = PagingFetcher()
+        val lock = FakeRefreshLock(acquirable = false, joinedResult = Result.Failed)
+
+        assertEquals(0, service(fetcher, InMemoryMinuteStore(), lock = lock).refresh("005930"))
+        assertEquals(0, fetcher.calls.get())
+    }
+
+    @Test
+    fun `정상 적재 0건도 성공으로 기록한다`() {
+        val lock = FakeRefreshLock()
+        val fetcher = MinuteCandleFetcher { _, _, _ -> KisMinuteChart(0, emptyList()) }
+
+        assertEquals(0, service(fetcher, InMemoryMinuteStore(), lock = lock).refresh("005930"))
+        assertEquals(Result.Succeeded(0), lock.completed)
+    }
+
+    @Test
+    fun `선행 워커의 예외는 실패 결과를 기록하고 락을 해제한 뒤 전파한다`() {
+        val lock = FakeRefreshLock()
+        val fetcher = MinuteCandleFetcher { _, _, _ -> error("KIS unavailable") }
+
+        val failure = assertFailsWith<IllegalStateException> {
+            service(fetcher, InMemoryMinuteStore(), lock = lock).refresh("005930")
+        }
+
+        assertEquals("KIS unavailable", failure.message)
+        assertEquals(Result.Failed, lock.completed)
+        assertEquals(1, lock.released.get())
     }
 
     @Test
