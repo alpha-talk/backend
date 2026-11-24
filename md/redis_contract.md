@@ -2,6 +2,8 @@
 
 > v0.27 (2026-11-25): 분봉 신선화 락에 실행별 작업 ID를 저장하고, 작업 ID별 완료 결과와 알림 채널을 추가한다(§1.4·§3).
 
+> v0.26 (2026-11-24): PostgreSQL에 수집본이 있는 RSS 기사의 `seen:ingest:{sourceId}` 값은 스트림 항목 ID다. Redis 단일 실행에서 그 항목의 존재를 확인하고, 없으면 XADD 후 마커를 갱신한다. 구버전 값 `1`에는 항목 ID가 없어 재적재할 수 있다. 다이제스트 마커와 큐 엔트리 스키마는 기존 규약을 유지한다.
+
 > v0.25 (2026-11-24): 게이트웨이의 관심목록 조회를 Redis 스냅샷 우선으로 전환한다. 키 누락은 core-api 배치 API로 복구한다.
 
 > v0.24 (2026-11-11): `watchlist:updated`는 DB 커밋 후 발행하는 전체 관심목록 스냅샷이다. 기존 diff 이벤트와 미러 키를 폐기한다. 배포 시 core-api와 WS를 함께 전환한다.
@@ -123,10 +125,10 @@ Redis를 세 가지 용도로 쓴다. **이름이 비슷해도 메커니즘이 �
 | 키 | `queue:ingest` |
 | 적재 | `XADD` (생산자: **ingest-worker**) |
 | 소비 | `XREADGROUP` (소비자 그룹 **`g:llm`**, 멤버: **llm-worker** ×N) |
-| 완료 | `XACK queue:ingest g:llm <id>` |
-| 장애 회수 | `XPENDING`으로 idle 임계 초과 엔트리를 찾고 `XCLAIM`으로 다른 워커가 회수 |
-| 트림 | `XADD ... MAXLEN ~ N` 또는 주기적 `XTRIM` (이미 처리된 건은 DB에 있으므로 큐는 유한 보관) |
-| poison 격리 | delivery count > 5 엔트리는 llm-worker가 `queue:ingest:dlq`로 XADD 후 원큐 XACK — DLQ는 소비자 없음(수동 점검 + 알람) |
+| 완료 | RSS 수집본의 처리 결과를 PostgreSQL에 기록한 뒤 `XACK queue:ingest g:llm <id>` |
+| 장애 회수 | `XPENDING`으로 idle 임계 초과 엔트리를 찾고 `XCLAIM`으로 다른 워커가 회수. 스트림 항목이 사라진 미종결 RSS 수집본은 DB에서 재적재 |
+| 트림 | `XADD ... MAXLEN ~ N` 또는 주기적 `XTRIM`으로 큐를 유한 보관 |
+| poison 격리 | delivery count > 5 엔트리는 `queue:ingest:dlq`로 XADD하고, RSS 수집본이 있으면 DB에 `FAILED`를 기록한 뒤 원큐 XACK. DLQ는 수동 점검 및 알람에 사용 |
 
 ### 2.1 큐 엔트리 스키마 (ingest-worker가 XADD)
 
@@ -144,7 +146,7 @@ Streams 필드는 문자열이다. 한 엔트리 = "가공해야 할 원본 소�
 | `fetchedAt` | `1719500000000` | 수집 시각(epoch ms) |
 | `macroHint` *(예약)* | `"금리"` | v0.6부터 수집기가 적재하지 않는 예약 필드 — 소비 측 파서는 하위 호환으로 계속 허용한다 |
 
-적재는 종류와 무관하게 `seen:ingest:{sourceId}` 확인 → `XADD queue:ingest` → 마커 기록을 Redis 단일 실행으로 직렬화한다(v0.23 — 기사·다이제스트 공통). XADD보다 마커를 먼저 기록하지 않는다. XADD 실패에는 마커가 남지 않아 다음 폴링·재조정이 다시 시도하고, 마커 기록 실패 뒤 중복 XADD는 소비 측 멱등(§2.2)으로 흡수한다. 이 단일 실행은 `seen:ingest:*`와 `queue:ingest` 두 키를 한 스크립트에서 만지므로 **단일 Redis(비클러스터) 전제**다 — 클러스터 전환 시 CROSSSLOT으로 깨지며, 해시 태그로 같은 슬롯을 보장하거나 2단계 적재로 되돌리고 유실 창을 다시 검토해야 한다.
+적재는 `seen:ingest:{sourceId}` 확인 → `XADD queue:ingest` → 마커 기록을 Redis 스크립트로 직렬화한다. 다이제스트는 값 `1`인 마커로 중복 적재를 건너뛴다. DB에 저장한 RSS 기사는 마커에 스트림 항목 ID를 기록하며, 그 ID가 `XRANGE`에서 조회될 때 중복으로 처리한다. 스트림 항목이 사라졌거나 기존 마커 값이 `1`이면 적재를 다시 시도할 수 있다. 마커는 XADD 이후에만 쓰며 중복 전달은 소비자가 흡수한다(§2.2). 두 키를 한 스크립트에서 사용하므로 **단일 Redis(비클러스터)를 전제**한다.
 
 ### 2.2 llm-worker 처리 순서 (★ persist → publish → ack)
 
@@ -152,11 +154,11 @@ Streams 필드는 문자열이다. 한 엔트리 = "가공해야 할 원본 소�
 
 ```
 1. XREADGROUP 으로 엔트리 1건 수신 (g:llm — 한 건은 한 워커만)
-2. 멱등 체크: sourceId 기준 (seen:ingest:{sourceId} 또는 upsert로 흡수)
+2. 멱등 체크: sourceId 기준 (RSS 수집본의 기존 처리 결과 및 가공 데이터 upsert)
 3. LLM 호출: 요약(summary) + 분류(category) → StreamEvent 생성 (eventId = ULID)
 4. ① Postgres 저장        (persist — 진실의 원천)
 5. ② PUBLISH stream:{code} (영향 종목 each — 실시간 통보, 실패해도 REST 복구)
-6. ③ XACK queue:ingest g:llm <id>   (저장+발행 성공 후에만 완료 확정)
+6. ③ RSS 수집본의 처리 완료를 PostgreSQL에 기록한 뒤 XACK queue:ingest g:llm <id>
 ```
 
 - **순서 불변식**: 저장(4) → 발행(5) → ACK(6). 4~5 사이/5~6 사이에서 워커가 죽으면 **XACK가 안 됐으니 엔트리는 PEL에 남아 재처리**된다 → 유실 없음.
@@ -194,7 +196,7 @@ ingest-worker 스케줄러(싱글턴)가 매일 적재하고 — 종목 잡은 1
 | `watchlist:snapshot:{userId}` | String (JSON) | DB 관심목록 사본. 값은 `watchlist:updated`와 같은 `{userId, rev, codes}` | core-api | 게이트웨이 | 300~359초 (유저 ID 기준 분산, 읽기 시 연장 없음) |
 | `presence:{userId}` | Set(+멤버 TTL) | 접속 세션 집합(멀티디바이스) | 게이트웨이 | 게이트웨이 | 하트비트로 갱신 |
 | `cursor:{userId}:{code}` | String | 마지막 읽은 `eventId`(읽음 위치) — **fast path 미러**, 진실은 DB `read_cursor` | 메인서버(REST) | 메인서버 | **1일** — 쓰기·재적재 시 갱신. 미러 SET 실패로 stale해져도 TTL 만료 후 DB에서 재적재되어 자가 치유 |
-| `seen:ingest:{sourceId}` | String | 적재 중복 제거 마커 — 기사 sourceId뿐 아니라 일일 다이제스트 잡(`digest:{code}:{date}`)도 같은 마커로 하루 1회를 고정한다(뉴스 워커 명세 §4.1) | ingest/llm-worker | ingest/llm-worker | 며칠 |
+| `seen:ingest:{sourceId}` | String | 적재 중복 제거 마커. DB에 저장한 RSS 기사는 스트림 항목 ID, 일일 다이제스트 잡은 `1` (§2.1) | ingest-worker | ingest-worker | 기본 7일 |
 | `lock:cluster:{code}` | String (`SET NX PX 3000`) | 뉴스 클러스터 판정 직렬화 락(뉴스 워커 명세 §3.3) | llm-worker | llm-worker | 3초 |
 | `rate:article-fetch:{host}` | String (`SET PX`) | robots.txt·원문 fetch의 호스트별 다음 요청 간격을 llm-worker 인스턴스 간 직렬화 | llm-worker | llm-worker | 요청 간격(기본 1초) |
 | `rate:kis-rest:{keyId}` | Hash(token bucket) | 같은 KIS 계정을 쓰는 price·batch 프로세스의 일반 REST 합산 유량 제한 | price/batch-worker | price/batch-worker | 마지막 소비 후 2분 |
@@ -242,7 +244,7 @@ ingest-worker 스케줄러(싱글턴)가 매일 적재하고 — 종목 잡은 1
 | `price:{code}` (자료구조) | **WRITE** | — | — | — | READ | — |
 | `presence:{userId}` (자료구조) | — | — | — | — | — | **WRITE/READ** |
 | `cursor:{userId}:{code}` | — | — | — | — | **WRITE/READ** | — |
-| `seen:ingest:{sourceId}` | — | — | WRITE | WRITE/READ | — | — |
+| `seen:ingest:{sourceId}` | — | — | READ/WRITE | — | — | — |
 | `lock:cluster:{code}` | — | — | — | **WRITE/READ** | — | — |
 | `rate:article-fetch:{host}` | — | — | — | **WRITE/READ** | — | — |
 | `rate:kis-rest:{keyId}` | **WRITE/READ** | **WRITE/READ** | — | — | — | — |

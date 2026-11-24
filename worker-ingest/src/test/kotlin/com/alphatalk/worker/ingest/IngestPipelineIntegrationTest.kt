@@ -7,9 +7,6 @@ import com.alphatalk.contracts.queue.IngestType
 import com.alphatalk.worker.ingest.config.IngestProperties
 import com.alphatalk.worker.ingest.queue.EnqueueResult
 import com.alphatalk.worker.ingest.queue.RedisIngestQueue
-import com.alphatalk.worker.ingest.scheduler.IngestPoller
-import com.alphatalk.worker.ingest.source.FetchedArticle
-import com.alphatalk.worker.ingest.source.NewsSource
 import org.junit.jupiter.api.AfterAll
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -100,24 +97,18 @@ class IngestPipelineIntegrationTest {
     }
 
     @Test
-    fun `재수집 멱등 - 같은 기사 두 번 폴링에 큐 적재 1건`() {
-        val article = FetchedArticle(title = "삼성전자 수주", url = "https://example.com/1")
-        val source = object : NewsSource {
-            override val name = "hankyung"
-            override fun fetchLatest() = listOf(article)
-        }
-        val poller = IngestPoller(
-            sources = listOf(source),
-            queue = RedisIngestQueue(template, props),
-            props = props,
-            fetchExecutor = { it.run() },
-        )
+    fun `수집본이 있는 기사는 마커가 남아 있어도 스트림 항목이 유실되면 재적재한다`() {
+        val queue = RedisIngestQueue(template, props)
+        val entry = newsEntry()
 
-        poller.pollOnce()
-        poller.pollOnce()
+        assertEquals(EnqueueResult.ENQUEUED, queue.enqueueCaptured(entry))
+        assertEquals(EnqueueResult.ALREADY_ENQUEUED, queue.enqueueCaptured(entry))
 
-        val size = template.opsForStream<String, String>().size(Queues.INGEST)
-        assertEquals(1L, size)
+        template.delete(Queues.INGEST)
+
+        assertEquals(EnqueueResult.ENQUEUED, queue.enqueueCaptured(entry))
+        val records = template.opsForStream<String, String>().range(Queues.INGEST, Range.unbounded())!!
+        assertEquals(entry, IngestQueueEntry.fromFields(records.single().value))
     }
 
     @Test

@@ -34,7 +34,9 @@ class MasterChangelogTest {
         withFreshDatabase("full_apply") { connection ->
             update(connection)
 
-            assertEquals(31, appliedChangeSetCount(connection))
+            assertEquals(32, appliedChangeSetCount(connection))
+            assertTrue(tableExists(connection, "news_ingest_feed"))
+            assertTrue(tableExists(connection, "news_ingest_inbox"))
             assertTrue(tableExists(connection, "news_cluster"))
             assertTrue(tableExists(connection, "stream_event"))
             assertTrue(tableExists(connection, "market_digest"))

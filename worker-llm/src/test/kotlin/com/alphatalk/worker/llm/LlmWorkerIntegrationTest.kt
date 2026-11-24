@@ -15,6 +15,7 @@ import com.alphatalk.worker.llm.cluster.ClusterAssigner
 import com.alphatalk.worker.llm.cluster.ClusterStore
 import com.alphatalk.worker.llm.cluster.StockVerdictWrite
 import com.alphatalk.worker.llm.config.LlmProperties
+import com.alphatalk.worker.llm.consume.CapturedArticleReceipts
 import com.alphatalk.worker.llm.consume.IngestConsumer
 import com.alphatalk.worker.llm.enrich.ClusterSummarizer
 import com.alphatalk.worker.llm.enrich.DigestProcessor
@@ -69,6 +70,9 @@ import kotlin.test.assertTrue
 )
 @Testcontainers(disabledWithoutDocker = true)
 class LlmWorkerIntegrationTest {
+    @Autowired
+    private lateinit var receipts: CapturedArticleReceipts
+
     companion object {
         @Container
         @ServiceConnection
@@ -222,6 +226,16 @@ class LlmWorkerIntegrationTest {
     }
 
     @Test
+    fun `Redis 스트림이 초기화되면 그룹을 재생성해 재적재 기사를 처리한다`() {
+        redisTemplate.delete(Queues.INGEST)
+        xadd(newsEntry("hankyung:redis-recovery", "삼성전자 대규모 수주"))
+
+        assertEquals(0, consumer.pollOnce())
+        assertEquals(1, consumer.pollOnce())
+        assertEquals(1, newsEventCount("005930"))
+    }
+
+    @Test
     fun `FR-11 - 동일 sourceId 중복 요약 0건 + 발행 E2E`() {
         val received = LinkedBlockingQueue<String>()
         val listener = RedisMessageListenerContainer().apply {
@@ -347,6 +361,7 @@ class LlmWorkerIntegrationTest {
                 poisonMaxDeliveries = 1,
                 claimIdle = Duration.ZERO,
             ),
+            receipts = receipts,
             consumerName = "poison-test",
         )
         val badDigest = mapOf(

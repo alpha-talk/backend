@@ -9,6 +9,7 @@ import com.alphatalk.worker.llm.enrich.DigestProcessor
 import com.alphatalk.worker.llm.enrich.MarketDigestProcessor
 import com.alphatalk.worker.llm.enrich.NewsProcessor
 import io.lettuce.core.RedisBusyException
+import io.lettuce.core.RedisCommandExecutionException
 import io.micrometer.core.instrument.MeterRegistry
 import org.slf4j.LoggerFactory
 import org.springframework.data.domain.Range
@@ -32,6 +33,7 @@ class IngestConsumer(
     private val marketDigest: MarketDigestProcessor,
     private val meters: MeterRegistry,
     props: LlmProperties,
+    private val receipts: CapturedArticleReceipts,
     val consumerName: String = ManagementFactory.getRuntimeMXBean().name,
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
@@ -58,13 +60,24 @@ class IngestConsumer(
     }
 
     fun pollOnce(): Int {
-        val records = redis.opsForStream<String, String>().read(
+        val records = try {
+            readNewRecords()
+        } catch (failure: Exception) {
+            val missingGroup = generateSequence<Throwable>(failure) { it.cause }
+                .any { it is RedisCommandExecutionException && it.message?.startsWith("NOGROUP") == true }
+            if (!missingGroup) throw failure
+            ensureGroup()
+            return 0
+        }
+        return records.count(::handle)
+    }
+
+    private fun readNewRecords(): List<MapRecord<String, String, String>> =
+        redis.opsForStream<String, String>().read(
             Consumer.from(Queues.INGEST_GROUP_LLM, consumerName),
             StreamReadOptions.empty().count(batch.toLong()).block(block),
             StreamOffset.create(Queues.INGEST, ReadOffset.lastConsumed()),
         ).orEmpty()
-        return records.count(::handle)
-    }
 
     fun claimStale(): Int {
         val pending = runCatching {
@@ -101,6 +114,7 @@ class IngestConsumer(
         }
         return runCatching {
             when {
+                entry.type == IngestType.NEWS -> processArticle(entry)
                 entry.type != IngestType.DIGEST -> news.process(entry)
                 entry.codes.singleOrNull() == IngestQueueEntry.MARKET_CODE -> marketDigest.process(entry)
                 else -> digest.process(entry)
@@ -124,6 +138,12 @@ class IngestConsumer(
         )
     }
 
+    private fun processArticle(entry: IngestQueueEntry) {
+        if (receipts.findOutcome(entry.sourceId) != null) return
+        news.process(entry)
+        receipts.resolve(entry.sourceId, "COMPLETED")
+    }
+
     fun samplePending(): Long {
         val summary = runCatching {
             redis.opsForStream<String, String>().pending(Queues.INGEST, Queues.INGEST_GROUP_LLM)
@@ -132,10 +152,17 @@ class IngestConsumer(
     }
 
     private fun quarantine(record: MapRecord<String, String, String>, reason: String) {
+        val sourceId = record.value[IngestQueueEntry.FIELD_SOURCE_ID]
+            ?.takeIf { record.value[IngestQueueEntry.FIELD_TYPE] == IngestType.NEWS.value }
+        if (sourceId != null && receipts.findOutcome(sourceId) != null) {
+            ack(record.id)
+            return
+        }
         log.warn("quarantine to DLQ: id={} reason={}", record.id, reason)
         redis.opsForStream<String, String>().add(
             StreamRecords.mapBacked<String, String, String>(record.value).withStreamKey(Queues.INGEST_DLQ),
         )
+        sourceId?.let { receipts.resolve(it, "FAILED") }
         ack(record.id)
         meters.counter("llm.dlq").increment()
     }
