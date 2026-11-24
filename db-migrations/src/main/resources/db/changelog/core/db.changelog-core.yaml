@@ -69,3 +69,10 @@ databaseChangeLog:
         - sqlFile:
             path: sql/0010_invest_opinion_bound_collected.sql
             relativeToChangelogFile: true
+  - changeSet:
+      id: 0011-watchlist-redis-pending
+      author: core-api
+      changes:
+        - sqlFile:
+            path: sql/0011_watchlist_redis_pending.sql
+            relativeToChangelogFile: true
